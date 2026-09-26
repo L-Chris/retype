@@ -34,6 +34,12 @@ struct Cli {
     bench: bool,
     no_cloud: bool,
     context: Option<String>,
+    /// 覆盖 `DecodeOptions::word_bonus`，用来现场调参
+    word_bonus: Option<f32>,
+    /// 覆盖 k-best 宽度
+    kbest: Option<usize>,
+    /// `--explain <拼音>`：打印候选的音节切分与得分后退出
+    explain: Option<String>,
 }
 
 impl Default for Cli {
@@ -44,6 +50,9 @@ impl Default for Cli {
             bench: false,
             no_cloud: false,
             context: None,
+            word_bonus: None,
+            kbest: None,
+            explain: None,
         }
     }
 }
@@ -62,6 +71,11 @@ retype-diag —— retype 输入内核的终端调试台
   --bench     跑一遍首刷延迟基准后退出
   --no-cloud  完全关闭云端，模拟断网
   --context   预设光标前文，用来观察二刷的重排效果
+  --wb <f>    覆盖每词加分 word_bonus（默认取 DecodeOptions 的值）
+              unigram 模型每多切一个词就白扣一次 ln(总词频)≈17.9，
+              word_bonus 是这个偏差的部分补偿：太小 → 垃圾长词条压过常用词，
+              太大 → 退化成全单字。用 --explain 观察逐边得分来调。
+  --k <n>     覆盖 k-best 宽度
 
 REPL 命令:
   <字母>        当成拼音输入，例如  nihaomashijie
@@ -79,6 +93,18 @@ REPL 命令:
   :q            退出
 "
     );
+}
+
+/// 把 CLI 覆盖项套到解码参数上，便于现场调参而不用重新编译。
+fn decode_options(cli: &Cli) -> retype_pinyin::DecodeOptions {
+    let mut o = retype_pinyin::DecodeOptions::default();
+    if let Some(wb) = cli.word_bonus {
+        o.word_bonus = wb;
+    }
+    if let Some(k) = cli.kbest {
+        o.k = k;
+    }
+    o
 }
 
 fn parse_args(argv: &[String]) -> Result<Cli, String> {
@@ -102,6 +128,21 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
             "--bench" => c.bench = true,
             "--no-cloud" => c.no_cloud = true,
             "--context" => c.context = Some(val(&mut i)?),
+            "--wb" => {
+                c.word_bonus = Some(
+                    val(&mut i)?
+                        .parse()
+                        .map_err(|_| "--wb 需要浮点数".to_string())?,
+                )
+            }
+            "--k" => {
+                c.kbest = Some(
+                    val(&mut i)?
+                        .parse()
+                        .map_err(|_| "--k 需要整数".to_string())?,
+                )
+            }
+            "--explain" => c.explain = Some(val(&mut i)?),
             other => return Err(format!("未知参数: {other}")),
         }
         i += 1;
@@ -183,6 +224,7 @@ impl App {
         let kernel = Kernel::new(
             KernelConfig {
                 rerank_enabled: !cli.no_cloud,
+                decode: decode_options(cli),
                 ..Default::default()
             },
             layered,
@@ -533,6 +575,7 @@ fn bench(cli: &Cli) {
     let kernel = Kernel::new(
         KernelConfig {
             rerank_enabled: false,
+            decode: decode_options(cli),
             ..Default::default()
         },
         layered,
@@ -596,6 +639,99 @@ fn bench(cli: &Cli) {
     }
 }
 
+/// 打印每个候选的音节切分与得分，用于调参和定位排序问题。
+///
+/// 没有这个视图就没法回答「为什么 `妳` 排在 `你` 前面」——
+/// 候选文字相同但切分不同的情况下，光看结果是猜不出原因的。
+fn explain(cli: &Cli, input: &str) {
+    let dict = load_dict(&cli.dict);
+    let opts = decode_options(cli);
+    println!(
+        "\n── explain {:?}  (word_bonus={}, k={}, raw_penalty={}) ──",
+        input, opts.word_bonus, opts.k, opts.raw_penalty
+    );
+
+    use retype_pinyin::{normalize, Decoder};
+    let out = Decoder::with_options(opts.clone()).decode(input, dict.as_ref());
+    println!("音节切分(首选): {}", out.syllables.join("'"));
+    println!(
+        "已匹配音节数: {}  含原样字母: {}",
+        out.matched_syllables, out.has_raw
+    );
+    // 表头必须和数据行用同一套列宽。绑成变量而不是直接写字面量，
+    // 否则 clippy::print_literal 会要求把它们内联进格式串，列宽就对不齐了。
+    let (h_idx, h_text, h_syl, h_score, h_src) = ("#", "候选", "音节", "得分", "来源");
+    println!(
+        "{:>3}  {:<20} {:<12} {:>10}  {}",
+        h_idx, h_text, h_syl, h_score, h_src
+    );
+    for (i, c) in out.candidates.iter().enumerate() {
+        println!(
+            "{:>3}  {:<20} {:<12} {:>10.3}  {:?} 消费{}字符/{}音节",
+            i + 1,
+            c.text,
+            c.comment,
+            c.score,
+            c.source,
+            c.consumed,
+            c.syllable_len
+        );
+    }
+    println!("\n切分歧义（前 12 种）:");
+    for s in retype_pinyin::all_segmentations(&normalize(input), 12) {
+        println!("  {}", s.join(" + "));
+    }
+
+    // 单音节对照：直接看词库里这个音节下谁的分最高
+    println!("\n单音节对照（词库里该音节的原始 logp）:");
+    use retype_pinyin::Lexicon;
+    for syl in out.syllables.iter().take(4) {
+        let Some(id) = retype_pinyin::syllables::id_of(syl) else {
+            continue;
+        };
+        let mut hits = Vec::new();
+        dict.lookup(&[id], &mut hits);
+        hits.sort_by(|a, b| {
+            b.logp
+                .partial_cmp(&a.logp)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top: Vec<String> = hits
+            .iter()
+            .take(6)
+            .map(|h| format!("{}({:.2})", h.text, h.logp))
+            .collect();
+        println!("  {syl:<6} → {}", top.join("  "));
+    }
+
+    // 逐边分解：相同的候选文字可能来自完全不同的切分，
+    // 只有拆开看每一步的 logp 才能解释排序
+    println!("\n逐边分解（top {} 路径）:", out.candidates.len().min(6));
+    for t in retype_pinyin::trace(input, dict.as_ref(), &opts)
+        .iter()
+        .take(6)
+    {
+        println!("  总分 {:>9.3}  {}", t.score, t.text);
+        for s in &t.steps {
+            let syl = if s.syllables.is_empty() {
+                "-".to_string()
+            } else {
+                s.syllables.join("+")
+            };
+            let tag = if s.raw { " [原样字母]" } else { "" };
+            println!(
+                "      {:<8} {:<16} logp={:>8.3}  step={:>8.3}{}{}",
+                s.text,
+                syl,
+                s.logp,
+                s.score,
+                if s.raw { "" } else { "  (-wp)" },
+                tag
+            );
+        }
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let cli = match parse_args(&argv) {
@@ -606,6 +742,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if let Some(input) = &cli.explain {
+        explain(&cli, input);
+        return;
+    }
 
     if cli.bench {
         bench(&cli);

@@ -66,6 +66,7 @@ fn should_fail(cfg: &MockConfig, call: usize) -> bool {
 ///
 /// - 候选整词出现在光标前文里 → 大幅加分
 /// - 候选的相邻二字组出现在前文里 → 小幅加分
+///
 /// 这只是「有上下文的排序」的最小可运行版本，真实实现由 LLM 供应商替换。
 fn context_score(text: &str, ctx: &ContextSnapshot) -> f32 {
     let before = ctx.text_before.as_str();

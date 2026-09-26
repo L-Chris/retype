@@ -11,6 +11,10 @@ use windows_core::{implement, IUnknown, Interface, Ref, Result, BOOL, GUID};
 pub struct ClassFactory;
 
 impl IClassFactory_Impl for ClassFactory_Impl {
+    // 签名由 COM vtable 决定：裸指针出参是 QueryInterface 的固有形态，
+    // 我们无法把它标成 unsafe fn（trait 不允许），只能在实现处显式豁免并自行保证：
+    // 失败路径一律把出参置空，成功路径写入的是 AddRef 过的有效指针。
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn CreateInstance(
         &self,
         punkouter: Ref<'_, IUnknown>,
@@ -29,7 +33,7 @@ impl IClassFactory_Impl for ClassFactory_Impl {
             return Err(CLASS_E_NOAGGREGATION.into());
         }
 
-        let tip = RetypeTip::new();
+        let tip = RetypeTip::create();
         let unknown: IUnknown = tip.cast()?;
         // QueryInterface 会 AddRef；`unknown` 离开作用域时 Release，
         // 净效果是调用方拿到一个引用计数为 1 的接口指针

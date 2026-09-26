@@ -74,7 +74,7 @@ fn segment_by_lexicon(clause: &str, lex: &dyn Lexicon) -> Vec<String> {
             buf.clear();
             lex.lookup(&key, &mut buf);
             let want: String = chars[i..i + len].iter().collect();
-            if buf.iter().any(|e| &*e.text == want) {
+            if buf.iter().any(|e| *e.text == want) {
                 matched = Some((len, want));
                 break;
             }

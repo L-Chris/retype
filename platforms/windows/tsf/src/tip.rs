@@ -38,6 +38,10 @@ pub struct TipState {
 }
 
 impl TipState {
+    /// TIP 与其 sink 始终运行在同一个 STA 线程上：`Arc` 只用于共享所有权，
+    /// 不跨线程传递，所以 `TipState` 不需要 `Send`/`Sync`
+    /// （`ITfThreadMgr` 在 windows 0.62 里本来也不是 `Send`/`Sync`）。
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             tid: AtomicU32::new(0),
@@ -148,7 +152,9 @@ pub struct RetypeTip {
 }
 
 impl RetypeTip {
-    pub fn new() -> ITfTextInputProcessorEx {
+    /// 直接产出 COM 接口而不是 `Self`：调用方只关心接口，
+    /// 内部状态通过 `Arc<TipState>` 与各 sink 共享。
+    pub fn create() -> ITfTextInputProcessorEx {
         Self {
             state: TipState::new(),
         }
@@ -315,7 +321,7 @@ mod tests {
 
     #[test]
     fn bool_conversion_matches_eaten_semantics() {
-        assert_eq!(BOOL::from(false).as_bool(), false);
-        assert_eq!(BOOL::from(true).as_bool(), true);
+        assert!(!BOOL::from(false).as_bool());
+        assert!(BOOL::from(true).as_bool());
     }
 }

@@ -34,12 +34,12 @@ pub static SYLLABLES: &[&str] = &[
     "kuan", "kuang", "kui", "kun", "kuo", // h
     "ha", "hai", "han", "hang", "hao", "he", "hei", "hen", "heng", "hong", "hou", "hu", "hua",
     "huai", "huan", "huang", "hui", "hun", "huo", // j
-    "ji", "jia", "jian", "jiang", "jiao", "jie", "jin", "jing", "jiong", "jiu", "ju", "juan", "jue",
-    "jun", // q
-    "qi", "qia", "qian", "qiang", "qiao", "qie", "qin", "qing", "qiong", "qiu", "qu", "quan", "que",
-    "qun", // x
-    "xi", "xia", "xian", "xiang", "xiao", "xie", "xin", "xing", "xiong", "xiu", "xu", "xuan", "xue",
-    "xun", // zh
+    "ji", "jia", "jian", "jiang", "jiao", "jie", "jin", "jing", "jiong", "jiu", "ju", "juan",
+    "jue", "jun", // q
+    "qi", "qia", "qian", "qiang", "qiao", "qie", "qin", "qing", "qiong", "qiu", "qu", "quan",
+    "que", "qun", // x
+    "xi", "xia", "xian", "xiang", "xiao", "xie", "xin", "xing", "xiong", "xiu", "xu", "xuan",
+    "xue", "xun", // zh
     "zha", "zhai", "zhan", "zhang", "zhao", "zhe", "zhei", "zhen", "zheng", "zhi", "zhong", "zhou",
     "zhu", "zhua", "zhuai", "zhuan", "zhuang", "zhui", "zhun", "zhuo", // ch
     "cha", "chai", "chan", "chang", "chao", "che", "chen", "cheng", "chi", "chong", "chou", "chu",
@@ -54,8 +54,8 @@ pub static SYLLABLES: &[&str] = &[
     "cui", "cun", "cuo", // s
     "sa", "sai", "san", "sang", "sao", "se", "sen", "seng", "si", "song", "sou", "su", "suan",
     "sui", "sun", "suo", // y
-    "ya", "yan", "yang", "yao", "ye", "yi", "yin", "ying", "yo", "yong", "you", "yu", "yuan", "yue",
-    "yun", // w
+    "ya", "yan", "yang", "yao", "ye", "yi", "yin", "ying", "yo", "yong", "you", "yu", "yuan",
+    "yue", "yun", // w
     "wa", "wai", "wan", "wang", "wei", "wen", "weng", "wo", "wu",
     // ── 罕用 / 语气音节 ─────────────────────────────────────────────
     // 必须**追加在末尾**：音节 id == 数组下标，中间插入会让已构建的 dict.bin 全部错位。

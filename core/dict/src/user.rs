@@ -124,7 +124,7 @@ impl Lexicon for UserDict {
         if let Some(items) = g.by_key.get(syllables) {
             for i in items {
                 out.push(LexEntry {
-                    text: i.text.clone(),
+                    text: Arc::clone(&i.text),
                     logp: i.logp,
                     flags: 0,
                 });

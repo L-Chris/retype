@@ -50,7 +50,7 @@ impl Lexicon for MemoryDict {
         for &idx in &node.entries {
             if let Some(e) = self.entries.get(idx as usize) {
                 out.push(LexEntry {
-                    text: e.text.clone(),
+                    text: Arc::clone(&e.text),
                     logp: e.logp,
                     flags: e.flags,
                 });

@@ -9,6 +9,7 @@
 use crate::lexicon::{LexEntry, Lexicon};
 use crate::syllables;
 use retype_types::{Candidate, CandidateSource, SyllableId};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// 解码参数。
@@ -18,8 +19,18 @@ pub struct DecodeOptions {
     pub k: usize,
     /// 候选窗每页条数
     pub page_size: usize,
-    /// 每个词的边界惩罚。越大越倾向长词（抑制「你+好」压过「你好」）。
-    pub word_penalty: f32,
+    /// 每个词的加分（注意是**加**不是减）。
+    ///
+    /// unigram 模型下 `logp(w) = ln(freq_w / T)`，一条 k 词路径的总分是
+    /// `Σ ln f_i − k·ln T`：**每多切一个词就白扣一次 ln T（≈17.9）**。
+    /// 这是模型的固有偏差，不是语言事实 —— 它会让「妳好吗」这种词频≈3 的
+    /// 垃圾长词条（logp −16.8）压过「你好(−11.3) + 吗(−7.9)」。
+    ///
+    /// `word_bonus` 就是这个偏差的部分补偿。理论上界是 `ln T`（完全补偿，
+    /// 等价于假设任意词都能自由相接，结果会退化成全单字）；下界是 0（现状，
+    /// 会过度合并）。合理区间由不等式给出，见 `word_bonus_bounds` 测试。
+    /// M2 引入 bigram/上下文模型后，这一项应退化为一个很小的微调量。
+    pub word_bonus: f32,
     /// 无法匹配任何音节时，单个原样字母的惩罚。必须比最生僻的字更差，
     /// 否则解码器会宁可直接吐字母。
     pub raw_penalty: f32,
@@ -34,7 +45,7 @@ impl Default for DecodeOptions {
         Self {
             k: 8,
             page_size: 9,
-            word_penalty: 0.8,
+            word_bonus: 3.5,
             raw_penalty: 20.0,
             max_word_syllables: 5,
             include_prefixes: true,
@@ -125,19 +136,14 @@ pub fn build_lattice(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> La
     let mut stack: Vec<(usize, Vec<SyllableId>)> = Vec::new();
 
     for i in 0..n {
-        let is_sep = bytes[i] == b'\'';
-        // 兜底边：任何位置都能消费一个字符，保证 DP 不会走进死胡同
-        edges[i].push(Edge {
-            to: i + 1,
-            text: if is_sep {
-                EdgeText::Skip
-            } else {
-                EdgeText::Raw
-            },
-            syllables: Vec::new(),
-            score: if is_sep { 0.0 } else { -opts.raw_penalty },
-        });
-        if is_sep {
+        if bytes[i] == b'\'' {
+            // 显式分隔符：消费掉但不产出文字，也不参与切分
+            edges[i].push(Edge {
+                to: i + 1,
+                text: EdgeText::Skip,
+                syllables: Vec::new(),
+                score: 0.0,
+            });
             continue;
         }
 
@@ -157,9 +163,9 @@ pub fn build_lattice(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> La
                 for e in entries.iter() {
                     edges[i].push(Edge {
                         to: npos,
-                        text: EdgeText::Word(e.text.clone()),
+                        text: EdgeText::Word(Arc::clone(&e.text)),
                         syllables: next.clone(),
-                        score: e.logp - opts.word_penalty,
+                        score: e.logp + opts.word_bonus,
                     });
                 }
                 if next.len() < opts.max_word_syllables && npos < n {
@@ -167,31 +173,49 @@ pub fn build_lattice(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> La
                 }
             }
         }
+
+        // 兜底边只在「这个位置一个词都接不上」时才铺。
+        //
+        // 早先版本在每个位置都无条件铺一条 Raw 边，结果 k-best 的束槽位被
+        // 「你好ma世界」这种词+字母混排的垃圾路径占掉（真实词库上表现为
+        // 「妳好吗世界」压过「你好吗世界」）。现在只有真正无法切分时才退化，
+        // 同时 DP 依然不会走进死胡同。
+        if edges[i].is_empty() {
+            edges[i].push(Edge {
+                to: i + 1,
+                text: EdgeText::Raw,
+                syllables: Vec::new(),
+                score: -opts.raw_penalty,
+            });
+        }
     }
 
     Lattice { n, edges }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Beam {
+/// k-best 搜索节点。
+///
+/// **用链表而不是「(前驱位置, 槽位下标)」回溯**：每层的 top-k 是边扩展边插入的，
+/// `insert_node` 会在中间插入并 `truncate` 末尾，所以早先记下的槽位下标会失效，
+/// 回溯时会拼出一条实际不存在的路径（表现为候选里冒出莫名其妙的字）。
+/// `Rc` 链的额外开销很小：每个节点只在被引用时存活，共享前缀天然去重。
+#[derive(Clone)]
+struct Node {
     score: f32,
-    /// `u32::MAX` 表示起点
-    prev: u32,
-    prev_slot: u32,
+    from: u32,
     edge: u32,
+    prev: Option<Rc<Node>>,
 }
 
-const NO_PREV: u32 = u32::MAX;
-
-fn insert_beam(beams: &mut Vec<Beam>, beam: Beam, k: usize) {
+fn insert_node(beam: &mut Vec<Rc<Node>>, node: Rc<Node>, k: usize) {
     if k == 0 {
         return;
     }
     // 降序插入：找到第一个分数严格更小的位置。k 很小（默认 8），线性扫描比
     // 浮点 binary_search 更快也更直观。
-    let mut idx = beams.len();
-    for (i, b) in beams.iter().enumerate() {
-        if b.score < beam.score {
+    let mut idx = beam.len();
+    for (i, b) in beam.iter().enumerate() {
+        if b.score < node.score {
             idx = i;
             break;
         }
@@ -199,37 +223,38 @@ fn insert_beam(beams: &mut Vec<Beam>, beam: Beam, k: usize) {
     if idx >= k {
         return;
     }
-    beams.insert(idx, beam);
-    beams.truncate(k);
+    beam.insert(idx, node);
+    beam.truncate(k);
 }
 
-/// k-best DP。返回按分数降序的路径，每条路径是 `[(起点位置, 边下标)]`。
+/// k-best 束搜索。返回按分数降序的路径，每条路径是 `[(起点位置, 边下标)]`。
 fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
     let n = lattice.n;
-    let mut dp: Vec<Vec<Beam>> = vec![Vec::new(); n + 1];
-    dp[0].push(Beam {
+    let mut dp: Vec<Vec<Rc<Node>>> = vec![Vec::new(); n + 1];
+    // 起点哨兵：prev == None 标记路径开头
+    dp[0].push(Rc::new(Node {
         score: 0.0,
-        prev: NO_PREV,
-        prev_slot: 0,
+        from: 0,
         edge: 0,
-    });
+        prev: None,
+    }));
 
     for i in 0..n {
         if dp[i].is_empty() {
             continue;
         }
-        // 克隆当前层：边只会指向 > i 的位置，所以不会自我干扰
+        // 只克隆 Rc（引用计数 +1），不复制节点
         let cur = dp[i].clone();
-        for (slot, beam) in cur.iter().enumerate() {
+        for beam in cur.iter() {
             for (ei, e) in lattice.edges[i].iter().enumerate() {
-                insert_beam(
+                insert_node(
                     &mut dp[e.to],
-                    Beam {
+                    Rc::new(Node {
                         score: beam.score + e.score,
-                        prev: i as u32,
-                        prev_slot: slot as u32,
+                        from: i as u32,
                         edge: ei as u32,
-                    },
+                        prev: Some(Rc::clone(beam)),
+                    }),
                     k,
                 );
             }
@@ -237,26 +262,21 @@ fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
     }
 
     let mut paths = Vec::new();
-    for (slot, beam) in dp[n].iter().enumerate() {
+    for node in dp[n].iter() {
         let mut rev: Vec<(usize, usize)> = Vec::new();
-        let mut cur_pos = n;
-        let mut cur_slot = slot;
+        let mut cur = Some(Rc::clone(node));
         // 路径长度上界 = 字符数，超过说明状态异常，直接止损
         let mut guard = n + 2;
-        while guard > 0 {
-            guard -= 1;
-            let Some(b) = dp.get(cur_pos).and_then(|v| v.get(cur_slot)) else {
-                break;
-            };
-            if b.prev == NO_PREV {
+        while let Some(nd) = cur {
+            if nd.prev.is_none() || guard == 0 {
                 break;
             }
-            rev.push((b.prev as usize, b.edge as usize));
-            cur_pos = b.prev as usize;
-            cur_slot = b.prev_slot as usize;
+            guard -= 1;
+            rev.push((nd.from as usize, nd.edge as usize));
+            cur = nd.prev.clone();
         }
         rev.reverse();
-        paths.push((beam.score, rev));
+        paths.push((node.score, rev));
     }
     paths.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     paths
@@ -377,21 +397,36 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
     let paths = kbest(&lattice, opts.k.max(1));
     let bytes = input.as_bytes();
 
-    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut found: Vec<(Candidate, bool, usize)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    let mut first_syllables: Vec<String> = Vec::new();
-    let mut matched = 0usize;
-    let mut has_raw = false;
 
-    for (score, path) in paths.iter() {
+    for (pi, (score, path)) in paths.iter().enumerate() {
         let Some((cand, raw)) = path_to_candidate(bytes, &lattice, path, *score) else {
             continue;
         };
-        if seen.iter().any(|s| *s == cand.text) {
+        if seen.contains(&cand.text) {
             continue;
         }
+        seen.push(cand.text.clone());
+        found.push((cand, raw, pi));
+    }
+
+    // 第二道防线：只要存在「完全切分成功」的候选，就把含原样字母的混排候选全部丢掉。
+    // 用户打出 `nihaoma` 时不该看到 `你好ma`；只有整串都无法切分时（`nihaomx`）
+    // 才保留原样字母，让用户看见自己敲了什么。
+    let any_clean = found.iter().any(|(_, raw, _)| !raw);
+    if any_clean {
+        found.retain(|(_, raw, _)| !raw);
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut first_syllables: Vec<String> = Vec::new();
+    let mut matched = 0usize;
+    let mut has_raw = false;
+    let mut best_path: Option<usize> = None;
+    for (i, (cand, raw, pi)) in found.into_iter().enumerate() {
         // 首选路径决定组字串的音节显示与「已消费」计数
-        if candidates.is_empty() {
+        if i == 0 {
             first_syllables = cand
                 .syllables
                 .iter()
@@ -399,15 +434,16 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
                 .collect();
             matched = cand.syllable_len;
             has_raw = raw;
+            best_path = Some(pi);
         }
-        seen.push(cand.text.clone());
         candidates.push(cand);
     }
 
+    // 前缀候选必须沿**首选（且干净）**的那条路径切，否则会切出含原样字母的片段
     if opts.include_prefixes {
-        if let Some((_, best)) = paths.first() {
-            for pc in prefix_candidates(&lattice, best) {
-                if !seen.iter().any(|s| *s == pc.text) {
+        if let Some(pi) = best_path.and_then(|i| paths.get(i)) {
+            for pc in prefix_candidates(&lattice, &pi.1) {
+                if !seen.contains(&pc.text) {
                     seen.push(pc.text.clone());
                     candidates.push(pc);
                 }
@@ -421,6 +457,87 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
         matched_syllables: matched,
         has_raw,
     }
+}
+
+/// 一条路径上的一步（一个词边或一个原样字母边）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathStep {
+    /// 这一步产出的文字（原样字母边就是那个字母）
+    pub text: String,
+    /// 消费的音节
+    pub syllables: Vec<String>,
+    /// 消费的输入字符数
+    pub consumed: usize,
+    /// 词库给出的 logp（原样字母边为 0）
+    pub logp: f32,
+    /// 这一步的总分（含词边界惩罚）
+    pub score: f32,
+    pub raw: bool,
+}
+
+/// 一条完整路径的逐边分解。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathTrace {
+    pub score: f32,
+    pub text: String,
+    pub steps: Vec<PathStep>,
+}
+
+/// 逐边分解 top-k 路径。
+///
+/// 这是排查「为什么 A 排在 B 前面」的唯一可靠手段：只看候选文字和总分时，
+/// 相同的文字可能来自完全不同的切分（`你好+吗+世界` vs `你+好吗+世界`），
+/// 光看结果永远猜不出原因。`retype-diag --explain` 就是基于它。
+pub fn trace(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> Vec<PathTrace> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    let lattice = build_lattice(input, lex, opts);
+    let paths = kbest(&lattice, opts.k.max(1));
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(paths.len());
+
+    for (score, path) in paths.iter() {
+        let mut steps = Vec::new();
+        let mut text = String::new();
+        let mut ok = true;
+        for (from, ei) in path {
+            let Some(edge) = lattice.edges.get(*from).and_then(|v| v.get(*ei)) else {
+                ok = false;
+                break;
+            };
+            let consumed = edge.to.saturating_sub(*from);
+            let (step_text, logp, raw) = match &edge.text {
+                EdgeText::Word(t) => (t.to_string(), edge.score - opts.word_bonus, false),
+                EdgeText::Raw => {
+                    let c = bytes.get(*from).map(|b| *b as char).unwrap_or('?');
+                    (c.to_string(), 0.0, true)
+                }
+                EdgeText::Skip => (String::new(), 0.0, false),
+            };
+            text.push_str(&step_text);
+            steps.push(PathStep {
+                text: step_text,
+                syllables: edge
+                    .syllables
+                    .iter()
+                    .filter_map(|id| syllables::name_of(*id).map(str::to_owned))
+                    .collect(),
+                consumed,
+                logp,
+                score: edge.score,
+                raw,
+            });
+        }
+        if ok && !text.is_empty() {
+            out.push(PathTrace {
+                score: *score,
+                text,
+                steps,
+            });
+        }
+    }
+    out
 }
 
 /// 列出全部合法切分（调试与单元测试用）。`limit` 防止组合爆炸。

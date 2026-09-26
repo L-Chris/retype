@@ -9,22 +9,15 @@ pub mod lexicon;
 pub mod syllables;
 
 pub use decode::{
-    all_segmentations, build_lattice, decode, normalize, DecodeOptions, DecodeOutput, Lattice,
+    all_segmentations, build_lattice, decode, normalize, trace, DecodeOptions, DecodeOutput,
+    Lattice, PathStep, PathTrace,
 };
 pub use lexicon::{flags, EmptyLexicon, LexEntry, Lexicon};
 
 /// 解码门面：归一化 + 词格 + k-best，一次调用拿到候选。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Decoder {
     pub options: DecodeOptions,
-}
-
-impl Default for Decoder {
-    fn default() -> Self {
-        Self {
-            options: DecodeOptions::default(),
-        }
-    }
 }
 
 impl Decoder {
@@ -45,7 +38,7 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::lexicon::{LexEntry, Lexicon};
     use super::*;
@@ -91,23 +84,31 @@ mod tests {
         }
     }
 
+    /// 测试词表：既是 `demo_lex` 的数据源，也是「候选必须由这些词拼成」的断言依据。
+    /// 两处共用一份，避免断言列表漏词导致假失败。
+    const DEMO_WORDS: &[(&str, &str, f32)] = &[
+        ("你", "ni", -3.0),
+        ("好", "hao", -3.2),
+        ("你好", "ni hao", -4.0),
+        ("吗", "ma", -4.5),
+        ("世", "shi", -4.8),
+        ("界", "jie", -4.9),
+        ("世界", "shi jie", -5.2),
+        ("是", "shi", -2.8),
+        ("上", "shang", -3.5),
+        ("海", "hai", -3.9),
+        ("上海", "shang hai", -5.0),
+        ("先", "xian", -4.2),
+        ("西", "xi", -4.4),
+        ("安", "an", -4.6),
+        ("西安", "xi an", -6.0),
+    ];
+
     fn demo_lex() -> TestLex {
         let mut l = TestLex::default();
-        l.add("你", "ni", -3.0);
-        l.add("好", "hao", -3.2);
-        l.add("你好", "ni hao", -4.0);
-        l.add("吗", "ma", -4.5);
-        l.add("世", "shi", -4.8);
-        l.add("界", "jie", -4.9);
-        l.add("世界", "shi jie", -5.2);
-        l.add("是", "shi", -2.8);
-        l.add("上", "shang", -3.5);
-        l.add("海", "hai", -3.9);
-        l.add("上海", "shang hai", -5.0);
-        l.add("先", "xian", -4.2);
-        l.add("西", "xi", -4.4);
-        l.add("安", "an", -4.6);
-        l.add("西安", "xi an", -6.0);
+        for (w, py, logp) in DEMO_WORDS {
+            l.add(w, py, *logp);
+        }
         l
     }
 
@@ -139,10 +140,7 @@ mod tests {
         let out = Decoder::new().decode("nihaomashijie", &lex);
         assert_eq!(out.syllables, ["ni", "hao", "ma", "shi", "jie"]);
         let texts: Vec<&str> = out.candidates.iter().map(|c| c.text.as_str()).collect();
-        assert!(
-            texts.iter().any(|t| *t == "你好吗世界"),
-            "候选里没有整句: {texts:?}"
-        );
+        assert!(texts.contains(&"你好吗世界"), "候选里没有整句: {texts:?}");
     }
 
     #[test]
@@ -210,5 +208,89 @@ mod tests {
         let a = d.decode("nihaomashijie", &lex);
         let b = d.decode("nihaomashijie", &lex);
         assert_eq!(a.candidates, b.candidates);
+    }
+
+    /// 回归测试：k-best 曾用「(位置, 槽位下标)」回溯，而每层 top-k 是边扩展边
+    /// 插入/截断的，槽位下标会失效，于是拼出词库里根本不存在的组合
+    /// （真实词库上的表现是「妳好吗世界」压过「你好吗世界」）。
+    #[test]
+    fn every_candidate_is_a_valid_word_sequence() {
+        let lex = demo_lex();
+        // 长词优先匹配，否则「你好」会被切成「你」+「好」而误判
+        let mut allowed: Vec<&str> = DEMO_WORDS.iter().map(|w| w.0).collect();
+        allowed.sort_by_key(|w| std::cmp::Reverse(w.len()));
+        for input in ["nihaomashijie", "nihaonihao", "shijienihaoma", "xianshijie"] {
+            let out = Decoder::new().decode(input, &lex);
+            assert!(!out.candidates.is_empty(), "{input} 没有候选");
+            for c in &out.candidates {
+                let mut rest = c.text.as_str();
+                while !rest.is_empty() {
+                    let Some(w) = allowed.iter().find(|w| rest.starts_with(**w)) else {
+                        panic!("{input} 的候选 {:?} 含词库外片段: {rest:?}", c.text);
+                    };
+                    rest = &rest[w.len()..];
+                }
+            }
+        }
+    }
+
+    /// 首选路径必须覆盖整串输入且不掺原样字母。
+    ///
+    /// 这里刻意**不**断言具体是哪个词排第一：合成词库的词频不构成真实语言模型，
+    /// 排序会随 `word_bonus` 调整而变（真实词库上的调参结果见 docs/dict.md）。
+    /// 真正要守的不变量是「首选是一条完整、干净的切分」—— k-best 回溯出 bug 时
+    /// 第一个被破坏的就是它。
+    #[test]
+    fn best_path_covers_the_whole_input() {
+        let lex = demo_lex();
+        for (input, syllables) in [
+            ("nihaomashijie", 5usize),
+            ("nihao", 2),
+            ("shanghai", 2),
+            ("xianshijie", 3),
+        ] {
+            let out = Decoder::new().decode(input, &lex);
+            let first = out.candidates.first().unwrap_or_else(|| {
+                panic!("{input} 没有候选");
+            });
+            assert!(!out.has_raw, "{input} 的首选掺了原样字母: {:?}", first.text);
+            assert_eq!(
+                first.syllable_len, syllables,
+                "{input} 的首选应覆盖全部 {syllables} 个音节，实际 {:?} / {}",
+                first.text, first.syllable_len
+            );
+            assert_eq!(
+                first.consumed,
+                input.len(),
+                "{input} 的首选应消费全部输入字符"
+            );
+        }
+    }
+
+    #[test]
+    fn full_sentence_reading_is_among_candidates() {
+        let lex = demo_lex();
+        let out = Decoder::new().decode("nihaomashijie", &lex);
+        let texts: Vec<&str> = out.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert!(
+            texts.contains(&"你好吗世界"),
+            "整句读法应在候选里: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn long_input_stays_within_latency_budget() {
+        // P1 的量化形式：本地首刷必须远小于一帧。
+        // 这里用一个明显超长的输入压一下词格规模，确认没有指数爆炸。
+        let lex = demo_lex();
+        let input = "nihaomashijie".repeat(4); // 52 字符
+        let started = std::time::Instant::now();
+        let out = Decoder::new().decode(&input, &lex);
+        let elapsed = started.elapsed();
+        assert!(!out.candidates.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "52 字符输入解码耗时 {elapsed:?}，词格可能爆炸了"
+        );
     }
 }

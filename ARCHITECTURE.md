@@ -98,6 +98,12 @@ for c in v1:
     if c not in merged: merged.push(c)  # 本地候选一个都不许丢，兜底追加
 ```
 
+**去抖（debounce）是二刷的前提，不是优化**。用户连续打字时每次按键都会产生一个新任务，
+而前面那些**必然过期**（gen 已落后）。与其发出去再丢弃，不如在 `LocalBackend` 的
+worker 里等一个停顿：窗口内（默认 120ms）不断有新任务就用最新的替换旧的，只在真正
+停手时发一次请求。否则积压的请求会在停手后一起回来，把候选搅乱 —— 这正是 test.md
+说的「在不打断输入的情况下刷新候选」的工程含义。
+
 ---
 
 ## 3. 数据流：语音输入（三段式）
@@ -149,7 +155,8 @@ for c in v1:
 对应 test.md **图 3** / 第三节。
 
 ```rust
-// core/context/src/snapshot.rs
+// 数据模型在 core/types/src/context.rs（零依赖，Android 直接复用）
+// 采集接口与隐私策略在 core/context/src/lib.rs（采集实现在平台层）
 pub struct ContextSnapshot {
     pub app: AppInfo,              // 进程名/包名、窗口标题、控件类型（聊天/搜索/代码/文档）
     pub field: FieldInfo,          // 输入框能力：是否可读上下文、是否密码框、最大长度
@@ -157,7 +164,6 @@ pub struct ContextSnapshot {
     pub text_after: String,        // 光标后 M 字（默认 16）
     pub selection: Option<String>, // 当前选中文字（替换语义）
     pub privacy: PrivacyLevel,     // None / Local / Cloud —— 决定这份上下文能不能出网
-    pub taken_at: Instant,
 }
 ```
 
@@ -228,10 +234,12 @@ pub enum LearningEvent {
 │  └───────────────┬──────────────────────────┬───────────────┘                             │
 │                  │ 任务投递                  │ RenderState（无锁队列）                     │
 │                  ▼                          ▼                                             │
-│  ┌─ 内核 worker 线程池 ──────────┐  ┌─ 候选窗 UI 线程 ───────────┐                        │
-│  │ 词典加载 / 二刷重排 / 学习落盘 │  │ 独立消息循环 + Direct2D     │                        │
-│  │ （MVP 在进程内，见 ADR-0004） │  │ 分层窗口，跟随光标          │                        │
-│  └───────────────┬───────────────┘  └────────────────────────────┘                        │
+│  ┌─ 内核 worker 线程 ──────────┐  ┌─ 候选窗 UI 线程 ───────────┐                        │
+│  │ retype-rerank: 二刷（去抖）  │  │ 独立消息循环 + Direct2D     │                        │
+│  │ retype-learn : 学习落盘      │  │ 分层窗口，跟随光标          │                        │
+│  │ retype-dict-load: 词库加载   │  │                            │                        │
+│  │ （MVP 在进程内，见 ADR-0004）│  └────────────────────────────┘                        │
+│  └───────────────┬──────────────┘                                                      │
 └──────────────────┼────────────────────────────────────────────────────────────────────────┘
                    │ （M3 起可选：抽到 retype-host.exe，命名管道 + 共享内存）
                    ▼
@@ -251,11 +259,17 @@ TIP DLL 被注入到**每一个**应用进程里。如果每个进程都持有�
 ```rust
 // core/engine/src/backend.rs
 pub trait KernelBackend: Send + Sync {
-    fn submit(&self, ev: InputEvent);            // 永不阻塞
-    fn poll_render(&self) -> Option<RenderState>; // 非阻塞
+    fn submit(&self, ev: InputEvent) -> Vec<KernelAction>; // 只含首刷，< 5ms
+    fn poll_action(&self) -> Option<KernelAction>;         // 非阻塞取异步结果
+    fn render(&self) -> RenderState;                       // 当前快照
 }
-// Local:  同进程线程池     Remote: 命名管道 + 共享内存环
+// LocalBackend:  同进程 worker 线程（二刷去抖 + 学习落盘）
+// InlineBackend: 同步执行副作用，只给测试和 retype-diag 用
+// RemoteBackend: 命名管道 + 共享内存环（M3）
 ```
+
+`KernelBackend` 刻意**不带泛型方法**，否则就不是 dyn-compatible 的，
+`Arc<dyn KernelBackend>` 用不了 —— 详见 §9。
 
 ---
 
@@ -286,7 +300,7 @@ pub trait KernelBackend: Send + Sync {
 core/
   types/       retype-types      领域类型，零依赖（InputEvent/RenderState/Candidate/…）
   pinyin/      retype-pinyin     音节表 · 切分 · 词格 · Viterbi k-best · 模糊音/简拼
-  dict/        retype-dict       SystemDict(mmap) · UserDict(SQLite) · 学习 · 打分
+  dict/        retype-dict       SystemDict(mmap) · UserDict · 分层加权 · 学习 · AsyncDict(异步加载)
   context/     retype-context    ContextSnapshot 模型 + 隐私闸门（采集实现在平台层）
   cloud/       retype-cloud      CloudPinyin/LlmReranker/StreamingAsr traits + Mock + 熔断
   engine/      retype-engine     统一内核：会话状态机、首刷/二刷编排、合并、降级、KernelBackend
@@ -324,45 +338,81 @@ types ◄── pinyin ◄── dict ◄── engine ──► tsf / ffi
 pub enum InputSource { Keyboard, Voice, Touch }
 
 pub enum InputEvent {
-    Key { code: KeyCode, mods: Modifiers, ch: Option<char> },
-    FocusChanged(FocusInfo),
+    Key { key: Key, mods: Modifiers, source: InputSource },
+    ToggleChinese,
+    FocusChanged { app: AppInfo, field: FieldInfo },
     ContextUpdated(ContextSnapshot),
-    Voice(VoiceEvent),
-    CandidateChosen { index: u16 },
-    Commit,   // 空格/回车/数字选词
-    Cancel,   // Esc
+    Voice(VoiceEvent),                 // Start / Stop / Cancel / OptimizeTimeout / Asr(..)
+    CandidateChosen { index: usize },
+    CandidatePage { delta: i32 },
+    RerankCompleted { gen: Generation, result: RerankOutcome },  // 二刷回来了，带发出时的 gen
 }
 
 pub struct RenderState {
-    pub gen: u64,                       // 代次，防止旧结果覆盖新状态
-    pub composition: String,            // 组字串（未定稿的拼音）
-    pub composition_cursor: usize,
-    pub candidates: Vec<Candidate>,     // 已按 §2 合并规则排好
-    pub status: StatusFlags,            // 中英/全半角/云端可用/识别优化中…
+    pub gen: Generation,               // 代次，防止旧结果覆盖新状态
+    pub composition: String,           // 组字串全文 = 已转换 + 未转换的拼音
+    pub converted_len: usize,          // 已转换部分的字符数（TSF display attribute 的分界）
+    pub syllables: Vec<String>,        // 未转换部分的音节切分，用于显示 ni'hao'ma
+    pub candidates: Vec<Candidate>,    // 已按 §2 合并规则排好
+    pub selected: usize,
+    pub page_size: usize,
+    pub page_start: usize,
+    pub status: StatusFlags,           // 中英/全半角/云端可用/录音中/识别优化中/降级
 }
 
 pub struct Candidate {
     pub text: String,
-    pub comment: Option<String>,        // 拼音提示
-    pub source: CandidateSource,        // Local | Cloud | User | Hotword
-    pub segments: Vec<(usize, usize)>,  // 对应组字串的音节区间（用于高亮已消费部分）
+    pub comment: String,               // 拼音提示
+    pub source: CandidateSource,       // Local | SingleChar | User | Cloud | Hotword
+    pub syllable_len: usize,           // 消费了几个音节
+    pub consumed: usize,               // 消费了几个输入字符（≠音节数：xi'an 是 5 字符 2 音节）
+    pub syllables: Vec<SyllableId>,
+    pub score: f32,
 }
 
-pub enum CommitRequest { Text(String), Replace { len: usize, text: String } }
+pub enum CommitRequest { Text(String), ReplaceComposition { text: String } }
+
+pub enum KernelAction { Render(RenderState), Commit(CommitRequest), Side(SideEffect), PassThrough }
+pub enum SideEffect  { Rerank(RerankJob), Learn(LearningEvent), CollectContext }
 
 // ---- core/cloud（全部可 Mock，见 ADR-0002）----
 pub trait CloudPinyin: Send + Sync {
-    fn suggest(&self, req: PinyinRequest) -> BoxFuture<'static, Result<PinyinSuggestion>>;
+    fn suggest(&self, req: PinyinRequest) -> BoxFuture<'static, Result<PinyinSuggestion, CloudError>>;
 }
 pub trait LlmReranker: Send + Sync {
-    fn rerank(&self, req: RerankRequest) -> BoxFuture<'static, Result<RerankResponse>>;
+    fn rerank(&self, req: RerankRequest) -> BoxFuture<'static, Result<RerankResponse, CloudError>>;
+    fn polish(&self, text: String, ctx: ContextSnapshot) -> BoxFuture<'static, Result<String, CloudError>>;
 }
 pub trait StreamingAsr: Send + Sync {
-    fn start(&self, cfg: AsrConfig) -> Result<AsrSession>;   // 帧入 / 事件出，全异步
+    fn start(&self, cfg: AsrConfig) -> Result<Box<dyn AsrSession>, CloudError>;
 }
 ```
 
-平台适配层只需要三件事：**把系统事件翻译成 `InputEvent`**、**把 `RenderState` 画出来**、**把 `CommitRequest` 写回输入框**。这就是 Windows 和 Android 能共用内核的全部原因。
+`RerankResponse::order` 刻意是**下标序列**而不是候选列表：这样云端在类型层面就只能
+「重排本地候选 + 通过 `extra` 追加」，无法删掉用户已经看到的候选，也无法伪造一个
+「本地候选」。P3 因此不依赖调用方自觉。
+
+平台适配层只需要三件事：**把系统事件翻译成 `InputEvent`**、**把 `RenderState` 画出来**、
+**把 `CommitRequest` 写回输入框**。这就是 Windows 和 Android 能共用内核的全部原因。
+
+后端契约（见 [ADR-0004](./docs/adr/0004-in-proc-kernel-first.md)）：
+
+```rust
+pub trait KernelBackend: Send + Sync {
+    /// 同步处理事件，返回必须立即执行的动作。耗时只含首刷（< 5ms）
+    fn submit(&self, ev: InputEvent) -> Vec<KernelAction>;
+    /// 非阻塞取出异步产生的动作（二刷完成后的重渲染）
+    fn poll_action(&self) -> Option<KernelAction>;
+    /// 当前渲染状态快照
+    fn render(&self) -> RenderState;
+}
+```
+
+注意这里**不能**用 `with_kernel<R>(impl FnOnce(&Kernel) -> R)`：带泛型方法的 trait
+不是 dyn-compatible 的，`Arc<dyn KernelBackend>` 就没法用了，而「平台层只依赖 trait
+object」正是 M3 能无痛换成 `RemoteBackend` 的前提。需要直接摸内核时，用具体类型
+（`LocalBackend` / `InlineBackend`）上的同名固有方法。
+
 
 ---
 

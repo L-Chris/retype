@@ -149,7 +149,7 @@ impl KernelBackend for InlineBackend {
                         });
                     }
                     KernelAction::Side(SideEffect::Learn(lev)) => {
-                        let learner = { lock_or_recover(&self.kernel).learner().clone() };
+                        let learner = { Arc::clone(lock_or_recover(&self.kernel).learner()) };
                         learner.record(lev);
                     }
                     // 上下文采集只有平台层能做，必须原样转交
@@ -263,29 +263,33 @@ impl LocalBackend {
 fn spawn_rerank_worker(weak: Weak<LocalBackend>, rx: Receiver<RerankJob>, debounce: Duration) {
     let spawned = std::thread::Builder::new()
         .name("retype-rerank".into())
-        .spawn(move || loop {
-            // 1. 阻塞等第一个任务
-            let Ok(mut job) = rx.recv() else { break };
-            // 2. 去抖：窗口内只要来了新任务，就用新的替换旧的（旧的必然已过期）
-            loop {
-                match rx.recv_timeout(debounce) {
-                    Ok(newer) => job = newer,
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        .spawn(move || {
+            // 1. 阻塞等第一个任务；通道断开（LocalBackend 被释放）时自然退出，不泄漏线程
+            while let Ok(mut job) = rx.recv() {
+                // 2. 去抖：窗口内只要来了新任务，就用新的替换旧的（旧的必然已过期）。
+                // 三态匹配是刻意的：Disconnected 必须终止整个 worker，
+                // 写成 `while let Ok(..)` 会把它和 Timeout 混为一谈，导致线程空转。
+                #[allow(clippy::while_let_loop)]
+                loop {
+                    match rx.recv_timeout(debounce) {
+                        Ok(newer) => job = newer,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+                    }
                 }
-            }
-            let Some(b) = weak.upgrade() else { break };
-            let gen = job.gen;
-            let cloud = Arc::clone(&b.cloud);
-            let outcome = guarded("rerank", degraded_outcome(), || run_rerank(&cloud, &job));
-            let acts = {
-                lock_or_recover(&b.kernel).handle(InputEvent::RerankCompleted {
-                    gen,
-                    result: outcome,
-                })
-            };
-            for a in acts {
-                let _ = b.out.send(a);
+                let Some(b) = weak.upgrade() else { break };
+                let gen = job.gen;
+                let cloud = Arc::clone(&b.cloud);
+                let outcome = guarded("rerank", degraded_outcome(), || run_rerank(&cloud, &job));
+                let acts = {
+                    lock_or_recover(&b.kernel).handle(InputEvent::RerankCompleted {
+                        gen,
+                        result: outcome,
+                    })
+                };
+                for a in acts {
+                    let _ = b.out.send(a);
+                }
             }
         });
     if spawned.is_err() {
@@ -300,7 +304,7 @@ fn spawn_learn_worker(weak: Weak<LocalBackend>, rx: Receiver<LearningEvent>) {
         .spawn(move || {
             while let Ok(ev) = rx.recv() {
                 let Some(b) = weak.upgrade() else { break };
-                let learner = { lock_or_recover(&b.kernel).learner().clone() };
+                let learner = { Arc::clone(lock_or_recover(&b.kernel).learner()) };
                 guarded("learn", (), move || learner.record(ev));
             }
         });
