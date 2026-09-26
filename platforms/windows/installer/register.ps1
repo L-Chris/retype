@@ -1,161 +1,74 @@
 ﻿<#
 .SYNOPSIS
-  【开发用】注册 / 注销 retype 输入法（TSF Text Input Processor）。
-
+  开发用：通过 DLL 自注册入口注册/注销 retype，需要管理员权限。
 .DESCRIPTION
-  ⚠ 正式安装请用 Inno Setup 打出的 setup.exe（`build.ps1 -Installer`，或 CI 的 Release 产物）。
-    安装器会处理 HKLM 注册、词库落位、DLL 被占用时的 Restart Manager、卸载条目等；
-    本脚本只是开发期快速迭代用的轻量替代品（写 HKCU，不需要管理员权限，
-    改完代码重新注册一下就能测）。
-
-  默认按**当前用户**注册到 HKCU。
-  注册后需要让 ctfmon 重新加载：注销重登，或重启 ctfmon（脚本会尝试）。
-
-  ⚠ M0 的 DLL 是「安全骨架」：它能被系统加载、能激活、能收到按键，
-    但 OnKeyDown 一律返回「不吃这个键」，因为组字串读写（ITfEditSession）是 M1 的工作。
-    也就是说：现在注册它不会让你打不出字，但也不会真打出中文。
-    想在真实宿主进程里观察内核行为，用影子模式：
-        $env:RETYPE_TSF_SHADOW = "1"
-
-.PARAMETER DllPath
-  retype_ime.dll 的路径。默认 ..\..\..\target\release\retype_ime.dll
-
-.PARAMETER Unregister
-  注销而不是注册。
-
-.PARAMETER Machine
-  注册到 HKLM（所有用户，需要管理员权限）而不是 HKCU。
-
-.PARAMETER DictPath
-  已注音词库路径。注册时会一并复制到 %LOCALAPPDATA%\retype\，
-  因为 TIP 运行在宿主进程里，工作目录不可预期。
-  注意：正式安装器把词库放在 DLL 同目录，TIP 会优先从那里找（见 session.rs 的
-  default_dict_path），这个复制只是给脚本安装方式留的退路。
-
+  与正式安装器共用 COM + TSF 注册逻辑，不再手写 CTF 注册表。
+  注册失败会报告 regsvr32 退出码；不会重启 ctfmon 或强制切换默认输入法。
+  当前 M0 版本仍未实现中文上屏。
 .EXAMPLE
-  .\register.ps1
-  .\register.ps1 -Unregister
-  .\register.ps1 -Machine -DllPath C:\retype\retype_ime.dll
+  .\register.ps1 -DllPath C:\retype\retype_ime.dll
+  .\register.ps1 -Unregister -DllPath C:\retype\retype_ime.dll
 #>
 [CmdletBinding()]
 param(
   [string]$DllPath,
   [string]$DictPath,
   [switch]$Unregister,
+  # 兼容旧调用；现在所有注册都需要管理员权限并写入 HKLM。
   [switch]$Machine
 )
-
 $ErrorActionPreference = 'Stop'
-
-# 必须与 platforms/windows/tsf/src/ids.rs 完全一致
-$CLSID   = '{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}'
-$PROFILE = '{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
-$LANGID  = '0x00000804'   # 简体中文
-$NAME    = 'retype 输入法'
-$DESC    = 'retype 拼音输入法（本地首刷 + 云端二刷）'
-
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
-
-if (-not $DllPath) {
-  $DllPath = Join-Path $repoRoot 'target\release\retype_ime.dll'
+$id = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal $id
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw '注册和注销需要管理员权限。请在管理员 PowerShell 中运行本脚本。'
 }
-$DllPath = (Resolve-Path $DllPath -ErrorAction SilentlyContinue)
-if (-not $DllPath -and -not $Unregister) {
-  throw "找不到 DLL: $DllPath`n先构建: cargo build --release -p retype-tsf"
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+if (-not $DllPath) { $DllPath = Join-Path $repoRoot 'target\release\retype_ime.dll' }
+if (-not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+  throw "找不到 DLL: $DllPath。请先运行 cargo build --release -p retype-tsf。注销也需要原 DLL。"
 }
-if ($DllPath) { $DllPath = $DllPath.Path }
-
-$hive = if ($Machine) { 'HKEY_LOCAL_MACHINE' } else { 'HKEY_CURRENT_USER' }
-# 32 位 DLL 注册到 64 位系统的 HKLM 时要走 WOW6432Node。
-# 这里按 DLL 的实际位数判断，避免「装上了但 32 位程序里打不出字」。
-$tipRoot = "Registry::$hive\SOFTWARE\Microsoft\CTF\TIP\$CLSID"
-
-function Get-InstallDir {
-  $base = $env:LOCALAPPDATA
-  if (-not $base) { $base = $env:APPDATA }
-  return (Join-Path $base 'retype')
-}
-
-function Test-Admin {
-  $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-  (New-Object Security.Principal.WindowsPrincipal $id).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Unregister-Tip {
-  if (Test-Path $tipRoot) {
-    Remove-Item -LiteralPath $tipRoot -Recurse -Force
-    Write-Host "已删除 $tipRoot"
-  } else {
-    Write-Host "注册表里没有该项，无需注销: $tipRoot"
-  }
-  # HKLM 下 32 位视图的残留也一并清掉
-  $wow = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\CTF\TIP\$CLSID"
-  if (Test-Path $wow) {
-    if (Test-Admin) { Remove-Item -LiteralPath $wow -Recurse -Force; Write-Host "已删除 $wow" }
-    else { Write-Warning "需要管理员权限才能删除 $wow" }
-  }
-}
-
-function Register-Tip {
-  if ($Machine -and -not (Test-Admin)) {
-    throw "-Machine 需要以管理员身份运行"
-  }
-
-  # 词库必须放到固定位置：TIP 在宿主进程里运行，工作目录是宿主的，不是我们的
-  $installDir = Get-InstallDir
-  New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-  if (-not $DictPath) {
-    $DictPath = Join-Path $repoRoot 'data\dict\retype-dict.tsv'
-  }
-  if (Test-Path $DictPath) {
+$DllPath = (Resolve-Path -LiteralPath $DllPath).Path
+# 读取 PE Machine 字段，确保选用与 DLL 位数相符的 regsvr32。
+$stream = [IO.File]::OpenRead($DllPath)
+$reader = New-Object IO.BinaryReader $stream
+try {
+  if ($reader.ReadUInt16() -ne 0x5A4D) { throw '不是有效的 PE 文件' }
+  $stream.Position = 0x3c
+  $peOffset = $reader.ReadInt32()
+  if ($peOffset -lt 0 -or $peOffset -gt ($stream.Length - 6)) { throw 'PE 头偏移无效' }
+  $stream.Position = $peOffset
+  if ($reader.ReadUInt32() -ne 0x4550) { throw 'PE 签名无效' }
+  $arch = $reader.ReadUInt16()
+} finally { $reader.Dispose() }
+if ($arch -eq 0x8664) {
+  if (-not [Environment]::Is64BitOperatingSystem) { throw '64 位 DLL 需要 64 位 Windows' }
+  $systemDir = if ([Environment]::Is64BitProcess) { 'System32' } else { 'Sysnative' }
+} elseif ($arch -eq 0x014c) {
+  $systemDir = if ([Environment]::Is64BitOperatingSystem) { 'SysWOW64' } else { 'System32' }
+} else { throw ('不支持的 DLL 架构: 0x{0:X4}' -f $arch) }
+if (-not $Unregister) {
+  if (-not $DictPath) { $DictPath = Join-Path $repoRoot 'data\dict\retype-dict.tsv' }
+  if (Test-Path -LiteralPath $DictPath) {
+    $installDir = Join-Path $env:LOCALAPPDATA 'retype'
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     $dest = Join-Path $installDir 'retype-dict.tsv'
-    Copy-Item -LiteralPath $DictPath -Destination $dest -Force
-    Write-Host "词库已复制到 $dest ($([math]::Round((Get-Item $dest).Length/1MB,1)) MB)"
-  } else {
-    Write-Warning "找不到词库 $DictPath —— 输入法会退化成「原样字母」模式。构建方式见 docs/dict.md"
-  }
-
-  $inproc = "$tipRoot\InprocServer32"
-  New-Item -Path $inproc -Force | Out-Null
-  Set-ItemProperty -LiteralPath $inproc -Name '(Default)' -Value $DllPath
-  # TSF TIP 必须是 Apartment：它跑在宿主应用的 UI 线程上
-  Set-ItemProperty -LiteralPath $inproc -Name 'ThreadingModel' -Value 'Apartment'
-
-  $prof = "$tipRoot\LanguageProfile\$LANGID\$PROFILE"
-  New-Item -Path $prof -Force | Out-Null
-  Set-ItemProperty -LiteralPath $prof -Name 'Enable' -Value 1 -Type DWord
-  Set-ItemProperty -LiteralPath $prof -Name 'Description' -Value $DESC
-  Set-ItemProperty -LiteralPath $prof -Name 'Display Description' -Value $DESC
-
-  # 显示名称（M1 应改为资源 DLL 里的字符串 ID 才能本地化）
-  Set-ItemProperty -LiteralPath $tipRoot -Name 'Description' -Value $NAME -ErrorAction SilentlyContinue
-
-  Write-Host "已注册:"
-  Write-Host "  CLSID   $CLSID"
-  Write-Host "  Profile $PROFILE (LCID $LANGID)"
-  Write-Host "  DLL     $DllPath"
-  Write-Host "  注册表  $tipRoot"
+    if ((Resolve-Path -LiteralPath $DictPath).Path -ne $dest) {
+      Copy-Item -LiteralPath $DictPath -Destination $dest -Force
+    }
+  } else { Write-Warning '没有词库，内核将使用降级模式。' }
 }
-
-function Restart-Ctfmon {
-  # ctfmon 会缓存 TIP 列表；不重启的话新注册的输入法要等下次登录才出现
-  $p = Get-Process ctfmon -ErrorAction SilentlyContinue
-  if ($p) {
-    Write-Host "重启 ctfmon 以刷新输入法列表..."
-    Stop-Process -Name ctfmon -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
-    Start-Process "$env:SystemRoot\System32\ctfmon.exe" -ErrorAction SilentlyContinue
-  }
-  Write-Host ""
-  Write-Host "现在用 Win+Space 或语言栏切换到「$NAME」。"
-  Write-Host "如果列表里没有它，注销重登一次（TSF 的配置档缓存在会话里）。"
+$regsvr = Join-Path $env:SystemRoot "$systemDir\regsvr32.exe"
+if ($Unregister) { & (Join-Path $PSScriptRoot 'user-profile.ps1') -Uninstall }
+$arguments = '/s ' + $(if ($Unregister) { '/u ' } else { '' }) + '"' + $DllPath + '"'
+$process = Start-Process -FilePath $regsvr -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+if ($process.ExitCode -ne 0) {
+  throw "DLL 注册/注销失败，regsvr32 退出码 $($process.ExitCode)。可去掉 /s 重试以查看 HRESULT。"
 }
-
 if ($Unregister) {
-  Unregister-Tip
-  Restart-Ctfmon
+  Write-Host '已注销。若切换列表仍有缓存，请注销 Windows 后重新登录。'
 } else {
-  Register-Tip
-  Restart-Ctfmon
+  & (Join-Path $PSScriptRoot 'user-profile.ps1')
+  Write-Host '注册成功，已加入当前执行账户的键盘列表。若使用其他管理员账户执行，请回到日常账户单独运行 user-profile.ps1。'
+  Write-Host '当前 M0 版本尚不支持中文上屏；体验拼音候选请使用 retype 调试台。'
 }

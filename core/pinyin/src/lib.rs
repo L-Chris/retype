@@ -6,6 +6,7 @@
 
 pub mod decode;
 pub mod lexicon;
+pub mod shuangpin;
 pub mod syllables;
 
 pub use decode::{

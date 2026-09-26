@@ -10,9 +10,12 @@ publish.workspace = true
 [dependencies]
 retype-types = { workspace = true }
 retype-pinyin = { workspace = true }
-pinyin = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+pinyin = { workspace = true }
+retype-pinyin = { workspace = true }
 
 [lints]
 workspace = true

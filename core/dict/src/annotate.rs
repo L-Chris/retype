@@ -5,11 +5,24 @@
 //! 所以维护一张**词级覆盖表**；覆盖表没命中的多音字词按首选读音处理，
 //! 并把词条标上 [`retype_pinyin::flags::AMBIGUOUS`]，让排序更依赖上下文。
 
-use pinyin::{ToPinyin, ToPinyinMulti};
 use retype_pinyin::syllables;
 use retype_types::SyllableId;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+const PRIMARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/char-primary.bin"));
+const EXTRA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/char-extra.bin"));
+
+fn primary(c: char) -> Option<SyllableId> {
+    let index = match c as u32 {
+        0x3400..=0x9fff => c as usize - 0x3400,
+        0xf900..=0xfaff => 0x6c00 + c as usize - 0xf900,
+        _ => return None,
+    };
+    let bytes = PRIMARY.get(index * 2..index * 2 + 2)?;
+    let id = u16::from_le_bytes([bytes[0], bytes[1]]);
+    (id != u16::MAX).then_some(id)
+}
 
 /// 词级读音覆盖。只收录「逐字首选读音会读错」的常用词，
 /// 完整多音词消歧是 M2 上下文打分的工作，不在这里穷举。
@@ -120,24 +133,28 @@ pub fn all_han(s: &str) -> bool {
 
 /// 单字的全部读音（多音字会有多个）。
 pub fn char_readings(c: char) -> Vec<SyllableId> {
-    let mut out = Vec::new();
-    if let Some(multi) = c.to_pinyin_multi() {
-        for i in 0..multi.count() {
-            let n = norm_syllable(multi.get(i).plain());
-            if let Some(id) = syllables::id_of(&n) {
-                if !out.contains(&id) {
-                    out.push(id);
-                }
-            }
+    let mut out: Vec<_> = primary(c).into_iter().collect();
+    if !is_han(c) {
+        return out;
+    }
+    let cp = c as u16;
+    let (mut low, mut high) = (0, EXTRA.len() / 4);
+    while low < high {
+        let mid = (low + high) / 2;
+        let value = u16::from_le_bytes([EXTRA[mid * 4], EXTRA[mid * 4 + 1]]);
+        if value < cp {
+            low = mid + 1;
+        } else {
+            high = mid;
         }
     }
-    if out.is_empty() {
-        if let Some(p) = c.to_pinyin() {
-            let n = norm_syllable(p.plain());
-            if let Some(id) = syllables::id_of(&n) {
-                out.push(id);
-            }
+    while low < EXTRA.len() / 4 {
+        let row = &EXTRA[low * 4..low * 4 + 4];
+        if u16::from_le_bytes([row[0], row[1]]) != cp {
+            break;
         }
+        out.push(u16::from_le_bytes([row[2], row[3]]));
+        low += 1;
     }
     out
 }
@@ -152,8 +169,7 @@ pub fn annotate(word: &str) -> Option<Vec<SyllableId>> {
     }
     let mut ids = Vec::with_capacity(word.chars().count());
     for c in word.chars() {
-        let p = c.to_pinyin()?;
-        ids.push(syllables::id_of(&norm_syllable(p.plain()))?);
+        ids.push(primary(c)?);
     }
     Some(ids)
 }

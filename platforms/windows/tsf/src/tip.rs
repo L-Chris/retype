@@ -1,46 +1,43 @@
-//! TIP 与各类 sink 的 COM 实现。
-//!
-//! **M0 的安全边界**：这个 DLL 可以被系统加载、可以激活、可以收到按键，
-//! 但 `OnKeyDown` / `OnTestKeyDown` 一律返回「不吃这个键」。
-//! 因为组字串读写（`ITfEditSession`）是 M1 的工作 —— 在能正确上屏之前吃掉按键，
-//! 等于把用户的字吞了。宁可先做一个「装了但什么都不干」的输入法。
-//!
-//! 想观察内核在真实宿主进程里的行为，用影子模式：
-//! ```powershell
-//! $env:RETYPE_TSF_SHADOW = "1"
-//! ```
-//! 影子模式会把按键喂给内核（并写日志），但依然返回不吃键。
+//! Windows TSF lifecycle and keyboard routing. Text changes run under TSF edit locks.
+use crate::{candidate::CandidateWindow, display, edit, keymap, session::Session};
 
-use crate::keymap;
-use crate::session::Session;
-use retype_types::{InputEvent, InputSource, KernelAction, Key};
+use retype_types::{InputEvent, InputSource, Key, Modifiers};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::TextServices::{
-    ITfContext, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfTextInputProcessorEx,
-    ITfTextInputProcessorEx_Impl, ITfTextInputProcessor_Impl, ITfThreadMgr,
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, WPARAM};
+use windows::Win32::UI::TextServices::*;
+use windows_core::{implement, Interface, Ref, Result, BOOL, GUID};
+const TOGGLE_KEY: GUID = GUID::from_u128(0x9adc1a31_2426_4c80_95f3_79bb71d8932e);
+const TOGGLE_CHORD: TF_PRESERVEDKEY = TF_PRESERVEDKEY {
+    uVKey: 0x20,
+    uModifiers: TF_MOD_CONTROL,
 };
-use windows_core::{implement, Interface, Ref, Result, BOOL};
 
-/// 一次激活期间共享的状态。
-///
-/// TIP 对象和各个 sink 是**独立的 COM 对象**，通过 `Arc<TipState>` 共享。
-/// 这样就不需要在 sink 回调里从 `_Impl` 反向 cast 回外层接口
-/// （windows 0.62 的 `IUnknownImpl` 没有提供便捷的自 cast）。
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err(E_UNEXPECTED.into()))
+}
+
 pub struct TipState {
     pub tid: AtomicU32,
     pub activated: AtomicBool,
-    /// TSF 的接口不是 `Send`/`Sync`，但 TIP 与其 sink 始终在同一个 STA 线程上被调用，
-    /// `Mutex` 在这里只是提供内部可变性，不是跨线程同步。
     pub thread_mgr: Mutex<Option<ITfThreadMgr>>,
     pub session: Mutex<Option<Arc<Session>>>,
+    pub(crate) composition: Mutex<Option<edit::Composition>>,
+    pub(crate) pending: AtomicU32,
+    pub(crate) epoch: AtomicU32,
+    pub(crate) writing: AtomicBool,
+    pub(crate) attribute: AtomicU32,
+    focus_cookie: Mutex<Vec<u32>>,
+    pub(crate) window: Mutex<Option<CandidateWindow>>,
+    language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
+    preserved_key: AtomicBool,
+    mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
 }
-
 impl TipState {
-    /// TIP 与其 sink 始终运行在同一个 STA 线程上：`Arc` 只用于共享所有权，
-    /// 不跨线程传递，所以 `TipState` 不需要 `Send`/`Sync`
-    /// （`ITfThreadMgr` 在 windows 0.62 里本来也不是 `Send`/`Sync`）。
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -48,112 +45,244 @@ impl TipState {
             activated: AtomicBool::new(false),
             thread_mgr: Mutex::new(None),
             session: Mutex::new(None),
+            composition: Mutex::new(None),
+            pending: AtomicU32::new(0),
+            epoch: AtomicU32::new(0),
+            writing: AtomicBool::new(false),
+            attribute: AtomicU32::new(0),
+            focus_cookie: Mutex::new(Vec::new()),
+            window: Mutex::new(Some(CandidateWindow::default())),
+            language_bar: Mutex::new(None),
+            preserved_key: AtomicBool::new(false),
+            mode_bridge: Mutex::new(None),
         })
     }
-
-    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-        match m.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        }
-    }
-
     pub fn activate(
         self: &Arc<Self>,
         ptim: Ref<'_, ITfThreadMgr>,
         tid: u32,
-        flags: u32,
+        _flags: u32,
     ) -> Result<()> {
+        let mgr = ptim.ok()?.clone();
         self.tid.store(tid, Ordering::SeqCst);
-        if let Ok(mgr) = ptim.ok() {
-            // clone 只是 AddRef；接口不 Send，所以只能在当前线程存着
-            *Self::lock(&self.thread_mgr) = Some(mgr.clone());
-        }
-
-        // 词库加载在后台线程，这里必须立刻返回（P1）
-        let session = Session::start();
-        tracing::info!(
-            "retype TIP 激活: tid={tid} flags={flags:#x} dict={:?} shadow={}",
-            session.dict_path,
-            session.shadow
-        );
-        *Self::lock(&self.session) = Some(Arc::clone(&session));
-
-        // 按键 sink 挂在 ITfKeystrokeMgr 上（ITfThreadMgr 通过 QI 暴露它）
-        let mgr_opt = Self::lock(&self.thread_mgr).clone();
-        if let Some(mgr) = mgr_opt {
-            let ks: ITfKeystrokeMgr = mgr.cast()?;
+        *lock(&self.thread_mgr) = Some(mgr.clone());
+        *lock(&self.session) = Some(Session::start());
+        // SAFETY: All COM calls run in the calling TSF apartment with valid interfaces.
+        unsafe {
+            let categories: ITfCategoryMgr = windows::Win32::System::Com::CoCreateInstance(
+                &CLSID_TF_CategoryMgr,
+                None,
+                windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+            )?;
+            self.attribute.store(
+                categories.RegisterGUID(&display::ATTRIBUTE)?,
+                Ordering::SeqCst,
+            );
+            let keys: ITfKeystrokeMgr = mgr.cast()?;
             let sink: ITfKeyEventSink = KeyEventSink {
-                state: Arc::clone(self),
+                state: Arc::downgrade(self),
             }
             .into();
-            // SAFETY: ks 是本次激活期间有效的接口指针。
-            // windows 0.62 的 `Param<T, InterfaceType>` 只接受**借用**，
-            // 传值会报 trait bound 不满足。
-            unsafe {
-                if let Err(e) = ks.AdviseKeyEventSink(tid, &sink, true) {
-                    tracing::error!("AdviseKeyEventSink 失败: {e:?}");
+            keys.AdviseKeyEventSink(tid, &sink, true)?;
+            let source: ITfSource = mgr.cast()?;
+            let focus: ITfThreadFocusSink = FocusSink {
+                state: Arc::downgrade(self),
+            }
+            .into();
+            match source.AdviseSink(&ITfThreadFocusSink::IID, &focus) {
+                Ok(cookie) => lock(&self.focus_cookie).push(cookie),
+                Err(e) => {
+                    let _ = keys.UnadviseKeyEventSink(tid);
                     return Err(e);
                 }
             }
-            // sink 在这里被 TSF 持有（AdviseKeyEventSink 内部 AddRef），
-            // 我们的这份引用可以正常释放
-            drop(sink);
+            let documents: ITfThreadMgrEventSink = focus.cast()?;
+            match source.AdviseSink(&ITfThreadMgrEventSink::IID, &documents) {
+                Ok(cookie) => lock(&self.focus_cookie).push(cookie),
+                Err(error) => {
+                    for cookie in lock(&self.focus_cookie).drain(..) {
+                        let _ = source.UnadviseSink(cookie);
+                    }
+                    let _ = keys.UnadviseKeyEventSink(tid);
+                    return Err(error);
+                }
+            }
         }
-
         self.activated.store(true, Ordering::SeqCst);
+        if let Ok(bridge) = crate::langbar::ModeBridge::attach(self, &mgr) {
+            *lock(&self.mode_bridge) = Some(bridge);
+        }
+        // SAFETY: TSF dispatches this shortcut through OnPreservedKey even in hosts
+        // that reserve Ctrl+Space before normal key callbacks (for example RichEdit).
+        unsafe {
+            if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
+                self.preserved_key.store(
+                    keys.PreserveKey(
+                        tid,
+                        &TOGGLE_KEY,
+                        &TOGGLE_CHORD,
+                        &"retype 中英切换".encode_utf16().collect::<Vec<_>>(),
+                    )
+                    .is_ok(),
+                    Ordering::SeqCst,
+                );
+            }
+        }
+        match crate::langbar::LanguageBar::attach(self, &mgr) {
+            Ok(bar) => *lock(&self.language_bar) = Some(bar),
+            Err(error) => {
+                let _ = self.deactivate();
+                return Err(error);
+            }
+        }
         Ok(())
     }
-
-    pub fn deactivate(&self) -> Result<()> {
-        let tid = self.tid.load(Ordering::SeqCst);
-
-        // 未定稿的组字串必须取消，否则宿主应用里会留下「僵尸下划线」
-        if let Some(session) = Self::lock(&self.session).take() {
-            let _ = session.submit(InputEvent::Key {
-                key: Key::Escape,
-                mods: retype_types::Modifiers::NONE,
-                source: InputSource::Keyboard,
-            });
-        }
-
-        let mgr = Self::lock(&self.thread_mgr).take();
+    pub fn deactivate(self: &Arc<Self>) -> Result<()> {
+        self.activated.store(false, Ordering::SeqCst);
+        let bridge = lock(&self.mode_bridge).take();
+        drop(bridge);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.hide();
+        self.finish(false);
+        let bar = lock(&self.language_bar).take();
+        drop(bar);
+        let mgr = lock(&self.thread_mgr).take();
         if let Some(mgr) = mgr {
-            if let Ok(ks) = mgr.cast::<ITfKeystrokeMgr>() {
-                // SAFETY: 同 activate
-                unsafe {
-                    if let Err(e) = ks.UnadviseKeyEventSink(tid) {
-                        // 反注册失败不该阻止 deactivate 完成，否则宿主会认为我们还活着
-                        tracing::warn!("UnadviseKeyEventSink 失败: {e:?}");
+            // SAFETY: Registered sinks belong to this manager and client id.
+            unsafe {
+                if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
+                    if self.preserved_key.swap(false, Ordering::SeqCst) {
+                        let _ = keys.UnpreserveKey(&TOGGLE_KEY, &TOGGLE_CHORD);
+                    }
+                    let _ = keys.UnadviseKeyEventSink(self.tid.load(Ordering::SeqCst));
+                }
+                let cookies = std::mem::take(&mut *lock(&self.focus_cookie));
+                if let Ok(source) = mgr.cast::<ITfSource>() {
+                    for cookie in cookies {
+                        let _ = source.UnadviseSink(cookie);
                     }
                 }
             }
         }
-
-        self.activated.store(false, Ordering::SeqCst);
-        tracing::info!("retype TIP 已停用: tid={tid}");
+        lock(&self.session).take();
         Ok(())
     }
-
     pub fn is_activated(&self) -> bool {
         self.activated.load(Ordering::SeqCst)
     }
-
     pub fn session(&self) -> Option<Arc<Session>> {
-        Self::lock(&self.session).clone()
+        lock(&self.session).clone()
+    }
+    pub(crate) fn notify_language_bar(&self) {
+        let compartment = lock(&self.mode_bridge)
+            .as_ref()
+            .map(|bridge| bridge.compartment.clone());
+        if let (Some(compartment), Some(session)) = (compartment, self.session()) {
+            let value = i32::from(session.backend.with_kernel(|k| k.is_chinese()));
+            // SAFETY: Publish OS IME state outside locks; the callback compares before applying.
+            unsafe {
+                if compartment
+                    .GetValue()
+                    .ok()
+                    .and_then(|v| i32::try_from(&v).ok())
+                    != Some(value)
+                {
+                    let _ = compartment.SetValue(
+                        self.tid.load(Ordering::SeqCst),
+                        &windows::Win32::System::Variant::VARIANT::from(value),
+                    );
+                }
+            }
+        }
+        let sink = lock(&self.language_bar).as_ref().and_then(|bar| bar.sink());
+        if let Some(sink) = sink {
+            // SAFETY: Callback is on the owning TSF apartment, outside state locks.
+            unsafe {
+                let _ = sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_STATUS);
+            }
+        }
+    }
+    pub(crate) fn sync_scheme(&self) {
+        if lock(&self.composition).is_some() || self.pending.load(Ordering::SeqCst) != 0 {
+            return;
+        }
+        if let Some(session) = self.session() {
+            let scheme = crate::preferences::scheme();
+            if session.backend.with_kernel(|k| k.config().pinyin_scheme) != scheme {
+                session.submit(InputEvent::SetPinyinScheme(scheme));
+                self.notify_language_bar();
+            }
+        }
+    }
+    pub(crate) fn hide(&self) {
+        let window = lock(&self.window).take();
+        if let Some(mut window) = window {
+            window.hide();
+            *lock(&self.window) = Some(window);
+        }
+    }
+    pub(crate) fn reset_kernel(&self) {
+        if let Some(s) = self.session() {
+            s.submit(InputEvent::Key {
+                key: Key::Escape,
+                mods: Modifiers::NONE,
+                source: InputSource::Keyboard,
+            });
+        }
+    }
+    pub(crate) fn finish(self: &Arc<Self>, cancel: bool) {
+        let composition = lock(&self.composition).clone();
+        if let Some(c) = composition {
+            let _ = edit::request(self, &c.context, edit::Work::Finish(cancel));
+        } else {
+            self.reset_kernel();
+        }
+        self.hide();
+    }
+    pub(crate) fn wants(&self, key: Key, mods: Modifiers) -> bool {
+        let Some(session) = self.session() else {
+            return false;
+        };
+        if session.shadow {
+            return false;
+        }
+        let (chinese, composing) = session
+            .backend
+            .with_kernel(|k| (k.is_chinese(), k.has_composition()));
+        let composing = composing || self.pending.load(Ordering::SeqCst) > 0;
+        wants_key(key, mods, chinese, composing)
     }
 }
-
-// ─────────────────────────── TIP 入口 ───────────────────────────
-
-#[implement(ITfTextInputProcessorEx)]
+fn wants_key(key: Key, mods: Modifiers, chinese: bool, composing: bool) -> bool {
+    if key == Key::Space && mods == Modifiers::CTRL {
+        return true;
+    }
+    if !mods.is_plain() || !chinese {
+        return false;
+    }
+    if composing {
+        return matches!(
+            key,
+            Key::Char(_)
+                | Key::Space
+                | Key::Enter
+                | Key::Escape
+                | Key::Backspace
+                | Key::Left
+                | Key::Right
+                | Key::Up
+                | Key::Down
+                | Key::PageUp
+                | Key::PageDown
+        );
+    }
+    matches!(key, Key::Char(c) if c.is_ascii_lowercase()) && !mods.contains(Modifiers::SHIFT)
+}
+#[implement(ITfTextInputProcessorEx, ITfDisplayAttributeProvider)]
 pub struct RetypeTip {
     pub state: Arc<TipState>,
 }
-
 impl RetypeTip {
-    /// 直接产出 COM 接口而不是 `Self`：调用方只关心接口，
-    /// 内部状态通过 `Arc<TipState>` 与各 sink 共享。
     pub fn create() -> ITfTextInputProcessorEx {
         Self {
             state: TipState::new(),
@@ -161,167 +290,227 @@ impl RetypeTip {
         .into()
     }
 }
-
 impl ITfTextInputProcessor_Impl for RetypeTip_Impl {
-    fn Activate(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
-        self.state.activate(ptim, tid, 0)
+    fn Activate(&self, mgr: Ref<'_, ITfThreadMgr>, tid: u32) -> Result<()> {
+        guarded(|| self.state.activate(mgr, tid, 0))
     }
-
     fn Deactivate(&self) -> Result<()> {
-        self.state.deactivate()
+        guarded(|| self.state.deactivate())
     }
 }
-
 impl ITfTextInputProcessorEx_Impl for RetypeTip_Impl {
-    fn ActivateEx(&self, ptim: Ref<'_, ITfThreadMgr>, tid: u32, dwflags: u32) -> Result<()> {
-        self.state.activate(ptim, tid, dwflags)
+    fn ActivateEx(&self, mgr: Ref<'_, ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
+        guarded(|| self.state.activate(mgr, tid, flags))
     }
 }
-
-// ─────────────────────────── 按键 sink ───────────────────────────
-
-#[implement(ITfKeyEventSink)]
-pub struct KeyEventSink {
-    pub state: Arc<TipState>,
-}
-
-impl KeyEventSink {
-    /// 把一次 Win32 按键翻译成内核事件并投递。
-    ///
-    /// 返回 `true` 表示「这个键该归输入法」。M0 恒定返回 `false`，
-    /// 见模块级注释里的安全边界说明。
-    fn handle_key(&self, wparam: WPARAM, lparam: LPARAM, is_test: bool) -> bool {
-        let Some(session) = self.state.session() else {
-            return false;
-        };
-        // M0：只有影子模式才喂内核，且任何情况下都不吃键
-        if !session.shadow {
-            return false;
+impl ITfDisplayAttributeProvider_Impl for RetypeTip_Impl {
+    fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
+        Ok(display::enumeration())
+    }
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM trait fixes this signature.
+    fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
+        if guid.is_null() {
+            return Err(E_POINTER.into());
         }
-        if is_test {
-            // OnTestKeyDown 会被高频调用（每个按键至少一次），不做实际处理，
-            // 只回答「吃不吃」。真正的翻译留给 OnKeyDown。
-            return false;
+        // SAFETY: COM caller provides a valid GUID pointer.
+        if unsafe { *guid } != display::ATTRIBUTE {
+            return Err(E_INVALIDARG.into());
         }
-
-        let vk = (wparam.0 & 0xFFFF) as u16;
-        let Some(key) = keymap::translate_vk(vk) else {
-            return false;
-        };
-        let mods = keymap::read_modifiers();
-        let acts = session.submit(InputEvent::Key {
-            key,
-            mods,
-            source: InputSource::Keyboard,
-        });
-        for a in &acts {
-            match a {
-                KernelAction::Render(r) => {
-                    tracing::debug!(
-                        "shadow: 组字={:?} 候选={:?}",
-                        r.composition,
-                        r.candidates
-                            .iter()
-                            .take(5)
-                            .map(|c| c.text.as_str())
-                            .collect::<Vec<_>>()
-                    );
-                }
-                KernelAction::Commit(c) => {
-                    // M1 起这里要开一个 ITfEditSession 把文字写进宿主
-                    tracing::info!("shadow: 内核要求上屏 {c:?}（M0 未实现 edit session，已忽略）");
-                }
-                KernelAction::PassThrough => {}
-                KernelAction::Side(s) => tracing::debug!("shadow: 副作用 {s:?}"),
-            }
-        }
-        let _ = lparam;
-        false
+        Ok(display::info())
     }
 }
-
-impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
-    fn OnSetFocus(&self, _fforeground: BOOL) -> Result<()> {
+#[implement(ITfThreadFocusSink, ITfThreadMgrEventSink)]
+struct FocusSink {
+    state: Weak<TipState>,
+}
+impl ITfThreadMgrEventSink_Impl for FocusSink_Impl {
+    fn OnInitDocumentMgr(&self, _doc: Ref<'_, ITfDocumentMgr>) -> Result<()> {
         Ok(())
     }
-
-    fn OnTestKeyDown(
+    fn OnUninitDocumentMgr(&self, doc: Ref<'_, ITfDocumentMgr>) -> Result<()> {
+        self.OnSetFocus(Ref::default(), doc)
+    }
+    fn OnSetFocus(
         &self,
-        _pic: Ref<'_, ITfContext>,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> Result<BOOL> {
-        Ok(BOOL::from(self.handle_key(wparam, lparam, true)))
+        focused: Ref<'_, ITfDocumentMgr>,
+        _previous: Ref<'_, ITfDocumentMgr>,
+    ) -> Result<()> {
+        guarded(|| {
+            if let Some(state) = self.state.upgrade() {
+                let current = lock(&state.composition).clone();
+                if let Some(current) = current {
+                    // SAFETY: Read document identity only; writes are requested separately.
+                    let owner = unsafe { current.context.GetDocumentMgr() };
+                    if !owner.is_ok_and(|owner| focused.ok().is_ok_and(|focus| owner == *focus)) {
+                        state.epoch.fetch_add(1, Ordering::SeqCst);
+                        state.finish(false);
+                    }
+                }
+            }
+            Ok(())
+        })
     }
-
-    fn OnTestKeyUp(
-        &self,
-        _pic: Ref<'_, ITfContext>,
-        _wparam: WPARAM,
-        _lparam: LPARAM,
-    ) -> Result<BOOL> {
-        Ok(BOOL::from(false))
+    fn OnPushContext(&self, _ctx: Ref<'_, ITfContext>) -> Result<()> {
+        Ok(())
     }
-
-    fn OnKeyDown(&self, _pic: Ref<'_, ITfContext>, wparam: WPARAM, lparam: LPARAM) -> Result<BOOL> {
-        // TIP 跑在宿主进程里：这里 panic 就是宿主崩溃，必须兜住
-        let eaten = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.handle_key(wparam, lparam, false)
-        }))
-        .unwrap_or_else(|_| {
-            tracing::error!("OnKeyDown panic，已吞掉并按「不吃键」处理");
-            false
-        });
-        Ok(BOOL::from(eaten))
-    }
-
-    fn OnKeyUp(&self, _pic: Ref<'_, ITfContext>, _wparam: WPARAM, _lparam: LPARAM) -> Result<BOOL> {
-        Ok(BOOL::from(false))
-    }
-
-    fn OnPreservedKey(
-        &self,
-        _pic: Ref<'_, ITfContext>,
-        _rguid: *const windows_core::GUID,
-    ) -> Result<BOOL> {
-        Ok(BOOL::from(false))
+    fn OnPopContext(&self, ctx: Ref<'_, ITfContext>) -> Result<()> {
+        guarded(|| {
+            if let Some(state) = self.state.upgrade() {
+                let current = lock(&state.composition).clone();
+                if current.is_some_and(|c| ctx.ok().is_ok_and(|ctx| c.context == *ctx)) {
+                    state.epoch.fetch_add(1, Ordering::SeqCst);
+                    state.finish(false);
+                }
+            }
+            Ok(())
+        })
     }
 }
-
+impl ITfThreadFocusSink_Impl for FocusSink_Impl {
+    fn OnSetThreadFocus(&self) -> Result<()> {
+        if let Some(state) = self.state.upgrade() {
+            state.sync_scheme();
+        }
+        Ok(())
+    }
+    fn OnKillThreadFocus(&self) -> Result<()> {
+        guarded(|| {
+            if let Some(state) = self.state.upgrade() {
+                state.epoch.fetch_add(1, Ordering::SeqCst);
+                state.finish(false);
+            }
+            Ok(())
+        })
+    }
+}
+#[implement(ITfKeyEventSink)]
+pub struct KeyEventSink {
+    pub state: Weak<TipState>,
+}
+impl KeyEventSink_Impl {
+    fn key(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM, test: bool) -> Result<BOOL> {
+        let Some(state) = self.state.upgrade() else {
+            return Ok(false.into());
+        };
+        if !state.is_activated() {
+            return Ok(false.into());
+        }
+        let Ok(ctx) = ctx.ok() else {
+            return Ok(false.into());
+        };
+        // SAFETY: Reading context status does not acquire a document write lock.
+        if unsafe { ctx.GetStatus() }
+            .map(|s| s.dwDynamicFlags & TS_SD_READONLY != 0)
+            .unwrap_or(true)
+        {
+            return Ok(false.into());
+        }
+        let Some(key) =
+            keymap::translate_event((vk.0 & 0xffff) as u16, ((lp.0 >> 16) & 0xff) as u32)
+        else {
+            return Ok(false.into());
+        };
+        let mut mods = keymap::read_modifiers();
+        // The kernel treats shifted letters as raw English. CapsLock uses the same path.
+        if matches!(key, Key::Char(c) if c.is_ascii_uppercase()) {
+            mods = mods.union(Modifiers::SHIFT);
+        }
+        let wanted = state.wants(key, mods);
+        if test {
+            return Ok(wanted.into());
+        }
+        if !wanted {
+            // End existing composition before shortcuts, navigation or English passthrough.
+            state.finish(false);
+            return Ok(false.into());
+        }
+        let work = if key == Key::Space && mods == Modifiers::CTRL {
+            edit::Work::Toggle
+        } else {
+            edit::Work::Key(key, mods)
+        };
+        match edit::request(&state, ctx, work) {
+            Ok(()) => Ok(true.into()),
+            Err(e) => {
+                tracing::warn!("TSF edit request rejected: {e}");
+                Ok(false.into())
+            }
+        }
+    }
+}
+impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
+    fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
+        guarded(|| {
+            if foreground.as_bool() {
+                if let Some(state) = self.state.upgrade() {
+                    state.sync_scheme();
+                }
+            }
+            if !foreground.as_bool() {
+                if let Some(s) = self.state.upgrade() {
+                    s.epoch.fetch_add(1, Ordering::SeqCst);
+                    s.finish(false);
+                }
+            }
+            Ok(())
+        })
+    }
+    fn OnTestKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        guarded(|| self.key(ctx, vk, lp, true))
+    }
+    fn OnKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        guarded(|| self.key(ctx, vk, lp, false))
+    }
+    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, _vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+        Ok(false.into())
+    }
+    fn OnKeyUp(&self, _ctx: Ref<'_, ITfContext>, _vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+        Ok(false.into())
+    }
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM fixes this callback signature.
+    fn OnPreservedKey(&self, ctx: Ref<'_, ITfContext>, guid: *const GUID) -> Result<BOOL> {
+        guarded(|| {
+            if guid.is_null() {
+                return Ok(false.into());
+            }
+            // SAFETY: TSF supplies a valid command GUID.
+            if unsafe { *guid } != TOGGLE_KEY {
+                return Ok(false.into());
+            }
+            let Some(state) = self.state.upgrade() else {
+                return Ok(false.into());
+            };
+            if !state.is_activated() {
+                return Ok(false.into());
+            }
+            Ok(edit::request(&state, ctx.ok()?, edit::Work::Toggle)
+                .is_ok()
+                .into())
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
     use super::*;
-
     #[test]
     fn tip_state_starts_inactive() {
         let s = TipState::new();
         assert!(!s.is_activated());
         assert!(s.session().is_none());
-        assert_eq!(s.tid.load(Ordering::SeqCst), 0);
     }
-
     #[test]
     fn deactivate_without_activate_is_harmless() {
-        // 宿主有可能在任何时刻调用 Deactivate，不能因此 panic
-        let s = TipState::new();
-        assert!(s.deactivate().is_ok());
-        assert!(!s.is_activated());
+        assert!(TipState::new().deactivate().is_ok());
     }
-
     #[test]
-    fn key_sink_without_session_does_not_eat_keys() {
-        let s = TipState::new();
-        let sink = KeyEventSink { state: s };
-        // wparam = 'A' (0x41)
-        assert!(!sink.handle_key(WPARAM(0x41), LPARAM(0), false));
-        assert!(!sink.handle_key(WPARAM(0x41), LPARAM(0), true));
-    }
-
-    #[test]
-    fn bool_conversion_matches_eaten_semantics() {
-        assert!(!BOOL::from(false).as_bool());
-        assert!(BOOL::from(true).as_bool());
+    fn keyboard_routing_preserves_shortcuts_and_idle_keys() {
+        assert!(!wants_key(Key::Char('a'), Modifiers::CTRL, true, true));
+        assert!(!wants_key(Key::Space, Modifiers::NONE, true, false));
+        assert!(!wants_key(Key::Backspace, Modifiers::NONE, true, false));
+        assert!(!wants_key(Key::Char('a'), Modifiers::NONE, false, false));
+        assert!(wants_key(Key::Char('a'), Modifiers::NONE, true, false));
+        assert!(wants_key(Key::Char('2'), Modifiers::NONE, true, true));
+        assert!(wants_key(Key::Space, Modifiers::CTRL, false, false));
+        assert!(!wants_key(Key::Char('a'), Modifiers::SHIFT, true, false));
     }
 }

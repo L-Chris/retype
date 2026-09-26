@@ -5,6 +5,7 @@
 
 pub mod annotate;
 pub mod async_dict;
+pub mod binary;
 pub mod learn;
 pub mod memory;
 pub mod trie;

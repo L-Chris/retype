@@ -36,6 +36,9 @@
 #ifndef OutDir
   #define OutDir "dist"
 #endif
+#ifndef X86Dir
+  #define X86Dir "target\i686-pc-windows-msvc\release"
+#endif
 #ifndef DictFile
   #define DictFile "data\dict\retype-dict.tsv"
 #endif
@@ -49,7 +52,7 @@
 ; 必须与 platforms/windows/tsf/src/ids.rs 完全一致
 #define TipCLSID         "{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}"
 #define ProfileGUID      "{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}"
-#define ProfileDesc      "retype 拼音输入法（本地首刷 + 云端二刷）"
+#define ProfileDesc      "retype 拼音输入法（M1 本地输入预览）"
 
 ; 注册表 Subkey 里的 "{" 必须写成 "{{"，否则 Inno 运行时会把它当常量去展开并报
 ; "Unknown constant"。所以下面这两个 define 是**转义后**的形式，
@@ -113,31 +116,26 @@ RestartApplications=no
 ; 路径都相对 SourceDir（= RepoRoot）
 ; TSF TIP。ignoreversion 是必须的：Rust 的 cdylib 没有 VERSIONINFO 资源，
 ; Windows 无法按文件版本判断新旧，只能无条件覆盖。
-Source: "{#BaseDir}\retype_ime.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BaseDir}\retype_ime.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit
+Source: "{#X86Dir}\retype_ime.dll"; DestDir: "{app}\x86"; Flags: ignoreversion regserver 32bit
+Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{app}"; Flags: ignoreversion
 ; 更新器：自动更新的执行者（TIP DLL 自己绝不做网络 IO）
 Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 已注音词库（约 8.9MB，包里最大的一块）
 Source: "{#DictFile}"; DestDir: "{app}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
+Source: "data\dict\retype-dict.bin"; DestDir: "{app}"; Flags: ignoreversion
 ; 许可与第三方数据署名（jieba / pinyin 均为 MIT，发行时必须附带）
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
-; TSF 的 TIP 注册。键名里的 GUID 必须与 ids.rs 一致，否则系统找不到我们。
-; ThreadingModel 必须是 Apartment —— TIP 跑在宿主应用的 UI 线程上。
-Root: HKLM; Subkey: "{#TipRegKey}"; Flags: uninsdeletekeyifempty
-Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; ValueType: string; ValueName: ""; ValueData: "{app}\retype_ime.dll"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; ValueType: string; ValueName: "ThreadingModel"; ValueData: "Apartment"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "{#ProfileRegKey}"; ValueType: dword; ValueName: "Enable"; ValueData: "1"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "{#ProfileRegKey}"; ValueType: string; ValueName: "Description"; ValueData: "{#ProfileDesc}"; Flags: uninsdeletekey
-Root: HKLM; Subkey: "{#ProfileRegKey}"; ValueType: string; ValueName: "Display Description"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
-; 供 M1 使用：TIP 自己也能从这里读到安装目录（虽然 dll_dir() 已经够用）
-Root: HKLM; Subkey: "{#TipRegKey}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"; Flags: uninsdeletekey
-
+; 清理旧版误写的 COM 路径；正确注册由 DLL 的 regserver 完成。
+Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; Flags: deletekey
 [Icons]
+Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
 Name: "{group}\retype 调试台"; Filename: "{app}\retype-diag.exe"; Parameters: "--dict ""{app}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
 Name: "{group}\检查更新"; Filename: "{app}\retype-updater.exe"; Parameters: "check"; Comment: "查询 GitHub 上的最新版本"
 Name: "{group}\许可与署名"; Filename: "{app}\NOTICE.txt"
@@ -150,24 +148,54 @@ Type: filesandordirs; Name: "{app}\*.log"
 [Code]
 var
   DeleteUserData: Boolean;
+  UserProfileAdded: Boolean;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    // Machine COM registration and user keyboard selection are separate operations.
+    // In particular, UAC may have used another administrator's account.
+    UserProfileAdded := ExecAsOriginalUser(
+      ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\user-profile.ps1') + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    UserProfileAdded := UserProfileAdded and (ResultCode = 0);
+    Log(Format('User keyboard enrollment: %d', [ResultCode]));
+  end;
+end;
+
+function GetCustomSetupExitCode: Integer;
+begin
+  Result := 0;
+  if not UserProfileAdded then Result := 1;
+end;
 
 // 结束页必须说清楚两件事：
-// 1) TSF 的配置档被会话缓存，装完不注销是看不到输入法的（否则用户以为装失败了）
-// 2) 当前里程碑的真实能力边界（M0 还不能打中文）
+// 1) 说明选择输入法以及未自动出现时的处理方式
+// 2) M1 预览的使用方法与兼容性边界
 procedure CurPageChanged(CurPageID: Integer);
+var
+  ProfileMessage: String;
 begin
   if CurPageID = wpFinished then
   begin
+    if UserProfileAdded then
+      ProfileMessage := '已加入当前用户的键盘列表。请在桌面应用中用 Win+Space 选择 retype。'
+    else
+      ProfileMessage := '文件已安装，但未能加入当前用户的键盘列表。请以日常使用的账户运行开始菜单中的「添加到当前用户的键盘列表」。';
     WizardForm.FinishedLabel.Caption :=
       '{#MyAppName} {#MyAppVersion} 已安装。' + #13#10 + #13#10 +
-      '【必须注销并重新登录】' + #13#10 +
-      'TSF 的语言配置档被登录会话缓存，装完不注销是看不到输入法的。' +
-      '这不是安装失败。重新登录后用 Win+Space 或语言栏切换到「{#MyAppName}」。' + #13#10 + #13#10 +
+      '【选择输入法】' + #13#10 +
+      ProfileMessage + #13#10 +
+      '当前仅支持桌面宿主；现代应用兼容性尚未完成。' + #13#10 + #13#10 +
       '【当前版本的能力边界】' + #13#10 +
-      '0.1.0 是地基版本：内核、352,357 条词库、拼音解码、自动更新都已可用，' +
-      '但组字串读写（TSF 的 ITfEditSession）还没做，所以注册后**打不出中文**' +
-      '（也不会吞掉你的按键 —— TIP 一律返回「不吃这个键」）。' + #13#10 +
-      '想现在就体验完整输入链路，用开始菜单里的「retype 调试台」。';
+      'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +
+      '语言栏「中 / A」可点击切换中英，右键菜单切换全拼 / 小鹤双拼。' + #13#10 +
+      '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–5 或鼠标选词，Esc 取消，回车输入原拼音。' + #13#10 +
+      '应用兼容性仍在验证中。升级后请重新打开使用输入法的应用；如提示重启，请先保存工作。';
   end;
 end;
 
@@ -190,7 +218,17 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
 begin
+  if CurUninstallStep = usUninstall then
+  begin
+    if not Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\user-profile.ps1') + '" -Uninstall',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Log('Could not start user keyboard removal');
+    Log(Format('User keyboard removal: %d', [ResultCode]));
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
     if DeleteUserData then

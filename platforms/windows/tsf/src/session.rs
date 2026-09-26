@@ -81,14 +81,28 @@ pub fn default_dict_path() -> PathBuf {
         }
     }
     if let Some(dir) = dll_dir() {
-        let candidate = dir.join("retype-dict.tsv");
-        if candidate.exists() {
-            return candidate;
+        // x86 DLL resides in an architecture subdirectory; dictionaries are shared.
+        for base in std::iter::once(dir.as_path()).chain(
+            dir.parent()
+                .filter(|_| dir.file_name().is_some_and(|name| name == "x86")),
+        ) {
+            for name in ["retype-dict.bin", "retype-dict.tsv"] {
+                let candidate = base.join(name);
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
         }
     }
     if let Ok(base) = std::env::var("LOCALAPPDATA") {
         if !base.trim().is_empty() {
-            return PathBuf::from(base).join("retype").join("retype-dict.tsv");
+            let root = PathBuf::from(base).join("retype");
+            let binary = root.join("retype-dict.bin");
+            return if binary.exists() {
+                binary
+            } else {
+                root.join("retype-dict.tsv")
+            };
         }
     }
     PathBuf::from("retype-dict.tsv")
@@ -145,6 +159,11 @@ impl Session {
         let cloud = offline_cloud(Duration::from_millis(200));
         let kernel = Kernel::new(
             KernelConfig {
+                pinyin_scheme: crate::preferences::scheme(),
+                decode: retype_pinyin::DecodeOptions {
+                    page_size: 5,
+                    ..Default::default()
+                },
                 rerank_enabled: false,
                 ..Default::default()
             },
@@ -213,8 +232,9 @@ mod tests {
         // 只验证解析逻辑，不改进程环境（避免测试间互相干扰）
         let p = default_dict_path();
         assert!(
-            p.to_string_lossy().contains("retype-dict.tsv"),
-            "默认路径应指向 retype-dict.tsv，实际 {p:?}"
+            p.file_name()
+                .is_some_and(|name| name == "retype-dict.tsv" || name == "retype-dict.bin"),
+            "默认路径应指向 retype-dict.tsv 或 retype-dict.bin，实际 {p:?}"
         );
     }
 

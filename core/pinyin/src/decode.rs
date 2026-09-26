@@ -128,6 +128,15 @@ fn syllable_options(input: &[u8], pos: usize, out: &mut Vec<(usize, SyllableId)>
 
 /// 构建词格。
 pub fn build_lattice(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> Lattice {
+    build_lattice_with(input, lex, opts, syllable_options)
+}
+
+pub(crate) fn build_lattice_with(
+    input: &str,
+    lex: &dyn Lexicon,
+    opts: &DecodeOptions,
+    options: impl Fn(&[u8], usize, &mut Vec<(usize, SyllableId)>),
+) -> Lattice {
     let bytes = input.as_bytes();
     let n = bytes.len();
     let mut edges: Vec<Vec<Edge>> = vec![Vec::new(); n + 1];
@@ -150,7 +159,7 @@ pub fn build_lattice(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> La
         stack.clear();
         stack.push((i, Vec::new()));
         while let Some((pos, syls)) = stack.pop() {
-            syllable_options(bytes, pos, &mut syl_opts);
+            options(bytes, pos, &mut syl_opts);
             for (len, id) in syl_opts.iter().copied() {
                 let npos = pos + len;
                 let mut next = syls.clone();
@@ -394,6 +403,10 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
         return DecodeOutput::default();
     }
     let lattice = build_lattice(input, lex, opts);
+    decode_lattice(input, lattice, opts)
+}
+
+pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions) -> DecodeOutput {
     let paths = kbest(&lattice, opts.k.max(1));
     let bytes = input.as_bytes();
 

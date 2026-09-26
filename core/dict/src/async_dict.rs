@@ -115,8 +115,13 @@ pub fn spawn_loader<P: AsRef<Path>>(
             let loaded = std::fs::File::open(&path)
                 .map_err(|e| format!("打不开词库 {}: {e}", path.display()))
                 .and_then(|f| {
-                    crate::memory::load_annotated(std::io::BufReader::with_capacity(1 << 16, f))
-                        .map_err(|e| e.to_string())
+                    let reader = std::io::BufReader::with_capacity(1 << 16, f);
+                    if path.extension().is_some_and(|ext| ext == "bin") {
+                        crate::binary::load(reader)
+                    } else {
+                        crate::memory::load_annotated(reader)
+                    }
+                    .map_err(|e| e.to_string())
                 });
             match loaded {
                 Ok((dict, stats)) => {

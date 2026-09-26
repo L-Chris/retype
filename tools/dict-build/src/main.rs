@@ -186,6 +186,17 @@ fn build(args: &Args) -> Result<Stats, String> {
         }
     }
     w.flush().map_err(|e| format!("flush 失败: {e}"))?;
+    let binary_path = args.output.with_extension("bin");
+    let input = std::fs::File::open(&args.output).map_err(|e| e.to_string())?;
+    let output = std::fs::File::create(&binary_path).map_err(|e| e.to_string())?;
+    let count = retype_dict::binary::compile(BufReader::new(input), BufWriter::new(output))
+        .map_err(|e| e.to_string())?;
+    let (binary, _) =
+        retype_dict::binary::load(std::fs::File::open(&binary_path).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    if retype_pinyin::Lexicon::len(&binary) != count {
+        return Err("二进制词库回读数量不一致".into());
+    }
     eprintln!(
         "构建完成: {} 词 → {} 条（含多音字变体），耗时 {:?}",
         stats.words,

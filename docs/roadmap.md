@@ -4,7 +4,7 @@
 
 ---
 
-## M0 · 地基（当前）
+## M0 · 地基（已完成）
 
 目标：把架构落成能编译、能测试的代码骨架，验证最高风险的技术选型。
 
@@ -47,21 +47,25 @@
 
 ---
 
-## M1 · 能在 Windows 里打中文
+## M1 · 能在 Windows 里打中文（桌面预览，验收中）
 
 目标：真正装进系统，在主流应用里可用。这是**产品能不能活下来**的一关（test.md 第六节）。
 
-- [ ] TSF 完整管线：`ITfKeyEventSink`（含 `OnTestKeyDown` 预判）、`ITfCompositionSink`、`ITfTextEditSink`、`ITfThreadFocusSink`
-- [ ] 注册与激活：`ITfInputProcessorProfileMgr::RegisterProfile`、语言栏图标、中英切换热键
-- [ ] 组字串显示：`ITfDisplayAttributeProvider`（下划线/高亮），让宿主应用自己画出未定稿文本
-- [ ] 候选窗：先用 TSF 原生 `ITfCandidateListUIElement`（省掉自绘，兼容性交给系统）
-- [ ] 系统词库：`tools/dict-build` 产出 `dict.bin`，随 DLL 分发，异步加载
-- [ ] x86 + x64 双架构产出（32 位应用会加载 32 位 TIP）
+- [x] TSF 基础管线：`ITfKeyEventSink`（含无副作用预判）、`ITfEditSession`、`ITfCompositionSink`、`ITfTextEditSink`、`ITfThreadFocusSink`；延迟写锁、拒绝写锁和过期请求已测试
+- [x] 注册与激活：TSF 中文配置、`ITfLangBarItemButton` 中/A 状态图标、模式通知、方案菜单与保留快捷键
+- [x] 组字串显示：`ITfDisplayAttributeProvider` 提供下划线属性，宿主负责绘制
+- [x] 候选窗：`ITfCandidateListUIElement` 暴露候选数据，桌面无激活窗口负责显示；响应宿主 Show/Hide 与布局变化。此接口不会自动替输入法绘制窗口
+- [x] 系统词库：`tools/dict-build` 产出 `retype-dict.bin`，随 DLL 分发，异步加载；保留 TSV 调试用途
+- [x] x86 + x64 双架构产出并装入同一个 x64 Windows 安装包（32 位应用加载 x86 TIP）
 - [ ] **把 TIP DLL 从 1,082 KB 压到 ~300 KB**：构建期生成紧凑的「字→音节 id」表
       （约 30KB）随词库分发，用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉。
       这个 DLL 被注入到每个宿主进程，体积直接影响宿主启动速度。
 
-**验收矩阵**（每格都要人工过一遍）：
+0.1.3 已加入中/A 状态图标、系统开关状态同步、全拼/小鹤菜单与持久化设置。横排候选窗采用原生 GDI 绘制，支持圆角、选中态和鼠标点选；Direct2D、暗色主题仍是后续工作。`Ctrl+Space` 已注册为 TSF 保留键，但本机自动化实测未触发切换，仍需排查系统/宿主快捷键分发；图标点击切换已验证。构建期紧凑注音表已替代运行时 `pinyin` 数据，DLL 尚未达到 300 KB 目标。
+
+**已验证**：自建 RichEdit 桌面窗口用真实按键输入 `nihao`，显示「你好」候选，空格上屏、Esc 取消并关闭候选窗。内存 `ITextStoreACP` 测试通过真实 TSF 验证组字、提交、取消、标点和异步写锁。详细记录见 [M1 验证记录](./m1-validation.md)。
+
+**验收矩阵**（下列应用尚未逐项验证，不能视作 M1 已完成）：
 
 | 应用 | 上屏 | 组字串 | 候选窗跟随光标 | 退格/方向键 |
 |---|---|---|---|---|
@@ -125,7 +129,8 @@
 - [ ] 更新检查的触发时机与频率（设置界面打开时 / 每日计划任务），注意 GitHub 匿名限额 60 次/小时/IP
 - [ ] Flutter 设置界面（`apps/settings`）：词库管理、热键、隐私白名单、云端开关、日志、检查更新
 - [ ] 崩溃上报与延迟打点
-- [ ] 双拼方案（自然码/小鹤/微软）—— 以键位映射层实现，不改内核
+- [x] 小鹤双拼：按原始按键构建音节词格，支持部分选词、退格、零声母、全拼切换
+- [ ] 其他双拼方案（自然码/微软）
 - [ ] Android 端启动：Kotlin IME + JNI → `retype-ffi`；更新逻辑复用 `core/updater`
 
 ---

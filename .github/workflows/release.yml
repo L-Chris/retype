@@ -113,10 +113,12 @@ jobs:
             -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
 
       # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md）。
-      # M1 才会发布 x86 包，但这里先验证目标能编译，避免到 M1 才发现依赖不支持。
-      - name: 验证 x86 目标可编译
+      # 安装器将 x86 DLL 放入 x86 子目录，与 x64 共用词库。
+      - name: 构建并测试 x86 TIP
         run: |
           cargo build --release --target i686-pc-windows-msvc -p retype-tsf
+          if ($LASTEXITCODE -ne 0) { throw 'x86 build failed' }
+          cargo test --release --target i686-pc-windows-msvc -p retype-tsf
 
       - name: 构建词库
         run: |
@@ -126,6 +128,32 @@ jobs:
 
       - name: TSF 自检
         run: cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf
+
+      - name: TSF 系统注册与卸载验收（临时 Windows runner）
+        shell: pwsh
+        run: |
+          $dll = Join-Path $env:GITHUB_WORKSPACE 'target\x86_64-pc-windows-msvc\release\retype_ime.dll'
+          $regsvr = "$env:SystemRoot\System32\regsvr32.exe"
+          $clsid = '{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}'
+          $classKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$clsid"
+          $tipKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\$clsid"
+          if ((Test-Path $classKey) -or (Test-Path $tipKey)) { throw '验收要求干净 runner' }
+          try {
+            # 重复注册也应成功，覆盖升级时再次注册的路径。
+            1..2 | ForEach-Object {
+              $p = Start-Process $regsvr -ArgumentList "/s `"$dll`"" -WindowStyle Hidden -Wait -PassThru
+              if ($p.ExitCode -ne 0) { throw "注册失败: $($p.ExitCode)" }
+            }
+            & .\platforms\windows\installer\user-profile.ps1
+            & .\platforms\windows\installer\user-profile.ps1
+            cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf installed_tip_ -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { throw '注册后无法枚举或加载 TIP' }
+          } finally {
+            & .\platforms\windows\installer\user-profile.ps1 -Uninstall
+            $p = Start-Process $regsvr -ArgumentList "/s /u `"$dll`"" -WindowStyle Hidden -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "注销失败: $($p.ExitCode)" }
+          }
+          if ((Test-Path $classKey) -or (Test-Path $tipKey)) { throw '注销后仍有注册残留' }
 
       # 延迟预算是 P1 的量化形式，发布前必须复核一遍（release 构建下的真实数字）
       - name: 首刷延迟基准

@@ -22,6 +22,7 @@ use std::sync::Arc;
 /// 内核配置。
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
+    pub pinyin_scheme: retype_types::PinyinScheme,
     pub decode: DecodeOptions,
     /// 是否启用二刷（断网/未配置云端时应关掉，省掉无谓的等待与打点）
     pub rerank_enabled: bool,
@@ -35,6 +36,7 @@ pub struct KernelConfig {
 impl Default for KernelConfig {
     fn default() -> Self {
         Self {
+            pinyin_scheme: retype_types::PinyinScheme::Full,
             decode: DecodeOptions::default(),
             rerank_enabled: true,
             chinese_on_start: true,
@@ -226,6 +228,16 @@ impl Kernel {
         match ev {
             InputEvent::Key { key, mods, source } => self.on_key(key, mods, source, &mut actions),
             InputEvent::ToggleChinese => self.on_toggle_chinese(&mut actions),
+            InputEvent::SetPinyinScheme(scheme) => {
+                if self.cfg.pinyin_scheme != scheme {
+                    if self.has_composition() {
+                        self.commit_raw_letters(&mut actions);
+                    }
+                    self.cfg.pinyin_scheme = scheme;
+                    self.bump_gen();
+                    actions.push(KernelAction::Render(self.render_state()));
+                }
+            }
             InputEvent::FocusChanged { app, field } => self.on_focus(app, field, &mut actions),
             InputEvent::ContextUpdated(snap) => self.on_context(snap),
             InputEvent::Voice(v) => self.on_voice(v, &mut actions),
@@ -301,7 +313,9 @@ impl Kernel {
             Key::Char(d @ '0'..='9') => {
                 if self.has_composition() && d != '0' {
                     let idx = self.page_start + (d as usize - '1' as usize);
-                    self.choose(idx, actions);
+                    if (d as usize - '1' as usize) < self.cfg.decode.page_size.max(1) {
+                        self.choose(idx, actions);
+                    }
                 } else {
                     actions.push(KernelAction::PassThrough);
                 }
@@ -427,7 +441,14 @@ impl Kernel {
             actions.push(KernelAction::Render(self.render_state()));
             return;
         }
-        let out = self.decoder.decode(&self.buffer, self.dict.as_ref());
+        let out = match self.cfg.pinyin_scheme {
+            retype_types::PinyinScheme::Full => {
+                self.decoder.decode(&self.buffer, self.dict.as_ref())
+            }
+            retype_types::PinyinScheme::Flypy => {
+                retype_pinyin::shuangpin::decode(&self.buffer, self.dict.as_ref(), &self.cfg.decode)
+            }
+        };
         self.candidates = out.candidates;
         self.candidates.truncate(self.cfg.candidate_cap);
         self.syllables = out.syllables;

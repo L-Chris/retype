@@ -11,7 +11,7 @@ pub mod learning;
 pub mod render;
 
 pub use context::{AppInfo, ContextSnapshot, FieldInfo, FieldKind, PrivacyLevel};
-pub use event::{AsrEvent, InputEvent, InputSource, Key, Modifiers, VoiceEvent};
+pub use event::{AsrEvent, InputEvent, InputSource, Key, Modifiers, PinyinScheme, VoiceEvent};
 pub use learning::{LearningEvent, LearningStore};
 pub use render::{
     Candidate, CandidateSource, CommitRequest, KernelAction, RenderState, RerankJob, RerankOutcome,

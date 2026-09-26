@@ -5,8 +5,12 @@
 架构参考 [`test.md`](./test.md)（豆包输入法的 AI 流水线拆解），完整设计见
 **[`ARCHITECTURE.md`](./ARCHITECTURE.md)**。
 
-> 当前进度：**M0（地基）已完成** —— 内核、词库、拼音引擎、TSF 骨架、352k 词的真实词库、
-> 首刷延迟达标。还**不能在系统里打中文**（组字串读写是 M1）。详见 [`docs/roadmap.md`](./docs/roadmap.md)。
+> 当前进度：**M1 桌面输入预览** —— 已接通 TSF 组字、中文上屏、候选窗和中英切换，
+> 独立 RichEdit 窗口实测 `nihao` → `你好`。包含 x86/x64 DLL 和二进制词库。
+> 主流应用兼容性矩阵尚未完成，现代应用支持仍待验证。详见 [`docs/roadmap.md`](./docs/roadmap.md)。
+
+0.1.3 新增语言栏「中 / A」状态图标，点击切换中英；右键菜单选择全拼或小鹤双拼，选择会保存。
+全拼输入 `nihao`，小鹤输入 `nihc`，空格选择「你好」。候选窗采用圆角横排，每页五项，支持数字和鼠标选词。
 
 ---
 
@@ -135,18 +139,16 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 
 | 指标 | 实测 | 预算 |
 |---|---|---|
-| 首刷按键延迟 P50 | **445 µs** | — |
-| 首刷按键延迟 P99 | **3.35 ms** | 5 ms ✓ |
+| 首刷按键延迟 P50 | **293 µs** | — |
+| 首刷按键延迟 P99 | **2.22 ms** | 5 ms ✓ |
 | 词库加载 | 0.65 ~ 1.1 s | **必须异步**（`AsyncDict`） |
 | 词库构建 | 1.2 s | — |
-| TSF TIP DLL | **1,082 KB** | 偏大，M1 要压到 ~300KB（见下） |
-| 安装包 setup.exe | ~5 MB | — |
-| 测试 | 204 项全绿 | — |
+| TSF TIP DLL | **767.5 KiB（x64）/ 652 KiB（x86），0.1.3** | ~300 KB，尚未达标 |
+| 安装包 setup.exe | ~8 MiB（含双架构和二进制词库） | — |
+| 测试 | 全工作区与 x86 TSF 测试，见 [验证记录](./docs/m1-validation.md) | 2 项安装注册检查默认跳过 |
 
-> **DLL 体积是个已知问题**：1MB 里大部分是 `pinyin` crate 内嵌的全量汉字→拼音数据，
-> 因为 `retype-dict` 运行时要给用户自造词注音。TIP 被注入到每个进程，这个体积直接
-> 拖慢宿主启动。M1 的做法：构建期生成一张紧凑的「字→音节 id」表（约 30KB）随词库
-> 一起分发，用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉。
+> M1 已将 `pinyin` 移到构建依赖，运行时只使用生成的紧凑注音表，DLL 从 M0 的约 1,082 KB 缩小。
+> 300 KB 目标尚未达到。上述延迟为本地内核基准，不包含宿主 TSF 调度和候选窗绘制。
 
 ---
 
@@ -180,7 +182,7 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 | workflow | 触发 | 做什么 |
 |---|---|---|
 | [`ci.yml`](./.github/workflows/ci.yml) | push main / PR | 内核 crate 在 **ubuntu** 编译（跨平台铁律）· Windows 全量 fmt/clippy/test · 词库构建 · 延迟基准（P99 超 5ms 直接失败）· Flutter analyze/test · 版本号一致性 |
-| [`release.yml`](./.github/workflows/release.yml) | push tag `v*.*.*` | 校验 tag==Cargo==pubspec · 质量门 · x64 构建（+ 验证 x86 可编译）· 词库 · 基准 · **Inno Setup 打 setup.exe + sha256** · 发布 GitHub Release |
+| [`release.yml`](./.github/workflows/release.yml) | push tag `v*.*.*` | 校验 tag==Cargo==pubspec · 质量门 · x64/x86 构建与 TSF 测试 · 词库 · 基准 · **Inno Setup 打 setup.exe + sha256** · 发布 GitHub Release |
 
 发版流程：
 
@@ -234,7 +236,7 @@ retype-updater.exe download --out <目录>        # 下载 + 校验，通过后�
 | | 目标 | 状态 |
 |---|---|---|
 | **M0** | 地基：内核 + 拼音引擎 + 真实词库 + TSF 骨架 + 调试台 | ✅ 完成 |
-| **M1** | 能在 Windows 里打中文（edit session / 组字串 / 候选窗 / x86+x64） | ⬜ |
+| **M1** | 能在 Windows 里打中文（edit session / 组字串 / 候选窗 / x86+x64） | 预览可用，兼容性验收中 |
 | **M2** | 上下文采集 + 用户词库持久化 + 学习闭环 + 候选窗自绘 | ⬜ |
 | **M3** | 二刷接真实云端 + 熔断 + host 进程抽取 | ⬜ |
 | **M4** | 语音输入：流式 ASR + 三段式 + 热键 | ⬜ |

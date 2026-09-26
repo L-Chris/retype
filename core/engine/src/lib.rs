@@ -120,6 +120,90 @@ mod tests {
         fixture_with(rerank, MockConfig::default())
     }
 
+    #[test]
+    fn flypy_commit_and_prefix_consumption_use_original_keys() {
+        let f = fixture(false);
+        f.backend.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Flypy,
+        ));
+        type_str(&f.backend, "nihc");
+        let render = f.backend.render();
+        assert_eq!(render.candidates[0].text, "你好");
+        assert_eq!(render.candidates[0].consumed, 4);
+        let actions = f.backend.submit(key_ev(Key::Space));
+        assert!(actions.iter().any(|a| matches!(a, KernelAction::Commit(CommitRequest::ReplaceComposition { text }) if text == "你好")));
+        type_str(&f.backend, "nihcma");
+        let render = f.backend.render();
+        let index = render
+            .candidates
+            .iter()
+            .position(|c| c.text == "你好")
+            .expect("prefix candidate");
+        assert_eq!(render.candidates[index].consumed, 4);
+        f.backend.submit(InputEvent::CandidateChosen { index });
+        assert_eq!(f.backend.render().composition, "你好ma");
+        for _ in 0..3 {
+            f.backend.submit(key_ev(Key::Backspace));
+        }
+        assert_eq!(f.backend.render().composition, "nihc");
+        f.backend.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Full,
+        ));
+        assert!(f.backend.render().composition.is_empty());
+        type_str(&f.backend, "nihao");
+        assert_eq!(f.backend.render().candidates[0].text, "你好");
+    }
+
+    #[test]
+    fn flypy_syllable_boundary_cannot_be_resegmented_as_full_pinyin() {
+        let f = fixture(false);
+        f.backend.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Flypy,
+        ));
+        type_str(&f.backend, "xm"); // xian is ONE syllable, never xi + an.
+        assert!(!f
+            .backend
+            .render()
+            .candidates
+            .iter()
+            .any(|c| c.text == "西安"));
+        f.backend.submit(key_ev(Key::Escape));
+        type_str(&f.backend, "xian"); // xi + an in Flypy.
+        assert!(f
+            .backend
+            .render()
+            .candidates
+            .iter()
+            .any(|c| c.text == "西安"));
+        f.backend.submit(key_ev(Key::Escape));
+        type_str(&f.backend, "ni'hc");
+        assert_eq!(f.backend.render().candidates[0].text, "你好");
+        assert_eq!(f.backend.render().candidates[0].consumed, 5);
+    }
+
+    #[test]
+    fn numeric_selection_does_not_choose_hidden_next_page() {
+        // One item per page makes candidate 2 invisible even though it exists.
+        let mut kernel = Kernel::new(
+            KernelConfig {
+                decode: retype_pinyin::DecodeOptions {
+                    page_size: 1,
+                    ..Default::default()
+                },
+                rerank_enabled: false,
+                ..Default::default()
+            },
+            demo_dict(),
+            Arc::new(Learner::new(Arc::new(UserDict::new()))),
+            offline_cloud(Duration::from_millis(100)),
+        );
+        type_kernel(&mut kernel, "ni");
+        let before = kernel.render_state().composition;
+        let actions = kernel.handle(key_ev(Key::Char('2')));
+        assert!(!actions.iter().any(|a| matches!(a, KernelAction::Commit(_))));
+        assert_eq!(kernel.render_state().composition, before);
+    }
+
     fn fixture_with(rerank: bool, mock: MockConfig) -> Fixture {
         let (k, user, cloud) = make_kernel(rerank, mock);
         Fixture {

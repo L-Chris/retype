@@ -6,8 +6,37 @@
 
 use retype_types::{Key, Modifiers};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, MAPVK_VK_TO_CHAR, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetKeyState, GetKeyboardLayout, GetKeyboardState, MapVirtualKeyW, ToUnicodeEx,
+    MAPVK_VK_TO_CHAR, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
+
+/// Translate printable keys with the actual Shift/CapsLock/layout state. Bit 2
+/// prevents OnTestKeyDown from modifying the OS dead-key buffer (Windows 10 1607+).
+pub fn translate_event(vk: u16, scan: u32) -> Option<Key> {
+    let base = translate_vk(vk);
+    if base.is_some_and(|key| !matches!(key, Key::Char(_))) {
+        return base;
+    }
+    let mut keys = [0u8; 256];
+    let mut buffer = [0u16; 8];
+    // SAFETY: Fixed-size buffers meet Win32 requirements; this is a read-only translation.
+    let count = unsafe {
+        GetKeyboardState(&mut keys).ok()?;
+        ToUnicodeEx(
+            vk as u32,
+            scan,
+            &keys,
+            &mut buffer,
+            4,
+            Some(GetKeyboardLayout(0)),
+        )
+    };
+    if count != 1 {
+        return None;
+    }
+    let c = char::from_u32(buffer[0] as u32)?;
+    (!c.is_control()).then_some(Key::Char(c))
+}
 
 /// 高位为 1 表示按下（`GetKeyState` 的约定）。
 fn is_down(vk: u32) -> bool {

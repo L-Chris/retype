@@ -71,29 +71,53 @@ pub trait IClassFactory_Impl: windows_core::IUnknownImpl {
 
 ---
 
-## 注册（M1）
+## 注册与安装排查
 
-两条路，都要支持：
+安装器通过 Inno Setup 的 `regserver` 调用 DLL 的 `DllRegisterServer`，卸载时调用
+`DllUnregisterServer`。开发脚本 `platforms/windows/installer/register.ps1` 也走同一入口，
+现在需要管理员权限（原来的 HKCU 手写注册方式不完整，已取消）。
 
-1. **写注册表 + regsvr32 风格**（安装器用）
-   ```
-   HKLM\SOFTWARE\Microsoft\CTF\TIP\{CLSID}
-       \InprocServer32            (默认) = <dll 绝对路径>
-                                  ThreadingModel = "Apartment"
-       \LanguageProfile\0x00000804\{ProfileGUID}
-                                  Enable = 1
-                                  (Display Description / Description 指向资源字符串)
-   ```
-   64 位系统上 32 位 TIP 要走 `HKLM\SOFTWARE\WOW6432Node\...`。
+注册包含三部分：
 
-2. **`ITfInputProcessorProfileMgr::RegisterProfile`**（运行时自注册，免管理员权限时用 HKCU）
+1. `HKLM\SOFTWARE\Classes\CLSID\{CLSID}\InprocServer32` 写入实际 DLL 路径与 `Apartment`。
+2. `ITfInputProcessorProfiles::Register`、`AddLanguageProfile` 注册简体中文配置；不使用默认启用代替用户添加。
+3. `ITfCategoryMgr::RegisterCategory` 注册 `GUID_TFCAT_TIP_KEYBOARD` 和 `GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT`。
 
-**必须同时提供 x86 和 x64 两个 DLL** —— 32 位进程（很多老软件、部分游戏）只会加载 32 位 TIP，只发 x64 会导致「某些程序里完全打不出字」（test.md 第六节列的正是这类问题）。
+不能把 COM 的 `InprocServer32` 写在 `CTF\TIP` 下。安装器会清理旧版误写的这个子键。
+注册入口返回真实 HRESULT；失败时安装器会显示注册错误，开发脚本会抛出异常。
 
-Rust 侧需要 `i686-pc-windows-msvc` target：`rustup target add i686-pc-windows-msvc`。
+安装器在机器注册完成后，以启动安装器的原用户身份执行 `user-profile.ps1`，调用系统
+`InstallLayoutOrTip` 加入当前用户键盘列表，再用 `Get-WinUserLanguageList` 验证。
+不更改默认输入法，也不删除其他键盘。失败时结束页明确提示，安装器返回非零退出码。
+开始菜单提供「添加到当前用户的键盘列表」，供其他账户或原用户身份不可用时补做。
+
+修复已安装的旧版本，不需要管理员权限：
+
+```powershell
+.\platforms\windows\installer\user-profile.ps1
+# 仅移除当前用户的键盘选项（不卸载 DLL）
+.\platforms\windows\installer\user-profile.ps1 -Uninstall
+```
+
+卸载先移除执行卸载的账户的键盘条目，再注销机器级 COM/TSF。
+其他账户的用户列表不在该卸载进程的权限上下文中；可在对应账户运行上述移除命令。
+`EnableLanguageProfile` / `EnableLanguageProfileByDefault` 的 Enable 状态并不等于已加入
+Windows 用户键盘列表；此前的半启用状态会导致设置页面显示异常。
+
+当前是 M1 桌面预览：已实现中文上屏、候选窗；AppContainer 支持尚未验证。
+因此保留「仅桌面」限制，不注册 `GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT` 来伪装兼容。
+可在桌面宿主中选择；现代应用中灰色不可用仍是预期边界。安装包包含 x64 DLL 和 `x86` 子目录中的 32 位 DLL，共用根目录词库。
+在干净 Windows 测试机安装新构建的安装器后，可运行只读验收：
+
+```powershell
+cargo test -p retype-tsf installed_tip_ -- --ignored --test-threads=1
+```
+
+该检查验证中文配置已启用、可枚举为键盘服务，以及 COM 能从已注册 DLL 创建 TIP，并在测试进程内激活（不切换用户桌面的输入法）。
+普通 `cargo test` 不修改系统注册；此验收默认跳过。卸载后也应检查 retype 的 COM 类、
+语言配置和类别记录均已移除。
 
 ---
-
 ## 必须实现的接口清单
 
 | 接口 | 用途 | 阶段 |
@@ -108,8 +132,9 @@ Rust 侧需要 `i686-pc-windows-msvc` target：`rustup target add i686-pc-window
 | `ITfActiveLanguageProfileNotifySink` | 中英切换通知 | M1 |
 | `ITfTextEditSink` | 宿主文本变化（用于采集上下文） | M2 |
 | `ITfContextOwnerCompositionServices` | 读取光标前后文 | M2 |
-| `ITfCandidateListUIElement` | 原生候选窗（M1 用它，M2 换自绘） | M1 |
-| `ITfLangBarEventSink` | 语言栏图标点击 | M2 |
+| `ITfCandidateListUIElement` | 向宿主暴露候选数据；TIP 仍需绘制桌面候选窗 | M1 |
+| `ITfLangBarItemButton` / `ITfLangBarItemSink` | 中/A 图标、点击切换、方案菜单及更新通知（0.1.3） | M1 |
+| `ITfCompartmentEventSink` | 系统输入法开关状态同步（0.1.3） | M1 |
 
 ---
 
@@ -126,7 +151,7 @@ Rust 侧需要 `i686-pc-windows-msvc` target：`rustup target add i686-pc-window
 
 坑：
 - **不能在 `OnKeyDown` 里同步改文本**，必须在 edit session 里，而且优先用 `TF_ES_ASYNCDONTCARE`；同步 session（`TF_ES_SYNC`）在某些应用里会死锁。
-- 候选窗要跟随光标，位置从 `ITfContextView::GetRangeFromPoint` / `ITfRange::GetBoundingClientRect` 拿，拿不到就退回 `GetCaretPos`。
+- 候选位置在读锁内通过 `ITfContextView::GetTextExt` 获取；无布局或范围不可见时隐藏窗口。`ITfTextLayoutSink` 通知触发只读刷新。
 - `Deactivate` 必须把所有 sink 反注册、把未定稿的组字串提交或取消，否则宿主应用会留下「僵尸下划线」。
 
 ---
@@ -152,7 +177,8 @@ Rust 侧需要 `i686-pc-windows-msvc` target：`rustup target add i686-pc-window
 调 TSF 最痛的是「改一行 → 重新注册 → 注销重登 → 打开记事本试」。所以：
 
 1. **`retype-diag`（终端调试台）**：不碰 TSF，直接在终端敲拼音验证内核与词库。90% 的迭代在这里完成。
-2. **`retype-tsf` 的 `--selftest` 模式**：一个 exe 用 `CoCreateInstance` 直接创建自己的 TIP，在自建窗口里跑 activate/key/edit 流程，不需要系统级注册。
-3. 只有验证 UI 兼容性时才走「真注册 + 真应用」。
+2. **`cargo test -p retype-tsf real_tsf`**：自建内存 `ITextStoreACP`，通过真实 TSF edit session 验证文档修改，不改系统注册。`selftest.rs` 仅验证内核装配，不等同宿主上屏。
+3. **`cargo run -p retype-tsf --example desktop_host`**：独立 RichEdit 测试窗口，仅在本进程激活已注册的 retype，需要先安装待测 DLL。
+4. 应用兼容性仍需「真注册 + 真应用」逐项测试。
 
 注册/注销脚本见 `platforms/windows/installer/`。

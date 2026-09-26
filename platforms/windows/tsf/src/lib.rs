@@ -15,9 +15,16 @@
 //! 红线见 docs/windows-tsf.md：TIP 跑在宿主进程里，我们崩溃就是宿主崩溃。
 #![allow(unsafe_code)]
 
+mod candidate;
 pub mod class_factory;
+mod display;
+mod edit;
 pub mod ids;
 pub mod keymap;
+mod langbar;
+mod popup;
+mod preferences;
+mod registration;
 pub mod session;
 pub mod tip;
 
@@ -66,25 +73,29 @@ pub unsafe extern "system" fn DllGetClassObject(
     }
 }
 
-/// TSF TIP **不走 regsvr32 自注册约定**：它需要在
-/// `HK{LM,CU}\SOFTWARE\Microsoft\CTF\TIP\{CLSID}` 下写 InprocServer32 与
-/// LanguageProfile 两套键，还要处理 32/64 位两份 DLL。
-///
-/// 注册由 [`platforms/windows/installer/register.ps1`] 完成（M1 会随安装器改成 Rust 实现），
-/// 这里返回 S_OK 只是为了让误用 regsvr32 的人不会看到一个莫名的失败。
+/// 注册 COM 类、TSF 中文配置和键盘类别，需要管理员权限。
+/// 安装器和开发脚本共用此入口；失败返回实际 HRESULT。
 ///
 /// # Safety
 /// 由 COM 运行时调用。
 #[no_mangle]
 pub unsafe extern "system" fn DllRegisterServer() -> HRESULT {
-    S_OK_HR
+    registration_result(registration::register)
 }
 
 /// # Safety
 /// 由 COM 运行时调用。
 #[no_mangle]
 pub unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
-    S_OK_HR
+    registration_result(registration::unregister)
+}
+
+fn registration_result(action: fn() -> windows_core::Result<()>) -> HRESULT {
+    match std::panic::catch_unwind(action) {
+        Ok(Ok(())) => S_OK_HR,
+        Ok(Err(error)) => error.code(),
+        Err(_) => E_UNEXPECTED,
+    }
 }
 
 /// # Safety
@@ -97,7 +108,7 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
 /// 不依赖 TSF 的自检：装配一次会话，喂一串按键，确认内核能出候选、不 panic。
 ///
 /// 给安装器和 CI 用 —— 「DLL 能被加载」和「装进去真能打字」是两件事，
-/// 这个函数在不注册、不注入任何进程的前提下验证后者。
+/// 这个函数仅验证内核链路，不验证系统注册或宿主中文上屏。
 pub fn selftest() -> Result<String, String> {
     let state = tip::TipState::new();
     // 用一个不存在的词库路径，顺带验证降级路径（§7：词库缺失 → 单字模式）
@@ -145,6 +156,16 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn registration_errors_cross_ffi_as_hresult() {
+        assert_eq!(registration_result(|| Ok(())), S_OK_HR);
+        assert_eq!(registration_result(|| Err(E_POINTER.into())), E_POINTER);
+        assert_eq!(
+            registration_result(|| panic!("registration panic")),
+            E_UNEXPECTED
+        );
+    }
 
     #[test]
     fn selftest_passes_with_a_missing_dict() {

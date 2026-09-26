@@ -110,6 +110,13 @@ pub enum AsrEvent {
 }
 
 /// 内核的唯一输入。平台适配层只做「系统事件 → InputEvent」的翻译。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PinyinScheme {
+    #[default]
+    Full,
+    Flypy,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     Key {
@@ -126,6 +133,7 @@ pub enum InputEvent {
     ContextUpdated(super::ContextSnapshot),
     /// 中英切换（Shift / 热键 / 语言栏点击）。平台层判定后投递，内核不猜按键组合。
     ToggleChinese,
+    SetPinyinScheme(PinyinScheme),
     Voice(VoiceEvent),
     /// 用户从候选窗选了第 index 个
     CandidateChosen {

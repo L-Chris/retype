@@ -8,7 +8,7 @@
     retype-dict.tsv       已注音词库
     retype-diag.exe       终端调试台
 
-  M1 起这里还要产出 i686（32 位）DLL —— 32 位进程只会加载 32 位 TIP，
+  同时产出 i686（32 位）DLL —— 32 位进程只会加载 32 位 TIP，
   只发 x64 会导致「某些程序里完全打不出字」（test.md 第六节）。
 
 .PARAMETER SkipDict
@@ -36,11 +36,15 @@ Set-Location $repoRoot
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 Step "1/5 构建 TIP DLL 与调试台（release）"
-cargo build --release -p retype-tsf -p retype-diag
+cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli
 if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+rustup target add i686-pc-windows-msvc
+if ($LASTEXITCODE -ne 0) { throw "安装 x86 Rust target 失败" }
+cargo build --release --target i686-pc-windows-msvc -p retype-tsf
+if ($LASTEXITCODE -ne 0) { throw "x86 TIP 构建失败" }
 
 $dictTsv = Join-Path $repoRoot 'data\dict\retype-dict.tsv'
-if (-not $SkipDict -or -not (Test-Path $dictTsv)) {
+if (-not $SkipDict -or -not (Test-Path $dictTsv) -or -not (Test-Path (Join-Path $repoRoot 'data\dict\retype-dict.bin'))) {
   Step "2/5 构建词库"
   $raw = Join-Path $repoRoot 'data\dict\raw\jieba-dict.txt'
   if (-not (Test-Path $raw)) {
@@ -54,9 +58,11 @@ if (-not $SkipDict -or -not (Test-Path $dictTsv)) {
 }
 
 if (-not $NoTest) {
-  Step "3/5 自检（内核 + TSF 骨架，不注册不注入）"
+  Step "3/5 自检（内核 + 真实 TSF 文本存储，不修改系统注册）"
   cargo test --workspace --release
   if ($LASTEXITCODE -ne 0) { throw "测试失败" }
+  cargo test --release --target i686-pc-windows-msvc -p retype-tsf
+  if ($LASTEXITCODE -ne 0) { throw "x86 TSF 测试失败" }
 } else {
   Step "3/5 跳过自检"
 }
@@ -73,6 +79,9 @@ Step "5/5 收集产物到 dist\windows"
 $dist = Join-Path $repoRoot 'dist\windows'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item (Join-Path $repoRoot 'target\release\retype_ime.dll') $dist -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $dist 'x86') | Out-Null
+Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.dll') (Join-Path $dist 'x86') -Force
+Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 foreach ($f in @('retype_ime.dll', 'retype-diag.exe', 'retype-dict.tsv')) {
@@ -90,8 +99,12 @@ Write-Host "  注册进系统(M1) : platforms\windows\installer\register.ps1（�
 
 if ($Installer) {
   Step "6/6 构建 Inno Setup 安装器"
-  $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-  if (-not (Test-Path $iscc)) {
+  $iscc = @(
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+  ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $iscc) {
     Write-Warning "找不到 ISCC.exe，跳过。装法: winget install JRSoftware.InnoSetup  或  choco install innosetup"
   } else {
     $ver = (Select-String -Path (Join-Path $repoRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"' |
@@ -102,6 +115,9 @@ if ($Installer) {
       "/DBaseDir=target\release" "/DOutDir=dist" `
       (Join-Path $PSScriptRoot 'retype.iss')
     if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败" }
+    $setup = Join-Path $repoRoot "dist\retype-$ver-windows-x64-setup.exe"
+    $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$setup.sha256", "$hash  $([IO.Path]::GetFileName($setup))`n", [Text.UTF8Encoding]::new($false))
     Get-ChildItem (Join-Path $repoRoot 'dist\*-setup.exe') | ForEach-Object {
       Write-Host ("  {0,-44} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB))
     }
