@@ -69,7 +69,8 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
 VersionInfoVersion={#MyAppVersion}
-VersionInfoProduct={#MyAppName}
+VersionInfoProductName={#MyAppName}
+VersionInfoDescription={#ProfileDesc}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoOriginalFilename=retype-{#MyAppVersion}-windows-x64-setup.exe
 

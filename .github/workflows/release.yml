@@ -156,13 +156,22 @@ jobs:
       - name: 安装 Inno Setup
         shell: pwsh
         run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
+          # choco 装到 Program Files (x86)，winget 装到 LOCALAPPDATA\Programs，
+          # 逐个探测而不是硬编码一条路径
+          $candidates = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
             choco install innosetup --no-progress -y
             if ($LASTEXITCODE -ne 0) { throw "choco 安装 Inno Setup 失败" }
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
-          if (-not (Test-Path $iscc)) { throw "装完仍找不到 ISCC.exe: $iscc" }
-          & $iscc 2>&1 | Select-Object -First 1
+          if (-not $iscc) { throw "装完仍找不到 ISCC.exe，探测过: $($candidates -join ', ')" }
+          Write-Host "ISCC: $iscc"
+          & $iscc 2>&1 | Select-String -Pattern "Inno Setup" | Select-Object -First 1
           "ISCC=$iscc" >> $env:GITHUB_ENV
 
       - name: 构建安装器
