@@ -28,16 +28,22 @@
 
 | 环节 | 结果 |
 |---|---|
-| `release.yml` 由 tag `v0.1.0` 触发 | ✅ 3m15s 完成，发布 Release + 2 个资产 |
-| 产物命名与 `Platform::asset_suffix()` 对齐 | ✅ `retype-0.1.0-windows-x64.zip` + 同名 `.sha256` |
+| `release.yml` 由 tag 触发 | ✅ v0.1.0 3m15s、v0.1.1 4m46s，均发布 Release |
+| 产物命名与 `Platform::asset_suffix()` 对齐 | ✅ v0.1.1 起为 `retype-<版本>-windows-x64-setup.exe` + 同名 `.sha256`（Inno Setup 安装包） |
 | `ci.yml` 四个 job | ✅ 全绿（ubuntu 内核 / windows 全量 / Flutter / 版本一致性） |
 | 内核在 **ubuntu** 上编译通过 | ✅ 证明 `core/` 确实不含任何平台 API |
 | `retype-updater check` 对真实 release | ✅ `--current 0.0.9` → 退出码 10 且「可安装 = true」；`--current 0.1.0` → 退出码 0，不提示降级 |
-| `retype-updater download` + sha256 校验 | ✅ 从真实 Release 下载 5,060,801 字节，校验通过后落盘 |
+| `retype-updater download` + sha256 校验 | ✅ 从真实 Release 下载 5,783,576 字节，校验通过后落盘 |
+| **真实升级路径** | ✅ 0.1.0 → 0.1.1：check 判定有更新且可安装，download 拉取并校验通过 |
 | 篡改检测 | ✅ 改动 1 字节后 `verify` 退出码 4 并拒绝安装 |
+| Inno Setup 安装器 | ✅ 本地 6.7.3 与 CI 均编译通过（5.5MB），7 个文件全部打包 |
 
-踩到的一个坑（已修）：`cargo clippy -- -D warnings -p xxx` 里的 `-p` 在 `--` 之后
-会被当成 rustc 参数，报 `Unrecognized option: 'p'`。`-p` 必须放在 `--` 之前。
+踩到的坑（都已修）：
+- `cargo clippy -- -D warnings -p xxx` 里的 `-p` 在 `--` 之后会被当成 rustc 参数。
+- Inno 的 `VersionInfoVersion` 不接受 `0.0.0-ci` 这种带后缀的版本号（必须 1~4 段纯数字）。
+- `VersionInfoProduct` 不是 Inno 指令，正确名是 `VersionInfoProductName`。
+- `[Files]` 的相对路径基准有歧义，统一成「RepoRoot 绝对 + 其余相对 RepoRoot」并显式 `SourceDir`。
+- 验证安装器时**不要跑 `setup.exe /?`**：Inno 对 `/?` 的响应是弹模态帮助框，会挡住自动化流程。
 
 ---
 

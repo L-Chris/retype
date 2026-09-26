@@ -333,8 +333,13 @@ fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf
         println!("已下载到: {}", dest.display());
         println!("大小: {} 字节", resp.body.len());
         println!();
-        println!("下一步（M5 安装器接管）：解压 → 关闭占用 DLL 的进程 → 原子替换 → 重新注册。");
-        println!("现在手动安装的方式见 docs/auto-update.md。");
+        println!("下一步：静默运行安装器完成升级（Restart Manager 会处理 DLL 被占用）：");
+        println!(
+            "  & \"{}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
+            dest.display()
+        );
+        println!("/NORESTART 是刻意的：由你决定何时重启，而不是让安装器在用户打字时重启机器。");
+        println!("详见 docs/auto-update.md §4。");
     }
     Ok(dest)
 }
