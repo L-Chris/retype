@@ -24,9 +24,20 @@
 能得到「你好吗世界」；`cargo clippy --workspace --all-targets -- -D warnings` 零警告；
 打 tag 后 CI 产出 `retype-<版本>-windows-x64.zip` + `.sha256` 并发布 Release。
 
-**待验证（需要真实 GitHub 仓库）**：`release.yml` 全流程跑通、
-`retype-updater.exe check` 对真实 release 的解析。仓库尚未配置 remote，
-这两项要等仓库建好后补一次端到端验证。
+**已端到端验证**（仓库 [L-Chris/retype](https://github.com/L-Chris/retype)，v0.1.0）：
+
+| 环节 | 结果 |
+|---|---|
+| `release.yml` 由 tag `v0.1.0` 触发 | ✅ 3m15s 完成，发布 Release + 2 个资产 |
+| 产物命名与 `Platform::asset_suffix()` 对齐 | ✅ `retype-0.1.0-windows-x64.zip` + 同名 `.sha256` |
+| `ci.yml` 四个 job | ✅ 全绿（ubuntu 内核 / windows 全量 / Flutter / 版本一致性） |
+| 内核在 **ubuntu** 上编译通过 | ✅ 证明 `core/` 确实不含任何平台 API |
+| `retype-updater check` 对真实 release | ✅ `--current 0.0.9` → 退出码 10 且「可安装 = true」；`--current 0.1.0` → 退出码 0，不提示降级 |
+| `retype-updater download` + sha256 校验 | ✅ 从真实 Release 下载 5,060,801 字节，校验通过后落盘 |
+| 篡改检测 | ✅ 改动 1 字节后 `verify` 退出码 4 并拒绝安装 |
+
+踩到的一个坑（已修）：`cargo clippy -- -D warnings -p xxx` 里的 `-p` 在 `--` 之后
+会被当成 rustc 参数，报 `Unrecognized option: 'p'`。`-p` 必须放在 `--` 之前。
 
 ---
 
