@@ -49,8 +49,10 @@ jobs:
             -p retype-ffi
 
       - name: 内核 crate clippy
+        # 注意：`-p` 必须放在 `--` 之前。`--` 之后的参数是传给 clippy-driver/rustc 的，
+        # 写成 `... -- -D warnings -p xxx` 会报 `Unrecognized option: 'p'`。
         run: |
-          cargo clippy --locked --all-targets -- -D warnings \
+          cargo clippy --locked --all-targets \
             -p retype-types \
             -p retype-pinyin \
             -p retype-dict \
@@ -58,7 +60,8 @@ jobs:
             -p retype-cloud \
             -p retype-engine \
             -p retype-updater \
-            -p retype-ffi
+            -p retype-ffi \
+            -- -D warnings
 
   # ─────────────────────────────────────────────────────────────
   # Windows 全量：TSF TIP 只能在 Windows 上编译
