@@ -15,23 +15,25 @@
 //! 而且直接违反 P1（输入主线程不得阻塞）。所以更新是一个**独立的 exe**，
 //! 由设置界面或计划任务触发。
 //!
-//! ## 更新流程（M0 实现到「校验通过」为止）
+//! ## 更新流程
 //!
 //! ```text
 //! check ──► 比对版本 ──► 有新版？
 //!                          │否 → 静默结束（不打扰用户）
 //!                          │是
 //!                          ▼
-//!              下载 <产物>.sha256  ──► 下载产物 ──► verify_sha256
-//!                                                      │失败 → 删除，报错，绝不安装
-//!                                                      │通过
-//!                                                      ▼
-//!                                          落盘到暂存区，等待 M5 的安装器接管
+//!              下载 <产物>.sha256  ──► 下载安装包 ──► verify_sha256
+//!                                                        │失败 → 丢弃，退出码 4，磁盘上不留文件
+//!                                                        │通过
+//!                                                        ▼
+//!                                  静默运行 setup.exe /VERYSILENT /NORESTART
 //! ```
 //!
-//! 「替换正在使用的 DLL」这一步刻意**没有**实现：TIP 被所有进程加载着，
-//! 直接覆盖会失败或造成半更新状态。真正的原子替换（改名 + 重启后清理，
-//! 或走 MSI）是 M5 安装器的工作，见 `docs/auto-update.md`。
+//! 发的是 **Inno Setup 安装包**而不是 zip：输入法要写 HKLM 的 CTF 注册表键、
+//! 要把词库放进 Program Files、还要处理「TIP DLL 正被所有宿主进程占用」。
+//! 占用问题由 Windows 的 Restart Manager 处理（安装器已接好），
+//! 所以本 crate 只负责「查、比、下、验」，安装那一步交给安装器。
+//! 早期设计里那套「版本化目录 + 注册表指向」的自制方案已作废，见 `docs/auto-update.md` §4。
 
 pub mod github;
 pub mod mock;
@@ -256,8 +258,8 @@ mod tests {
     fn release_json(tag: &str, with_assets: bool) -> String {
         let assets = if with_assets {
             r#","assets":[
-                {"name":"retype-0.2.0-windows-x64.zip","browser_download_url":"https://dl.invalid/a.zip","size":9000},
-                {"name":"retype-0.2.0-windows-x64.zip.sha256","browser_download_url":"https://dl.invalid/a.zip.sha256","size":120}
+                {"name":"retype-0.2.0-windows-x64-setup.exe","browser_download_url":"https://dl.invalid/a.exe","size":9000},
+                {"name":"retype-0.2.0-windows-x64-setup.exe.sha256","browser_download_url":"https://dl.invalid/a.exe.sha256","size":120}
             ]"#
         } else {
             r#","assets":[]"#
@@ -282,7 +284,7 @@ mod tests {
             s.release_page.as_deref(),
             Some("https://github.com/acme/retype/releases/tag/v0.2.0")
         );
-        assert_eq!(s.asset.unwrap().name, "retype-0.2.0-windows-x64.zip");
+        assert_eq!(s.asset.unwrap().name, "retype-0.2.0-windows-x64-setup.exe");
         assert!(s.checksum_asset.is_some());
     }
 
@@ -373,7 +375,7 @@ mod tests {
     fn missing_checksum_blocks_install() {
         // 只发了 zip 没发 .sha256：必须判定为不可安装，否则更新通道无法验证
         let body = r#"{"tag_name":"v0.2.0","html_url":"https://github.com/acme/retype/releases/tag/v0.2.0","prerelease":false,"assets":[
-            {"name":"retype-0.2.0-windows-x64.zip","browser_download_url":"https://dl.invalid/a.zip","size":9000}]}"#;
+            {"name":"retype-0.2.0-windows-x64-setup.exe","browser_download_url":"https://dl.invalid/a.exe","size":9000}]}"#;
         let m = MockHttp::new().with_json(URL, 200, body);
         let s = checker(m).check("0.1.0", Platform::WindowsX64).unwrap();
         assert!(s.update_available);

@@ -1,9 +1,14 @@
 ﻿<#
 .SYNOPSIS
-  注册 / 注销 retype 输入法（TSF Text Input Processor）。
+  【开发用】注册 / 注销 retype 输入法（TSF Text Input Processor）。
 
 .DESCRIPTION
-  默认按**当前用户**注册到 HKCU，不需要管理员权限。
+  ⚠ 正式安装请用 Inno Setup 打出的 setup.exe（`build.ps1 -Installer`，或 CI 的 Release 产物）。
+    安装器会处理 HKLM 注册、词库落位、DLL 被占用时的 Restart Manager、卸载条目等；
+    本脚本只是开发期快速迭代用的轻量替代品（写 HKCU，不需要管理员权限，
+    改完代码重新注册一下就能测）。
+
+  默认按**当前用户**注册到 HKCU。
   注册后需要让 ctfmon 重新加载：注销重登，或重启 ctfmon（脚本会尝试）。
 
   ⚠ M0 的 DLL 是「安全骨架」：它能被系统加载、能激活、能收到按键，
@@ -24,6 +29,8 @@
 .PARAMETER DictPath
   已注音词库路径。注册时会一并复制到 %LOCALAPPDATA%\retype\，
   因为 TIP 运行在宿主进程里，工作目录不可预期。
+  注意：正式安装器把词库放在 DLL 同目录，TIP 会优先从那里找（见 session.rs 的
+  default_dict_path），这个复制只是给脚本安装方式留的退路。
 
 .EXAMPLE
   .\register.ps1

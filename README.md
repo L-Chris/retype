@@ -140,7 +140,7 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 | 词库加载 | 0.65 ~ 1.1 s | **必须异步**（`AsyncDict`） |
 | 词库构建 | 1.2 s | — |
 | TSF TIP DLL | **1,082 KB** | 偏大，M1 要压到 ~300KB（见下） |
-| 发行包 zip | 4.7 MB | — |
+| 安装包 setup.exe | ~5 MB | — |
 | 测试 | 204 项全绿 | — |
 
 > **DLL 体积是个已知问题**：1MB 里大部分是 `pinyin` crate 内嵌的全量汉字→拼音数据，
@@ -180,7 +180,7 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 | workflow | 触发 | 做什么 |
 |---|---|---|
 | [`ci.yml`](./.github/workflows/ci.yml) | push main / PR | 内核 crate 在 **ubuntu** 编译（跨平台铁律）· Windows 全量 fmt/clippy/test · 词库构建 · 延迟基准（P99 超 5ms 直接失败）· Flutter analyze/test · 版本号一致性 |
-| [`release.yml`](./.github/workflows/release.yml) | push tag `v*.*.*` | 校验 tag==Cargo==pubspec · 质量门 · x64 构建（+ 验证 x86 可编译）· 词库 · 基准 · `package.ps1` 打 zip+sha256 · 发布 GitHub Release |
+| [`release.yml`](./.github/workflows/release.yml) | push tag `v*.*.*` | 校验 tag==Cargo==pubspec · 质量门 · x64 构建（+ 验证 x86 可编译）· 词库 · 基准 · **Inno Setup 打 setup.exe + sha256** · 发布 GitHub Release |
 
 发版流程：
 
@@ -193,7 +193,8 @@ git push origin v0.1.1
 ```
 
 产物命名必须与 `core/updater` 的 `Platform::asset_suffix()` 对齐
-（`retype-<版本>-windows-x64.zip` + 同名 `.sha256`），否则更新器挑不到产物。
+（`retype-<版本>-windows-x64-setup.exe` + 同名 `.sha256`），否则更新器挑不到安装包。
+CI 里有一步专门断言这两边一致，改一边忘另一边会直接红。
 
 ## 自动更新
 
@@ -207,6 +208,10 @@ git push origin v0.1.1
    对 `0.2.0-rc.1` 会得出错误结论。
 3. **sha256 校验通过才落盘**，且校验文件必须与产物成对存在 ——
    自动更新等于「从网上下载一个会被注入到每个进程的 DLL」，校验不是可选项。
+4. 发的是 **Inno Setup 安装包**而不是 zip：输入法要写 HKLM 的 CTF 注册表键、
+   要把 8.9MB 词库放进 Program Files、还要处理「DLL 正被所有进程占用」。
+   占用问题交给 Windows 的 Restart Manager，比我们自己发明机制可靠得多，
+   于是自动更新最后一步就是 `setup.exe /VERYSILENT /NORESTART`。
 
 ```powershell
 retype-updater.exe check                       # 退出码 0=已最新 10=有更新 2=网络错误

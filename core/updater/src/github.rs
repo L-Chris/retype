@@ -30,10 +30,15 @@ pub enum Platform {
 
 impl Platform {
     /// 产物文件名后缀。用后缀匹配而不是全名匹配，这样版本号变化不需要改代码。
+    ///
+    /// Windows 发的是 **Inno Setup 安装包**而不是 zip：
+    /// 输入法要写 HKLM 的 CTF 注册表键、要把 8.9MB 词库放进 Program Files、
+    /// 还要处理「DLL 正被所有进程占用」—— 这些让用户手动解压+跑脚本是不负责任的。
+    /// 自动更新因此变成「下载 setup.exe → 校验 sha256 → `/VERYSILENT` 静默升级」。
     pub fn asset_suffix(self) -> &'static str {
         match self {
-            Self::WindowsX64 => "-windows-x64.zip",
-            Self::WindowsX86 => "-windows-x86.zip",
+            Self::WindowsX64 => "-windows-x64-setup.exe",
+            Self::WindowsX86 => "-windows-x86-setup.exe",
             Self::AndroidArm64 => "-android-arm64.apk",
             Self::AndroidArm32 => "-android-arm32.apk",
             Self::AndroidX64 => "-android-x64.apk",
@@ -173,14 +178,14 @@ mod tests {
           "published_at": "2026-09-26T10:00:00Z",
           "prerelease": false,
           "assets": [
-            {"name": "retype-0.2.0-windows-x64.zip",
-             "browser_download_url": "https://example.invalid/retype-0.2.0-windows-x64.zip",
+            {"name": "retype-0.2.0-windows-x64-setup.exe",
+             "browser_download_url": "https://example.invalid/retype-0.2.0-windows-x64-setup.exe",
              "size": 9000000},
-            {"name": "retype-0.2.0-windows-x64.zip.sha256",
-             "browser_download_url": "https://example.invalid/retype-0.2.0-windows-x64.zip.sha256",
+            {"name": "retype-0.2.0-windows-x64-setup.exe.sha256",
+             "browser_download_url": "https://example.invalid/retype-0.2.0-windows-x64-setup.exe.sha256",
              "size": 120},
-            {"name": "retype-0.2.0-windows-x86.zip",
-             "browser_download_url": "https://example.invalid/x86.zip", "size": 8000000}
+            {"name": "retype-0.2.0-windows-x86-setup.exe",
+             "browser_download_url": "https://example.invalid/x86.exe", "size": 8000000}
           ]
         }"#
     }
@@ -199,11 +204,11 @@ mod tests {
     fn picks_assets_by_platform() {
         let r = parse_release_json(sample_release().as_bytes()).unwrap();
         let a = r.asset(Platform::WindowsX64).unwrap();
-        assert_eq!(a.name, "retype-0.2.0-windows-x64.zip");
+        assert_eq!(a.name, "retype-0.2.0-windows-x64-setup.exe");
         assert_eq!(a.size, 9000000);
         assert_eq!(
             r.asset(Platform::WindowsX86).unwrap().name,
-            "retype-0.2.0-windows-x86.zip"
+            "retype-0.2.0-windows-x86-setup.exe"
         );
         assert!(
             r.asset(Platform::AndroidArm64).is_none(),
@@ -215,7 +220,7 @@ mod tests {
     fn checksum_asset_is_paired_with_the_artifact() {
         let r = parse_release_json(sample_release().as_bytes()).unwrap();
         let c = r.checksum_asset(Platform::WindowsX64).unwrap();
-        assert!(c.name.ends_with(".zip.sha256"));
+        assert!(c.name.ends_with("-setup.exe.sha256"));
         assert!(r.checksum_asset(Platform::WindowsX86).is_none());
     }
 

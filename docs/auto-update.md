@@ -60,10 +60,11 @@ download ──► 先取 <产物>.sha256 ──► 再取产物 ──► verif
                                                     │失败 → 丢弃，退出码 4，磁盘上不留文件
                                                     │通过
                                                     ▼
-                                        落盘到 --out 目录（暂存区）
+                                        落盘到 --out 目录
                                                     │
                                                     ▼
-                              M5 安装器：解压 → 释放占用 → 原子替换 → 重新注册
+                          静默运行 setup.exe /VERYSILENT /NORESTART
+                          （Restart Manager 处理 DLL 被占用，见 §4）
 ```
 
 三条硬性规则：
@@ -71,28 +72,57 @@ download ──► 先取 <产物>.sha256 ──► 再取产物 ──► verif
 1. **校验先于落盘**。顺序是「先拿 sha256，再拿产物，校验通过才写文件」，
    磁盘上永远不会出现一个未经验证、却看起来像是对的产物。
 2. **缺校验文件 = 不可安装**。`UpdateStatus::is_installable()` 要求产物和
-   `.sha256` **成对存在**；只发 zip 不发校验文件时，更新器只会把用户引导到 release 页。
+   `.sha256` **成对存在**；只发安装包不发校验文件时，更新器只会把用户引导到 release 页。
 3. **只接受 https**。`parse_release_json` 会拒绝非 https 的 `html_url`，
    否则更新通道可以被降级成明文。
 
 ---
 
-## 4. 「替换正在使用的 DLL」为什么留给 M5
+## 4. 安装与「替换正在使用的 DLL」
 
-TIP DLL 正被所有宿主进程加载着，直接覆盖会失败（文件被占用）或造成半更新状态
+TIP DLL 正被所有宿主进程加载着，直接覆盖会失败（文件占用）或造成半更新状态
 （有的进程用新版、有的用旧版，用户词库格式一旦变化就会互相写坏）。
-可选方案，M5 决策：
 
-| 方案 | 优点 | 缺点 |
-|---|---|---|
-| 改名旧文件 + 写入新文件，重启后清理 | 实现简单，无需重启即可部分生效 | 需要开机自启的清理任务；旧版本 DLL 会残留一段时间 |
-| MSI/MSIX 安装器接管 | 系统处理占用与回滚，最稳 | 需要引入安装器工具链；MSIX 对 TIP 的支持有限 |
-| 版本化目录 + 注册表指向新版本 | 原子切换、可秒回滚 | 需要自己实现清理与磁盘配额管理 |
+**这件事交给 Inno Setup 安装器，不要自己发明机制。**
 
-倾向**方案 3**（版本化目录）：`%LOCALAPPDATA%\retype\versions\0.2.0\` +
-注册表 `InprocServer32` 指向它。切换是原子的（改一个注册表值），
-回滚也是原子的，旧目录由下次启动时清理。这样 `retype-updater.exe` 只需要
-「解压到新版本目录 → 改注册表 → 通知 ctfmon」，不碰任何被占用的文件。
+> 早期设计里我打算做「版本化目录 + 注册表指向新版本」（`%LOCALAPPDATA%\retype\versions\0.2.0\`
+> 加一个注册表值原子切换）。**这个方案已作废**：Windows 的 Restart Manager 就是专门
+> 解决「文件被 N 个进程占用」的标准机制，Inno Setup 已经接好了它，
+> 自己再造一套只会更脆弱，还要自己处理回滚、卸载条目、占用检测、重启后替换。
+
+安装器负责的事（`platforms/windows/installer/retype.iss`）：
+
+| 事项 | 做法 |
+|---|---|
+| DLL 被占用 | `CloseApplications=yes` → Restart Manager 列出占用进程让用户选择关闭；关不掉的自动登记为「重启后替换」，结束页提示重启 |
+| 不擅自重启用户的应用 | `RestartApplications=no`（升级时突然重开一堆 Chrome 标签页不可接受） |
+| HKLM 注册 | `[Registry]` 段写 CTF 的 `InprocServer32` + `LanguageProfile`，卸载时由 `uninsdeletekey` 反向清理 |
+| 词库落位 | 装到 `{app}\retype-dict.tsv`（DLL 同目录）。TIP 的工作目录是宿主进程的，所以 `session.rs` 用 `GetModuleHandleExW(FROM_ADDRESS)` 定位自己的目录来找词库 |
+| 跨版本升级 | `AppId` 固定不变，Inno 据此识别为同一产品并原地升级 |
+| 用户数据 | 卸载时询问是否删除 `%LOCALAPPDATA%\retype`（默认否 —— 用户积累的选词习惯比一次干净卸载更值钱） |
+| 装完看不到输入法 | 结束页明确告知必须注销重登（TSF 的语言配置档被登录会话缓存），避免被当成安装失败 |
+
+因此**自动更新的最后一步就是静默跑安装器**：
+
+```powershell
+retype-updater.exe download --out "$env:TEMP\retype-update"
+# 校验已在 download 内部完成（不通过就退出码 4，且不会落盘）
+& "$env:TEMP\retype-update\retype-<新版本>-windows-x64-setup.exe" `
+    /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-
+```
+
+`/NORESTART` 是刻意的：由调用方（设置界面）决定何时提示用户重启，
+而不是让安装器在用户打字打到一半时重启机器。
+
+### 仍未解决的部分（M5）
+
+- **代码签名**：目前没有证书，未签名的 setup.exe 会触发 SmartScreen 警告。
+  这是发布消费级软件前必须解决的，否则用户看到「Windows 已保护你的电脑」基本就放弃了。
+- **静默升级期间的输入**：升级会替换掉正在使用的 TIP DLL。即使 Restart Manager
+  处理了文件占用，用户当前正在组字的内容仍可能丢失。M5 需要在升级前主动
+  commit/cancel 掉所有活跃组字会话，并考虑「延迟到用户空闲时再升级」。
+- **升级触发时机**：设置界面打开时检查 + 每日计划任务，注意 GitHub 匿名限额
+  60 次/小时/IP（`GITHUB_TOKEN` 可提到 5000）。
 
 ---
 

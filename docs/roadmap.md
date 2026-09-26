@@ -22,7 +22,7 @@
 
 **验收**：`cargo test --workspace` 全绿（204 项）；`retype-diag` 里输入 `nihaomashijie`
 能得到「你好吗世界」；`cargo clippy --workspace --all-targets -- -D warnings` 零警告；
-打 tag 后 CI 产出 `retype-<版本>-windows-x64.zip` + `.sha256` 并发布 Release。
+打 tag 后 CI 产出 `retype-<版本>-windows-x64-setup.exe`（Inno Setup 安装包）+ `.sha256` 并发布 Release。
 
 **已端到端验证**（仓库 [L-Chris/retype](https://github.com/L-Chris/retype)，v0.1.0）：
 
@@ -109,12 +109,13 @@
 
 ## M5 · 产品化
 
-- [ ] 安装器（MSI/EXE）、卸载、升级不丢用户词库
-- [ ] **原子替换正在使用的 TIP DLL**：倾向「版本化目录 + 注册表指向」方案
-      （`%LOCALAPPDATA%\retype\versions\<ver>\` + `InprocServer32` 指过去），
-      切换与回滚都只改一个注册表值，不碰任何被占用的文件。
-      三个候选方案的权衡见 [auto-update.md §4](./auto-update.md)
-- [ ] `retype-updater.exe` 接上安装器：下载校验通过后触发替换
+- [x] **安装器**：Inno Setup 出 `setup.exe`，负责 HKLM 注册、词库落位、
+      Restart Manager 处理「DLL 被所有进程占用」、卸载条目、卸载时询问是否删个人词库
+- [ ] **代码签名**：目前没有证书，未签名的 setup.exe 会触发 SmartScreen 警告
+      （用户看到「Windows 已保护你的电脑」基本就放弃了）。发布消费级软件前必须解决
+- [ ] `retype-updater.exe` 接上安装器：校验通过后 `/VERYSILENT /NORESTART` 静默升级
+- [ ] 升级前主动 commit/cancel 掉所有活跃组字会话，并考虑延迟到用户空闲时再升级
+      （否则用户正在打的字会在升级瞬间丢失）
 - [ ] 更新检查的触发时机与频率（设置界面打开时 / 每日计划任务），注意 GitHub 匿名限额 60 次/小时/IP
 - [ ] Flutter 设置界面（`apps/settings`）：词库管理、热键、隐私白名单、云端开关、日志、检查更新
 - [ ] 崩溃上报与延迟打点

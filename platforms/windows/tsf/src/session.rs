@@ -26,11 +26,64 @@ pub const ENV_DICT: &str = "RETYPE_DICT";
 /// `eaten = false`），所以即使配错了也不会丢用户的按键。
 pub const ENV_SHADOW: &str = "RETYPE_TSF_SHADOW";
 
-/// 词库查找顺序：环境变量 → `%LOCALAPPDATA%\retype\` → 当前目录。
+/// 本 DLL 自己所在的目录。
+///
+/// **TIP 的当前工作目录是宿主进程的**（notepad、chrome……），绝不是我们的安装目录，
+/// 所以任何相对路径都不可信。安装器把词库放在 `{app}\retype-dict.tsv`，
+/// 也就是和 `retype_ime.dll` 同目录，因此「DLL 自己在哪」是唯一可靠的锚点。
+///
+/// 用 `GetModuleHandleExW(FROM_ADDRESS, &本函数)` 拿到**我们自己**的模块句柄
+/// ——`GetModuleHandleW(None)` 拿到的是宿主 exe，那是错的。
+pub fn dll_dir() -> Option<PathBuf> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HMODULE, MAX_PATH};
+    use windows::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    };
+
+    let mut module = HMODULE::default();
+    // FROM_ADDRESS 模式下第二个参数不是字符串，而是「模块内任意地址」被当成 PCWSTR 传入。
+    // 用本函数的地址，它一定落在我们自己的代码段里。
+    //
+    // 注意：FROM_ADDRESS 不带 UNCHANGED_REFCOUNT 时会给模块加一次引用计数且我们不释放。
+    // 这是刻意的 —— TIP 本来就该在宿主进程生命周期内常驻（`DllCanUnloadNow` 恒返回 S_FALSE）。
+    let addr = dll_dir as *const () as *const u16;
+    // SAFETY: addr 指向本模块内的有效代码；module 是本函数栈上的有效出参。
+    let ok = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            PCWSTR(addr),
+            &mut module,
+        )
+    };
+    if ok.is_err() {
+        return None;
+    }
+
+    let mut buf = [0u16; MAX_PATH as usize];
+    // SAFETY: buf 是 MAX_PATH 长的有效缓冲区；module 来自上一步成功的调用。
+    let len = unsafe { GetModuleFileNameW(Some(module), &mut buf) } as usize;
+    // len == 0 表示失败；len >= buf.len() 表示路径被截断，两者都不可信
+    if len == 0 || len >= buf.len() {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buf[..len]);
+    PathBuf::from(path).parent().map(|p| p.to_path_buf())
+}
+
+/// 词库查找顺序：环境变量 → **本 DLL 同目录** → `%LOCALAPPDATA%\retype\`。
+///
+/// 第二项是安装器产物的位置；第三项是给手动部署（`register.ps1`）留的退路。
 pub fn default_dict_path() -> PathBuf {
     if let Ok(p) = std::env::var(ENV_DICT) {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
+        }
+    }
+    if let Some(dir) = dll_dir() {
+        let candidate = dir.join("retype-dict.tsv");
+        if candidate.exists() {
+            return candidate;
         }
     }
     if let Ok(base) = std::env::var("LOCALAPPDATA") {
@@ -163,5 +216,35 @@ mod tests {
             p.to_string_lossy().contains("retype-dict.tsv"),
             "默认路径应指向 retype-dict.tsv，实际 {p:?}"
         );
+    }
+
+    #[test]
+    fn dll_dir_resolves_to_a_real_directory() {
+        // 在测试里这个函数位于 exe 而不是 DLL，但 FROM_ADDRESS 的语义一样：
+        // 拿到「包含这段代码的模块」所在目录。
+        let dir = dll_dir().expect("应能解析出本模块所在目录");
+        assert!(
+            dir.is_absolute(),
+            "必须是绝对路径，否则宿主的工作目录会污染它: {dir:?}"
+        );
+        assert!(dir.exists(), "目录应真实存在: {dir:?}");
+    }
+
+    #[test]
+    fn default_dict_path_is_absolute_or_env_driven() {
+        // 关键不变量：绝不能返回一个相对路径。
+        // TIP 的工作目录是宿主进程的，相对路径会指向完全不可预期的位置。
+        if std::env::var(ENV_DICT).is_err() {
+            let p = default_dict_path();
+            let exists_next_to_module = dll_dir()
+                .map(|d| d.join("retype-dict.tsv").exists())
+                .unwrap_or(false);
+            if !exists_next_to_module {
+                assert!(
+                    p.is_absolute(),
+                    "没有环境变量、模块旁边也没词库时，应退回绝对路径的 LOCALAPPDATA，实际 {p:?}"
+                );
+            }
+        }
     }
 }

@@ -43,6 +43,10 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), UpdateError
 /// CI 里生成时可能带 `./`，比对时不该因此失配。
 pub fn parse_sha256sum(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
+    // PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM，而 U+FEFF 在 Rust 里
+    // 不算空白字符，`trim()` 去不掉 —— 不特殊处理的话第一行的 hash 会多一个字符，
+    // 长度校验失败，用户会看到「校验文件里没有对应条目」这种误导性的报错。
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -111,33 +115,50 @@ mod tests {
 
     #[test]
     fn parses_coreutils_format() {
-        let text =
-            format!("{ABC}  retype-0.1.0-windows-x64.zip\n{EMPTY} *other.bin\n# 注释\n\nbadline\n");
+        let text = format!(
+            "{ABC}  retype-0.1.0-windows-x64-setup.exe\n{EMPTY} *other.bin\n# 注释\n\nbadline\n"
+        );
         let parsed = parse_sha256sum(&text);
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].1, "retype-0.1.0-windows-x64.zip");
+        assert_eq!(parsed[0].1, "retype-0.1.0-windows-x64-setup.exe");
         assert_eq!(parsed[1].0, EMPTY, "二进制模式的 * 标记应被剥掉");
     }
 
     #[test]
     fn strips_path_prefixes_when_looking_up() {
         // coreutils 生成的是 "<hash>  <path>"，path 可能带 ./dist/ 前缀
-        let text = format!("{ABC}  ./dist/retype-0.1.0-windows-x64.zip\n");
+        let text = format!("{ABC}  ./dist/retype-0.1.0-windows-x64-setup.exe\n");
         assert_eq!(
-            expected_for(&text, "retype-0.1.0-windows-x64.zip").as_deref(),
+            expected_for(&text, "retype-0.1.0-windows-x64-setup.exe").as_deref(),
             Some(ABC)
         );
         assert_eq!(
-            expected_for(&text, "C:\\out\\retype-0.1.0-windows-x64.zip").as_deref(),
+            expected_for(&text, "C:\\out\\retype-0.1.0-windows-x64-setup.exe").as_deref(),
             Some(ABC),
             "Windows 反斜杠路径也要能匹配"
         );
-        assert!(expected_for(&text, "nope.zip").is_none());
+        assert!(expected_for(&text, "nope.exe").is_none());
     }
 
     #[test]
     fn missing_entry_is_none_not_a_panic() {
-        assert!(expected_for("", "x.zip").is_none());
-        assert!(expected_for("garbage", "x.zip").is_none());
+        assert!(expected_for("", "x.exe").is_none());
+        assert!(expected_for("garbage", "x.exe").is_none());
+    }
+
+    /// PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM。用户用这种「最直觉的方式」
+    /// 生成校验文件时不该被拒收，更不该报「没有对应条目」这种误导性错误。
+    #[test]
+    fn tolerates_utf8_bom() {
+        let with_bom = format!("\u{feff}{ABC}  retype-0.1.0-windows-x64-setup.exe\n");
+        assert_eq!(
+            expected_for(&with_bom, "retype-0.1.0-windows-x64-setup.exe").as_deref(),
+            Some(ABC)
+        );
+        // CRLF 也要能吃（Windows 上的文本文件几乎都是 CRLF）
+        let crlf = format!("{ABC}  a.exe\r\n{EMPTY}  b.exe\r\n");
+        let parsed = parse_sha256sum(&crlf);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].1, "b.exe", "文件名末尾不该残留 \\r");
     }
 }

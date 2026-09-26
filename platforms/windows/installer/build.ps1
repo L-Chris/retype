@@ -24,7 +24,9 @@
 [CmdletBinding()]
 param(
   [switch]$SkipDict,
-  [switch]$NoTest
+  [switch]$NoTest,
+  # 额外用 Inno Setup 打出安装器（需要本机装了 ISCC.exe；CI 里默认会打）
+  [switch]$Installer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,4 +85,24 @@ foreach ($f in @('retype_ime.dll', 'retype-diag.exe', 'retype-dict.tsv')) {
 Write-Host ""
 Write-Host "下一步：" -ForegroundColor Green
 Write-Host "  终端里试打字   : dist\windows\retype-diag.exe --dict dist\windows\retype-dict.tsv"
-Write-Host "  注册进系统(M1) : platforms\windows\installer\register.ps1"
+Write-Host "  打成安装器     : .\build.ps1 -Installer -SkipDict -NoTest"
+Write-Host "  注册进系统(M1) : platforms\windows\installer\register.ps1（开发用；正式安装走 setup.exe）"
+
+if ($Installer) {
+  Step "6/6 构建 Inno Setup 安装器"
+  $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+  if (-not (Test-Path $iscc)) {
+    Write-Warning "找不到 ISCC.exe，跳过。装法: winget install JRSoftware.InnoSetup  或  choco install innosetup"
+  } else {
+    $ver = (Select-String -Path (Join-Path $repoRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"' |
+      Select-Object -First 1).Matches[0].Groups[1].Value
+    Write-Host "  版本: $ver"
+    & $iscc "/DMyAppVersion=$ver" "/DBaseDir=target\release" "/DRepoRoot=$repoRoot" `
+      "/DOutDir=$(Join-Path $repoRoot 'dist')" `
+      (Join-Path $PSScriptRoot 'retype.iss')
+    if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败" }
+    Get-ChildItem (Join-Path $repoRoot 'dist\*-setup.exe') | ForEach-Object {
+      Write-Host ("  {0,-44} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB))
+    }
+  }
+}
