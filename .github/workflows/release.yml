@@ -168,10 +168,11 @@ jobs:
       - name: 构建安装器
         shell: pwsh
         run: |
+          # RepoRoot 传绝对路径，BaseDir/OutDir 相对它 —— 见 retype.iss 顶部的路径约定
           & $env:ISCC `
             "/DMyAppVersion=$env:RETYPE_VERSION" `
+            "/DRepoRoot=$env:GITHUB_WORKSPACE" `
             "/DBaseDir=target\x86_64-pc-windows-msvc\release" `
-            "/DRepoRoot=." `
             "/DOutDir=dist" `
             "platforms\windows\installer\retype.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败，退出码 $LASTEXITCODE" }

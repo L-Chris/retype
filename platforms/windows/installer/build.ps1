@@ -97,8 +97,9 @@ if ($Installer) {
     $ver = (Select-String -Path (Join-Path $repoRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"' |
       Select-Object -First 1).Matches[0].Groups[1].Value
     Write-Host "  版本: $ver"
-    & $iscc "/DMyAppVersion=$ver" "/DBaseDir=target\release" "/DRepoRoot=$repoRoot" `
-      "/DOutDir=$(Join-Path $repoRoot 'dist')" `
+    # 路径约定见 retype.iss 顶部：RepoRoot 绝对，BaseDir/OutDir 相对 RepoRoot
+    & $iscc "/DMyAppVersion=$ver" "/DRepoRoot=$repoRoot" `
+      "/DBaseDir=target\release" "/DOutDir=dist" `
       (Join-Path $PSScriptRoot 'retype.iss')
     if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败" }
     Get-ChildItem (Join-Path $repoRoot 'dist\*-setup.exe') | ForEach-Object {

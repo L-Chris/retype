@@ -17,20 +17,27 @@
 ; ============================================================
 
 ; ---- 可由命令行 /D 覆盖的参数 --------------------------------
-#ifndef MyAppVersion
-  #define MyAppVersion "0.0.0"
-#endif
-#ifndef BaseDir
-  #define BaseDir "..\..\..\target\release"
-#endif
+; 路径约定：**RepoRoot 必须是绝对路径**，其余三个都相对 RepoRoot。
+;
+; 这样约定是为了消除 Inno 的一个歧义：[Files] 的 Source 相对路径以 SourceDir
+; 为基准，而 SourceDir / OutputDir / LicenseFile 各自的相对基准并不完全一致，
+; 混用相对路径迟早会在某个 CI 环境里踩空。统一成「一个绝对根 + 相对子路径」就没有歧义了。
 #ifndef RepoRoot
   #define RepoRoot "..\..\.."
 #endif
+#ifndef MyAppVersion
+  ; 必须是 Inno 认可的版本号（1~4 段纯数字，每段 0~65535）。
+  ; "0.0.0-ci" 这种带后缀的会让 VersionInfoVersion 直接报错。
+  #define MyAppVersion "0.0.0"
+#endif
+#ifndef BaseDir
+  #define BaseDir "target\release"
+#endif
 #ifndef OutDir
-  #define OutDir "..\..\..\dist"
+  #define OutDir "dist"
 #endif
 #ifndef DictFile
-  #define DictFile RepoRoot + "\data\dict\retype-dict.tsv"
+  #define DictFile "data\dict\retype-dict.tsv"
 #endif
 
 ; ---- 固定标识 ------------------------------------------------
@@ -72,8 +79,10 @@ DisableProgramGroupPage=yes
 DisableWelcomePage=no
 AllowNoIcons=yes
 
-OutputDir={#OutDir}
+OutputDir={#RepoRoot}\{#OutDir}
 OutputBaseFilename=retype-{#MyAppVersion}-windows-x64-setup
+; [Files] 里 Source 的相对路径统一以 RepoRoot 为基准
+SourceDir={#RepoRoot}
 SetupIconFile={#RepoRoot}\apps\settings\windows\runner\resources\app_icon.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\retype-diag.exe
@@ -99,10 +108,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 RestartApplications=no
 
-[Tasks]
-; 目前没有可选任务。保留这个段是为了将来加「开机自动检查更新」之类的开关。
-
 [Files]
+; 路径都相对 SourceDir（= RepoRoot）
 ; TSF TIP。ignoreversion 是必须的：Rust 的 cdylib 没有 VERSIONINFO 资源，
 ; Windows 无法按文件版本判断新旧，只能无条件覆盖。
 Source: "{#BaseDir}\retype_ime.dll"; DestDir: "{app}"; Flags: ignoreversion
@@ -113,9 +120,9 @@ Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 已注音词库（约 8.9MB，包里最大的一块）
 Source: "{#DictFile}"; DestDir: "{app}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
 ; 许可与第三方数据署名（jieba / pinyin 均为 MIT，发行时必须附带）
-Source: "{#RepoRoot}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RepoRoot}\NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#RepoRoot}\data\dict\raw\LICENSE-jieba"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; TSF 的 TIP 注册。键名里的 GUID 必须与 ids.rs 一致，否则系统找不到我们。

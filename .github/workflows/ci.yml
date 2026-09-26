@@ -131,14 +131,15 @@ jobs:
       - name: 构建安装器（验证 retype.iss 可编译）
         shell: pwsh
         run: |
+          $ws = $env:GITHUB_WORKSPACE
           & $env:ISCC `
-            "/DMyAppVersion=0.0.0-ci" `
+            "/DMyAppVersion=0.0.0" `
+            "/DRepoRoot=$ws" `
             "/DBaseDir=target\release" `
-            "/DRepoRoot=." `
             "/DOutDir=dist" `
             "platforms\windows\installer\retype.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败，退出码 $LASTEXITCODE" }
-          $exe = "dist\retype-0.0.0-ci-windows-x64-setup.exe"
+          $exe = "dist\retype-0.0.0-windows-x64-setup.exe"
           if (-not (Test-Path $exe)) { throw "安装器没生成: $exe" }
           Write-Host ("安装器构建成功: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
 
