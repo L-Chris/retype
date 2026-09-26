@@ -1,0 +1,390 @@
+# retype 架构设计
+
+> 参考架构：[`test.md`](./test.md)（豆包输入法的 AI 流水线拆解）。
+> 本文把 test.md 的产品级描述，落成 retype 的**工程结构、模块边界、线程模型与降级策略**。
+> 首期目标平台：**Windows（TSF）**；Android 复用同一份内核，见 [roadmap](./docs/roadmap.md)。
+
+---
+
+## 0. 一句话架构
+
+> **一个平台无关的「统一输入内核」（Rust），被各平台的薄适配层包住；内核内部严格区分「同步首刷」与「异步二刷」，任何跨进程/跨网络的调用都不允许出现在按键处理路径上。**
+
+```text
+┌───────────────────── 平台适配层（薄） ─────────────────────┐
+│  Windows: TSF TIP DLL      Android: InputMethodService     │
+│  · 按键/焦点/组字/上屏      · 按键/触摸/组字/上屏           │
+│  · 候选窗（Direct2D）       · 候选窗（Compose）             │
+│  · 上下文采集（TSF/UIA）    · 上下文采集（EditorInfo）      │
+└───────────────────────────┬───────────────────────────────┘
+                            │  统一抽象：InputEvent / RenderState / CommitRequest
+┌───────────────────────────▼───────────────────────────────┐
+│              retype-engine  统一输入与联想内核              │
+│  会话状态机 · 候选合并 · 首刷/二刷编排 · 降级 · 学习回写     │
+├──────────┬──────────┬──────────┬──────────┬───────────────┤
+│ pinyin   │ dict     │ context  │ cloud    │ voice(后期)   │
+│ 本地引擎 │ 词库/学习│ 上下文   │ ASR/LLM  │ 流式识别      │
+└──────────┴──────────┴──────────┴──────────┴───────────────┘
+```
+
+对应 test.md **图 5**（语音、键盘、触摸共用一个「大脑」）：三种输入方式只是 `InputEvent` 的不同生产者，内核以下的所有能力（上下文、候选、词库、学习、上屏）完全共享。
+
+---
+
+## 1. 三条不可违背的原则
+
+来自 test.md 第六节，落成硬性约束（CI 会检查其中可自动化的部分）：
+
+| # | 原则 | 工程约束 |
+|---|---|---|
+| P1 | **输入主线程绝不阻塞** | TSF 回调内禁止：网络、文件 IO、`Mutex` 跨调用持有、词典加载、`async` block_on。只允许读内存态 + 投递任务。 |
+| P2 | **失败必须优雅降级** | 每个外部依赖都有「本地兜底路径」，见 [§7 降级矩阵](#7-降级矩阵)。 |
+| P3 | **已展示的内容不许消失** | 二刷只能「重排 + 追加」，不能删掉用户已经看到/正在选的候选；语音 final 不能丢掉 stable 段。 |
+
+> P3 是 test.md 反复强调的点：*"即使 AI 二次刷新超时，用户已经看到的候选也不能消失。"*
+
+---
+
+## 2. 数据流：拼音输入（首刷 + 二刷）
+
+对应 test.md **图 4**（本地拼音与云端 AI 协作）。
+
+```text
+ 按键 'n','i','h','a','o'
+      │  (TSF 主线程, 同步, 预算 < 1ms)
+      ▼
+ KeyEventSource ──InputEvent::Key──► retype-engine
+                                        │
+                    ┌───────────────────┴───────────────────┐
+                    │ 同步首刷 (必须在本帧内出结果)          │
+                    ▼                                       │
+             pinyin::decode(buffer)                         │
+             ├ 音节切分 (DP over 音节表)                     │
+             ├ 词格构建 (系统词库 + 用户词库 + 上下文加权)    │
+             └ Viterbi k-best ──► CandidateList(v1, gen=1)  │
+                    │                                       │
+                    ▼                                       │
+             RenderState ──► 候选窗（独立 UI 线程）          │
+                    │                                       │
+                    │  ┌────────────────────────────────────┘
+                    │  │ 异步二刷 (worker 线程 / 后期 host 进程)
+                    ▼  ▼
+             RerankJob { pinyin, candidates, ContextSnapshot, gen=1 }
+                    │
+                    ▼
+             cloud::CloudPinyin + LlmReranker   ← 超时 / 熔断 / Mock
+                    │
+             ┌──────┴───────┐
+             │ gen 过期?     │─是─► 丢弃（P3：绝不用旧结果覆盖新状态）
+             └──────┬───────┘
+                    │否
+                    ▼
+             merge(v1, v2)：保留 v1 全部条目，重排 + 追加云端整句/热词
+                    │
+                    ▼
+             RenderState' ──► 候选窗「无闪烁刷新」
+```
+
+**关键设计**：`gen`（generation）单调递增，每次按键 +1。二刷结果携带发出时的 `gen`，回来时若 `gen` 已落后则直接丢弃 —— 这是防止「输入快了之后候选乱跳」的唯一可靠手段。
+
+**合并规则**（P3 的具体实现）：
+
+```text
+merged = []
+for c in v2.ranked:            # 云端/AI 排序
+    if c in v1: merged.push(c)          # 只允许提升本地已有项
+    else if allow_cloud_insert: merged.push(c)   # 整句/热词，标记来源
+for c in v1:
+    if c not in merged: merged.push(c)  # 本地候选一个都不许丢，兜底追加
+```
+
+---
+
+## 3. 数据流：语音输入（三段式）
+
+对应 test.md **图 1 / 图 2**。本轮只落接口与状态机，不接真实 ASR（见 [ADR-0002](./docs/adr/0002-cloud-abstraction-mock-first.md)）。
+
+```text
+        ┌──────────── VoiceSession 状态机（retype-engine）────────────┐
+        │                                                             │
+ Idle ──按下热键──► Recording ──首帧音频──► Streaming                  │
+        │              │                       │                      │
+        │              │                 Interim(text) ──► 组字预览    │
+        │              │                       │        （临时，可变） │
+        │              │                 Stable(text)  ──► 稳定段      │
+        │              │              （停顿触发 two-pass，前文被改写） │
+        │              │                       │                      │
+        │        松开热键                       │                      │
+        │              ▼                       ▼                      │
+        └──────► Finalizing ──send AudioEnd──► Optimizing ──► Done    │
+                                  │           （"识别优化中"）  │      │
+                                  │                            ▼      │
+                              timeout(默认 1.5s)          CommitRequest│
+                                  │                                   │
+                                  └──► 用最后一个 Stable 兜底上屏      │
+        └─────────────────────────────────────────────────────────────┘
+```
+
+三条硬要求（都来自 test.md）：
+
+1. **松手不等于关连接**。必须发 `AudioEnd` 并等待 final pass，否则丢掉最后一次整段校正。
+2. **超时也要上屏**。`Optimizing` 超过阈值就用最后的 `Stable` 提交，不能让用户的字消失。
+3. **采集/发送/接收/UI 四者并发**。任何一个环节串行化都会导致「开头几个字丢失」。
+
+音频链路（后期）：
+
+```text
+麦克风 ─► 采集线程(WASAPI/cpal, 20ms 帧) ─► 有界队列 ─► 编码(PCM16/Opus)
+                                                          │
+                                              WebSocket 发送任务
+                                                          │
+                                              接收任务 ─► AsrEvent ─► 状态机
+```
+有界队列 + 背压：满了丢**最旧**的未编码帧并打点，绝不阻塞采集线程。
+
+---
+
+## 4. 上下文（准确率的真正来源）
+
+对应 test.md **图 3** / 第三节。
+
+```rust
+// core/context/src/snapshot.rs
+pub struct ContextSnapshot {
+    pub app: AppInfo,              // 进程名/包名、窗口标题、控件类型（聊天/搜索/代码/文档）
+    pub field: FieldInfo,          // 输入框能力：是否可读上下文、是否密码框、最大长度
+    pub text_before: String,       // 光标前 N 字（默认 64，可配）
+    pub text_after: String,        // 光标后 M 字（默认 16）
+    pub selection: Option<String>, // 当前选中文字（替换语义）
+    pub privacy: PrivacyLevel,     // None / Local / Cloud —— 决定这份上下文能不能出网
+    pub taken_at: Instant,
+}
+```
+
+**隐私闸门是架构的一部分，不是附加项**：
+
+| PrivacyLevel | 允许行为 |
+|---|---|
+| `None` | 密码框、用户显式禁止的进程 —— 上下文为空，不采集 |
+| `Local` | 只用于本地词库加权重排，**绝不出网** |
+| `Cloud` | 可随请求发给云端 ASR/LLM |
+
+`PrivacyLevel` 由 `context` 模块判定并**盖章**在快照上；`cloud` 模块在发请求前必须校验，`privacy != Cloud` 时静默剥离上下文字段。这样「上下文泄漏」在类型层面就不可能发生。
+
+**采集失败 = 空上下文，不是错误**（P2）。TSF 的 `ITfContext` 在某些应用里会拒绝读取（如部分游戏、UWP 沙箱），必须 `Result` → `None` 静默降级。
+
+---
+
+## 5. 词库与个性化学习
+
+对应 test.md **图 7** / 第七节。
+
+```text
+候选打分 = f( 系统词频 , 用户词权重 , 上下文相关性 , 时间衰减 , 纠错对 )
+
+分层（从下到上，越上层越个性化，覆盖优先级越高）：
+  ┌────────────────────────────────────┐
+  │ L4 CorrectionPairs  原始→用户改后   │  ← test.md 第七节的核心信号
+  ├────────────────────────────────────┤
+  │ L3 UserDict         自造词/常用词   │  SQLite，异步批量写
+  ├────────────────────────────────────┤
+  │ L2 RecentHistory    最近 N 次上屏   │  环形缓冲，内存
+  ├────────────────────────────────────┤
+  │ L1 SystemDict       词频词库(只读)  │  mmap 二进制，进程内共享
+  └────────────────────────────────────┘
+```
+
+**学习事件**（全部异步落盘，永不阻塞输入线程）：
+
+```rust
+pub enum LearningEvent {
+    /// 用户从候选中选了词 —— 记录位置，用于「常选项置顶」
+    CandidateChosen { source: InputSource, raw: String, chosen: String, index: u16 },
+    /// 用户上屏后手动改了字 —— 生成纠错对（原始 → 修改后）
+    Corrected { from: String, to: String, context_hash: u64 },
+    /// 用户自造词
+    Coinage { word: String, pinyin: String },
+}
+```
+
+**跨输入方式共享**（test.md 图 5 的落点）：语音上屏过的专业词 → 进 `UserDict` → 影响之后的拼音候选；拼音里纠正过的错词 → 进 `CorrectionPairs` → 提供给语音 final pass 做后处理。因为 L1–L4 都在 `retype-dict`，与输入方式无关，这件事是**免费**的。
+
+词库数据管线见 [docs/dict.md](./docs/dict.md)。
+
+---
+
+## 6. 线程与进程模型
+
+对应 test.md **图 6**。
+
+```text
+┌──────────────────────── 宿主应用进程（notepad / chrome / office…）────────────────────────┐
+│                                                                                          │
+│  ┌─ TSF 主线程（宿主应用的 UI 线程）────────────────────────┐                             │
+│  │  ITfKeyEventSink::OnKeyDown / OnTestKeyDown               │  ← P1：零阻塞              │
+│  │  ITfEditSession（组字串读写）                             │                             │
+│  │  ITfThreadFocusSink（焦点变化）                           │                             │
+│  │  内存态读取 + crossbeam 投递任务，立即返回                 │                             │
+│  └───────────────┬──────────────────────────┬───────────────┘                             │
+│                  │ 任务投递                  │ RenderState（无锁队列）                     │
+│                  ▼                          ▼                                             │
+│  ┌─ 内核 worker 线程池 ──────────┐  ┌─ 候选窗 UI 线程 ───────────┐                        │
+│  │ 词典加载 / 二刷重排 / 学习落盘 │  │ 独立消息循环 + Direct2D     │                        │
+│  │ （MVP 在进程内，见 ADR-0004） │  │ 分层窗口，跟随光标          │                        │
+│  └───────────────┬───────────────┘  └────────────────────────────┘                        │
+└──────────────────┼────────────────────────────────────────────────────────────────────────┘
+                   │ （M3 起可选：抽到 retype-host.exe，命名管道 + 共享内存）
+                   ▼
+        ┌─ retype-host.exe（常驻，单例）─────────────┐
+        │ 长连接复用（WS/HTTP2）· 音频设备持有        │
+        │ 系统词库单份内存映射 · 用户词库单写者       │
+        │ 崩溃不影响输入法打字（P2）                  │
+        └────────────────────────────────────────────┘
+```
+
+**为什么 MVP 用进程内线程、后期抽 host 进程？**
+
+TIP DLL 被注入到**每一个**应用进程里。如果每个进程都持有一份系统词库和一条 WS 长连接，内存和连接数会随打开的应用数线性膨胀。但一开始就上 IPC，会让「打字延迟」这个最难调的问题变得几乎无法归因。
+
+所以：**先用进程内线程把延迟和正确性调对，把 IPC 边界抽象成 trait**，等内核稳定后再把 `KernelBackend` 的实现从 `Local` 换成 `Remote`，上层零改动。详见 [ADR-0004](./docs/adr/0004-in-proc-kernel-first.md)。
+
+```rust
+// core/engine/src/backend.rs
+pub trait KernelBackend: Send + Sync {
+    fn submit(&self, ev: InputEvent);            // 永不阻塞
+    fn poll_render(&self) -> Option<RenderState>; // 非阻塞
+}
+// Local:  同进程线程池     Remote: 命名管道 + 共享内存环
+```
+
+---
+
+## 7. 降级矩阵
+
+来自 test.md 第六/九节 —— *"一款输入法是否稳定，取决于异常发生时它能不能优雅降级。"*
+
+| 故障 | 检测 | 降级行为 | 用户可感知 |
+|---|---|---|---|
+| 断网 | 请求失败/DNS | 纯本地拼音，二刷静默跳过 | 候选少了热词，**打字不受影响** |
+| 云端超时 | 单次超时（默认 800ms） | 保留首刷结果，丢弃迟到响应 | 无 |
+| 云端持续失败 | 熔断器（连续 5 次） | 30s 内不再发起二刷 | 无 |
+| 上下文读取被拒 | TSF 返回错误 | 空上下文，`privacy=None` | 排序略差 |
+| 系统词库缺失/损坏 | 加载校验失败 | 退化为**单字模式**（`pinyin` crate 全量字音） | 只能打单字，但仍可打字 |
+| 用户词库损坏 | SQLite 打开失败 | 隔离坏文件（改名 `.corrupt`）后重建 | 个人词丢失，不崩 |
+| host 进程崩溃 | 管道断开 | 自动切回 `Local` 后端 | 短暂无热词 |
+| 候选窗创建失败 | HWND 为空 | 走 TSF 原生候选 UI（`ITfCandidateListUIElement`） | 样式变丑，功能在 |
+| ASR final 未返回 | `Optimizing` 超时 | 用最后一个 `Stable` 上屏 | 少了整段润色 |
+| 内核 panic | `catch_unwind` 包裹 | 当次按键透传（英文原样上屏），打点上报 | 一次输入没生效，**应用不崩** |
+
+最后一行尤其重要：TIP 运行在**别人的进程里**，我们 panic 就是让 Chrome 崩溃。所有 TSF 回调入口都必须 `catch_unwind`，且 Rust 侧禁止 `unwrap()`（clippy `unwrap_used = deny`）。
+
+---
+
+## 8. 模块与依赖
+
+```text
+core/
+  types/       retype-types      领域类型，零依赖（InputEvent/RenderState/Candidate/…）
+  pinyin/      retype-pinyin     音节表 · 切分 · 词格 · Viterbi k-best · 模糊音/简拼
+  dict/        retype-dict       SystemDict(mmap) · UserDict(SQLite) · 学习 · 打分
+  context/     retype-context    ContextSnapshot 模型 + 隐私闸门（采集实现在平台层）
+  cloud/       retype-cloud      CloudPinyin/LlmReranker/StreamingAsr traits + Mock + 熔断
+  engine/      retype-engine     统一内核：会话状态机、首刷/二刷编排、合并、降级、KernelBackend
+  ffi/         retype-ffi        C ABI 导出（Android JNI / 外部诊断）
+
+platforms/windows/
+  tsf/           retype-tsf          TSF TIP DLL（cdylib）—— 只做 TSF 管线，不含业务逻辑
+  candidate-ui/  retype-candidate-ui Win32 + Direct2D 候选窗，独立 UI 线程
+  diag/          retype-diag         终端调试台：敲拼音看候选，最快的开发回路
+  installer/                         注册/卸载脚本与打包
+
+platforms/android/               占位（Kotlin IME + JNI → retype-ffi）
+apps/settings/                   Flutter 设置界面（Windows/Android 共用）
+tools/dict-build/                词库构建：词频表 + 拼音 → dict.bin
+data/dict/                       词库源数据
+```
+
+依赖方向严格单向（`cargo deny`/CI 检查）：
+
+```text
+types ◄── pinyin ◄── dict ◄── engine ──► tsf / ffi
+   ▲                    ▲        ▲  ▲
+   └── context ─────────┘        │  └── candidate-ui
+   └── cloud ────────────────────┘
+```
+
+**铁律**：`core/*` 里不允许出现 `windows` crate（用 `#[cfg(windows)]` 隔离的平台胶水除外，且只能放在 `platforms/`）。这条规则保证了 Android 端能直接复用整个 `core/`。
+
+---
+
+## 9. 关键接口
+
+```rust
+// ---- core/types ----
+pub enum InputSource { Keyboard, Voice, Touch }
+
+pub enum InputEvent {
+    Key { code: KeyCode, mods: Modifiers, ch: Option<char> },
+    FocusChanged(FocusInfo),
+    ContextUpdated(ContextSnapshot),
+    Voice(VoiceEvent),
+    CandidateChosen { index: u16 },
+    Commit,   // 空格/回车/数字选词
+    Cancel,   // Esc
+}
+
+pub struct RenderState {
+    pub gen: u64,                       // 代次，防止旧结果覆盖新状态
+    pub composition: String,            // 组字串（未定稿的拼音）
+    pub composition_cursor: usize,
+    pub candidates: Vec<Candidate>,     // 已按 §2 合并规则排好
+    pub status: StatusFlags,            // 中英/全半角/云端可用/识别优化中…
+}
+
+pub struct Candidate {
+    pub text: String,
+    pub comment: Option<String>,        // 拼音提示
+    pub source: CandidateSource,        // Local | Cloud | User | Hotword
+    pub segments: Vec<(usize, usize)>,  // 对应组字串的音节区间（用于高亮已消费部分）
+}
+
+pub enum CommitRequest { Text(String), Replace { len: usize, text: String } }
+
+// ---- core/cloud（全部可 Mock，见 ADR-0002）----
+pub trait CloudPinyin: Send + Sync {
+    fn suggest(&self, req: PinyinRequest) -> BoxFuture<'static, Result<PinyinSuggestion>>;
+}
+pub trait LlmReranker: Send + Sync {
+    fn rerank(&self, req: RerankRequest) -> BoxFuture<'static, Result<RerankResponse>>;
+}
+pub trait StreamingAsr: Send + Sync {
+    fn start(&self, cfg: AsrConfig) -> Result<AsrSession>;   // 帧入 / 事件出，全异步
+}
+```
+
+平台适配层只需要三件事：**把系统事件翻译成 `InputEvent`**、**把 `RenderState` 画出来**、**把 `CommitRequest` 写回输入框**。这就是 Windows 和 Android 能共用内核的全部原因。
+
+---
+
+## 10. 与 test.md 的对应关系
+
+| test.md 章节 | 本架构落点 |
+|---|---|
+| 一、流式识别不是「录完再识别」 | §3 音频链路：采集/编码/发送/接收/UI 五者并发，有界队列 + 背压 |
+| 二、文字为什么反复变化（三段式） | §3 `VoiceSession` 状态机：Interim / Stable / Final |
+| 三、上下文才是准确率差距 | §4 `ContextSnapshot` + `PrivacyLevel` 闸门 |
+| 四、拼音候选不只在本地算（首刷/二刷） | §2 同步首刷 + 异步二刷 + `gen` 代次 + 合并规则 |
+| 五、多种输入方式共用一个大脑 | §0/§8 `retype-engine` 唯一内核，`InputSource` 只是标签 |
+| 六、Windows 上屏只完成一半（拆模块） | §6 线程/进程模型 + P1 零阻塞约束 |
+| 七、个人词库与纠错记录 | §5 L1–L4 分层 + `LearningEvent` |
+| 八、不只是接入一个模型 | §7 降级矩阵（这才是产品与原型差距所在） |
+| 九、异常降级决定能否长期使用 | §7 + P2/P3 |
+
+---
+
+## 11. 待决问题
+
+- **候选窗渲染**：Direct2D 自绘 vs 复用 TSF 原生 `ITfCandidateListUIElement`。MVP 先用原生（省事、兼容性由系统保证），M2 换自绘以拿到豆包那种视觉。
+- **简拼/双拼**：MVP 只做全拼 + 简拼，双拼（自然码/小鹤/微软）在 M4 以「键位映射层」形式插入，不改内核。
+- **词库授权**：`data/dict/raw/` 使用 jieba 词频表（MIT），需保留署名，见 [docs/dict.md](./docs/dict.md)。
+- **Android 端 UI**：Flutter vs Jetpack Compose。IME 的键盘视图对首帧延迟极敏感，倾向 Compose；设置界面仍用 Flutter 复用。

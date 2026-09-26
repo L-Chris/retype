@@ -1,0 +1,17 @@
+[package]
+name = "retype-cloud"
+description = "云端能力抽象：云拼音 / LLM 重排 / 流式 ASR，含 Mock 与熔断（ADR-0002）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-types = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

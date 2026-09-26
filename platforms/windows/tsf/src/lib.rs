@@ -1,0 +1,188 @@
+//! retype Windows 输入法 —— TSF Text Input Processor。
+//!
+//! 产出 `retype_ime.dll`（cdylib），由系统注入到每一个需要文本输入的进程。
+//!
+//! ## 本 crate 的定位
+//!
+//! 只做 **TSF 管线**：注册、激活、按键翻译、组字串读写、候选窗定位。
+//! 所有「智能」都在 `retype-engine` 及以下的跨平台内核里，
+//! 这里一行输入逻辑都不该有 —— 这是 Android 端能复用整个内核的前提。
+//!
+//! ## 唯一的 unsafe 边界
+//!
+//! 整个仓库只有这个 crate 允许 `unsafe`（COM/Win32 FFI）。
+//! 每一处都带 `// SAFETY:` 注释说明为什么成立。
+//! 红线见 docs/windows-tsf.md：TIP 跑在宿主进程里，我们崩溃就是宿主崩溃。
+#![allow(unsafe_code)]
+
+pub mod class_factory;
+pub mod ids;
+pub mod keymap;
+pub mod session;
+pub mod tip;
+
+use class_factory::ClassFactory;
+use core::ffi::c_void;
+use ids::CLSID_RETYPE_TIP;
+use windows::Win32::Foundation::{CLASS_E_CLASSNOTAVAILABLE, E_POINTER, E_UNEXPECTED};
+use windows::Win32::System::Com::IClassFactory;
+use windows_core::{IUnknown, Interface, GUID, HRESULT};
+
+const S_OK_HR: HRESULT = HRESULT(0);
+/// 常驻不卸载：卸载时若还有 sink 挂在宿主的 thread mgr 上，行为未定义。
+const S_FALSE_HR: HRESULT = HRESULT(1);
+
+/// 系统通过它拿到类工厂。
+///
+/// # Safety
+/// 由 COM 运行时调用，参数必须是有效的接口指针出参。
+#[no_mangle]
+pub unsafe extern "system" fn DllGetClassObject(
+    rclsid: *const GUID,
+    riid: *const GUID,
+    ppv: *mut *mut c_void,
+) -> HRESULT {
+    if ppv.is_null() {
+        return E_POINTER;
+    }
+    // 失败路径必须把出参置空：调用方（ctfmon/宿主）会无条件读它
+    *ppv = core::ptr::null_mut();
+    if rclsid.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+    if *rclsid != CLSID_RETYPE_TIP {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
+
+    // panic 不能穿过 FFI 边界（Rust panic 跨 extern "system" 是 UB）
+    let made = std::panic::catch_unwind(|| {
+        let factory: IClassFactory = ClassFactory.into();
+        factory.cast::<IUnknown>()
+    });
+    match made {
+        Ok(Ok(unknown)) => unknown.query(riid, ppv),
+        Ok(Err(e)) => e.code(),
+        Err(_) => E_UNEXPECTED,
+    }
+}
+
+/// TSF TIP **不走 regsvr32 自注册约定**：它需要在
+/// `HK{LM,CU}\SOFTWARE\Microsoft\CTF\TIP\{CLSID}` 下写 InprocServer32 与
+/// LanguageProfile 两套键，还要处理 32/64 位两份 DLL。
+///
+/// 注册由 [`platforms/windows/installer/register.ps1`] 完成（M1 会随安装器改成 Rust 实现），
+/// 这里返回 S_OK 只是为了让误用 regsvr32 的人不会看到一个莫名的失败。
+///
+/// # Safety
+/// 由 COM 运行时调用。
+#[no_mangle]
+pub unsafe extern "system" fn DllRegisterServer() -> HRESULT {
+    S_OK_HR
+}
+
+/// # Safety
+/// 由 COM 运行时调用。
+#[no_mangle]
+pub unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
+    S_OK_HR
+}
+
+/// # Safety
+/// 由 COM 运行时调用。
+#[no_mangle]
+pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
+    S_FALSE_HR
+}
+
+/// 不依赖 TSF 的自检：装配一次会话，喂一串按键，确认内核能出候选、不 panic。
+///
+/// 给安装器和 CI 用 —— 「DLL 能被加载」和「装进去真能打字」是两件事，
+/// 这个函数在不注册、不注入任何进程的前提下验证后者。
+pub fn selftest() -> Result<String, String> {
+    let state = tip::TipState::new();
+    // 用一个不存在的词库路径，顺带验证降级路径（§7：词库缺失 → 单字模式）
+    let session = session::Session::start_with(std::path::PathBuf::from(
+        "Z:/retype-selftest/does-not-exist.tsv",
+    ));
+    let backend = &session.backend;
+
+    use retype_engine::KernelBackend;
+    use retype_types::{InputEvent, InputSource, Key, Modifiers};
+
+    let mut last = String::new();
+    for c in "nihaomashijie".chars() {
+        let acts = backend.submit(InputEvent::Key {
+            key: Key::Char(c),
+            mods: Modifiers::NONE,
+            source: InputSource::Keyboard,
+        });
+        for a in acts {
+            if let retype_types::KernelAction::Render(r) = a {
+                last = r.composition;
+            }
+        }
+    }
+    if last != "nihaomashijie" {
+        return Err(format!("组字串不对，期望 nihaomashijie，实际 {last:?}"));
+    }
+    let n = backend.with_kernel(|k| k.candidate_texts().len());
+    if n == 0 {
+        return Err("没有任何候选：即使词库缺失也应给出原样字母".into());
+    }
+    // 停用一次，确认 deactivate 路径不会炸
+    state
+        .deactivate()
+        .map_err(|e| format!("deactivate 失败: {e:?}"))?;
+
+    Ok(format!(
+        "自检通过：组字 {last}，候选 {n} 条，词库已加载={}",
+        session.dict_ready()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn selftest_passes_with_a_missing_dict() {
+        match selftest() {
+            Ok(msg) => assert!(msg.contains("自检通过"), "{msg}"),
+            Err(e) => panic!("selftest 失败: {e}"),
+        }
+    }
+
+    #[test]
+    fn dll_get_class_object_rejects_unknown_clsid() {
+        let bogus = GUID::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        let mut out: *mut c_void = core::ptr::null_mut();
+        let hr = unsafe { DllGetClassObject(&bogus, &IUnknown::IID, &mut out) };
+        assert_eq!(hr, CLASS_E_CLASSNOTAVAILABLE);
+        assert!(out.is_null(), "失败时必须把出参置空");
+    }
+
+    #[test]
+    fn dll_get_class_object_rejects_null_out_param() {
+        let hr =
+            unsafe { DllGetClassObject(&CLSID_RETYPE_TIP, &IUnknown::IID, core::ptr::null_mut()) };
+        assert_eq!(hr, E_POINTER);
+    }
+
+    #[test]
+    fn dll_get_class_object_returns_a_factory() {
+        let mut out: *mut c_void = core::ptr::null_mut();
+        let hr = unsafe { DllGetClassObject(&CLSID_RETYPE_TIP, &IClassFactory::IID, &mut out) };
+        assert_eq!(hr, S_OK_HR);
+        assert!(!out.is_null());
+        // SAFETY: out 是刚按 IID_IClassFactory 返回的接口指针，用完 Release
+        let _factory: IClassFactory = unsafe { IClassFactory::from_raw(out) };
+    }
+
+    #[test]
+    fn dll_never_unloads() {
+        // TIP 卸载时机极难判断，常驻是刻意的选择
+        assert_eq!(unsafe { DllCanUnloadNow() }, S_FALSE_HR);
+    }
+}

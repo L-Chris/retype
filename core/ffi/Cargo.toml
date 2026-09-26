@@ -1,0 +1,21 @@
+[package]
+name = "retype-ffi"
+description = "C ABI 导出层（Android JNI 用，M5 随 Android 端一起完善）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "retype_ffi"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+retype-types = { workspace = true }
+retype-pinyin = { workspace = true }
+retype-dict = { workspace = true }
+retype-engine = { workspace = true }
+
+[lints]
+workspace = true

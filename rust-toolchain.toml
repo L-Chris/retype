@@ -1,0 +1,5 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# M1 起需要 i686-pc-windows-msvc：32 位应用只会加载 32 位 TIP
+targets = ["x86_64-pc-windows-msvc"]

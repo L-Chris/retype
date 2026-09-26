@@ -1,0 +1,17 @@
+[package]
+name = "retype-pinyin"
+description = "本地拼音引擎：音节切分、词格、Viterbi k-best（首刷）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-types = { workspace = true }
+
+[dev-dependencies]
+pinyin = { workspace = true }
+
+[lints]
+workspace = true

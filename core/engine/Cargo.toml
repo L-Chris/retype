@@ -1,0 +1,23 @@
+[package]
+name = "retype-engine"
+description = "统一输入与联想内核：首刷/二刷编排、三段式语音状态机、降级（ARCHITECTURE.md §2/§3/§6）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-types = { workspace = true }
+retype-pinyin = { workspace = true }
+retype-dict = { workspace = true }
+retype-context = { workspace = true }
+retype-cloud = { workspace = true }
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "retype-dict"
+description = "词库分层：系统词库、用户词库、学习回写（ARCHITECTURE.md §5）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-types = { workspace = true }
+retype-pinyin = { workspace = true }
+pinyin = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

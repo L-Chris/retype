@@ -1,0 +1,93 @@
+[workspace]
+resolver = "3"
+members = [
+    "core/types",
+    "core/pinyin",
+    "core/dict",
+    "core/context",
+    "core/cloud",
+    "core/engine",
+    "core/ffi",
+    "platforms/windows/tsf",
+    "platforms/windows/candidate-ui",
+    "platforms/windows/diag",
+    "tools/dict-build",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://example.invalid/retype"
+publish = false
+
+[workspace.dependencies]
+retype-types = { path = "core/types" }
+retype-pinyin = { path = "core/pinyin" }
+retype-dict = { path = "core/dict" }
+retype-context = { path = "core/context" }
+retype-cloud = { path = "core/cloud" }
+retype-engine = { path = "core/engine" }
+
+pinyin = { version = "0.10", features = ["plain", "heteronym"] }
+thiserror = "2"
+tracing = "0.1"
+crossbeam-channel = "0.5"
+futures = "0.3"
+
+[workspace.dependencies.windows-core]
+version = "0.62"
+
+[workspace.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_TextServices",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+# TIP DLL 会被注入到每一个进程：体积与加载开销直接影响宿主应用启动速度。
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+# 不可设为 "abort"：TSF 回调需要 catch_unwind 兜底（见 docs/windows-tsf.md）
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = false
+
+# 内核跑在别人的进程里：panic = 宿主崩溃。所以 unwrap/expect 一律禁止。
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "warn"
+todo = "warn"
+dbg_macro = "deny"
+clone_on_ref_ptr = "warn"
+needless_return = "warn"

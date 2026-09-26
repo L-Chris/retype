@@ -1,0 +1,39 @@
+[package]
+name = "retype-tsf"
+description = "retype Windows 输入法：TSF Text Input Processor（cdylib，注入宿主进程）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "retype_ime"
+# cdylib = 注册给系统的 TIP DLL；rlib = 让集成测试能直接链接
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+retype-types = { workspace = true }
+retype-pinyin = { workspace = true }
+retype-dict = { workspace = true }
+retype-context = { workspace = true }
+retype-cloud = { workspace = true }
+retype-engine = { workspace = true }
+retype-candidate-ui = { path = "../candidate-ui" }
+windows-core = { workspace = true }
+tracing = { workspace = true }
+
+# 只用 TSF 相关的 feature。刻意不走 workspace 里那份（含 Direct2D/GDI），
+# 因为这个 DLL 会被注入到每一个进程，依赖越少、加载越快、宿主启动越不受影响。
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_TextServices",
+]
+
+[lints]
+workspace = true
