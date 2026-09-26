@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 取消同一分支上仍在跑的旧任务，但 tag 触发的 release 不受影响（那是另一个 workflow）
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 内核的跨平台验证：在 Linux 上编译 core/*，
+  # 这就证明了「core/ 里不允许出现 windows crate」这条铁律没有被破坏。
+  # 一旦有人在 core 里引了平台 API，这个 job 会先红。
+  # ─────────────────────────────────────────────────────────────
+  core-portability:
+    name: 内核跨平台构建 (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-linux
+
+      - name: 内核 crate 编译 + 测试
+        run: |
+          cargo test --locked \
+            -p retype-types \
+            -p retype-pinyin \
+            -p retype-dict \
+            -p retype-context \
+            -p retype-cloud \
+            -p retype-engine \
+            -p retype-updater \
+            -p retype-ffi
+
+      - name: 内核 crate clippy
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings \
+            -p retype-types \
+            -p retype-pinyin \
+            -p retype-dict \
+            -p retype-context \
+            -p retype-cloud \
+            -p retype-engine \
+            -p retype-updater \
+            -p retype-ffi
+
+  # ─────────────────────────────────────────────────────────────
+  # Windows 全量：TSF TIP 只能在 Windows 上编译
+  # ─────────────────────────────────────────────────────────────
+  windows:
+    name: 全量构建与测试 (windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # M1 起 32 位应用需要 x86 TIP，这里先把 target 装上
+          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace
+
+      - name: release 构建
+        run: |
+          cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
+
+      - name: 构建词库
+        run: |
+          cargo run --release -p retype-dict-build -- `
+            --in data/dict/raw/jieba-dict.txt `
+            --out data/dict/retype-dict.tsv
+
+      - name: TSF 自检（不注册、不注入任何进程）
+        run: cargo test --release -p retype-tsf
+
+      - name: 首刷延迟基准
+        run: |
+          .\target\release\retype-diag.exe --bench --dict data\dict\retype-dict.tsv | Tee-Object -FilePath bench.txt
+          # P99 必须留在 5ms 预算内（ARCHITECTURE.md P1）。
+          # 基准程序自己会打印 ✓/✗，这里再挡一道，避免有人只看日志不看结论。
+          if (Select-String -Path bench.txt -Pattern 'P99 超预算' -Quiet) {
+            Write-Error '首刷 P99 超出 5ms 预算'
+            exit 1
+          }
+
+      - name: 上传基准结果
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-windows
+          path: bench.txt
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────
+  # Flutter 设置界面
+  # ─────────────────────────────────────────────────────────────
+  settings-ui:
+    name: 设置界面 (Flutter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/settings
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.0"
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  # ─────────────────────────────────────────────────────────────
+  # 版本号一致性：tag、Cargo workspace、pubspec 三者必须对齐。
+  # 在 PR 阶段就挡住，比等到打 tag 时 release 失败要好。
+  # ─────────────────────────────────────────────────────────────
+  version-consistency:
+    name: 版本号一致性
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cargo workspace 与 pubspec 版本必须一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(sed -nE 's/^version = "([^"]+)".*$/\1/p' Cargo.toml | head -n 1)"
+          pubspec_full="$(sed -nE 's/^version:[[:space:]]*([^[:space:]#]+).*$/\1/p' apps/settings/pubspec.yaml | head -n 1)"
+          pubspec_version="${pubspec_full%%+*}"
+
+          echo "Cargo.toml        : $cargo_version"
+          echo "pubspec.yaml      : $pubspec_full (-> $pubspec_version)"
+
+          if [[ -z "$cargo_version" ]]; then
+            echo "读不到 Cargo.toml 的 workspace 版本" >&2; exit 1
+          fi
+          if [[ "$cargo_version" != "$pubspec_version" ]]; then
+            echo "版本不一致：Cargo=$cargo_version pubspec=$pubspec_version" >&2
+            echo "版本号只改两处：Cargo.toml 的 [workspace.package] 与 apps/settings/pubspec.yaml" >&2
+            exit 1
+          fi

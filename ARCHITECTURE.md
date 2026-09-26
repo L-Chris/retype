@@ -304,13 +304,15 @@ core/
   context/     retype-context    ContextSnapshot 模型 + 隐私闸门（采集实现在平台层）
   cloud/       retype-cloud      CloudPinyin/LlmReranker/StreamingAsr traits + Mock + 熔断
   engine/      retype-engine     统一内核：会话状态机、首刷/二刷编排、合并、降级、KernelBackend
+  updater/     retype-updater    自动更新：semver 比较、release 解析、sha256 校验（HTTP 抽象成 trait）
   ffi/         retype-ffi        C ABI 导出（Android JNI / 外部诊断）
 
 platforms/windows/
   tsf/           retype-tsf          TSF TIP DLL（cdylib）—— 只做 TSF 管线，不含业务逻辑
-  candidate-ui/  retype-candidate-ui Win32 + Direct2D 候选窗，独立 UI 线程
+  candidate-ui/  retype-candidate-ui 候选窗呈现接口（Win32+Direct2D 自绘在 M2）
   diag/          retype-diag         终端调试台：敲拼音看候选，最快的开发回路
-  installer/                         注册/卸载脚本与打包
+  updater/       retype-updater      独立更新器 exe（TIP DLL 绝不做网络 IO）
+  installer/                         build.ps1 / package.ps1 / register.ps1
 
 platforms/android/               占位（Kotlin IME + JNI → retype-ffi）
 apps/settings/                   Flutter 设置界面（Windows/Android 共用）
@@ -318,16 +320,20 @@ tools/dict-build/                词库构建：词频表 + 拼音 → dict.bin
 data/dict/                       词库源数据
 ```
 
-依赖方向严格单向（`cargo deny`/CI 检查）：
+依赖方向严格单向（CI 用「内核 crate 在 ubuntu 上编译」这条 job 强制检查）：
 
 ```text
 types ◄── pinyin ◄── dict ◄── engine ──► tsf / ffi
    ▲                    ▲        ▲  ▲
    └── context ─────────┘        │  └── candidate-ui
    └── cloud ────────────────────┘
+
+updater（独立，只依赖 serde_json/sha2）──► platforms/windows/updater
 ```
 
-**铁律**：`core/*` 里不允许出现 `windows` crate（用 `#[cfg(windows)]` 隔离的平台胶水除外，且只能放在 `platforms/`）。这条规则保证了 Android 端能直接复用整个 `core/`。
+**铁律**：`core/*` 里不允许出现 `windows` crate（用 `#[cfg(windows)]` 隔离的平台胶水除外，且只能放在 `platforms/`）。这条规则由 CI 的 `core-portability` job 在 **ubuntu** 上编译全部内核 crate 来强制 —— 一旦有人在 `core/` 里引了平台 API，那个 job 会先红。
+
+同理 `core/updater` 不含任何网络实现，HTTP 走 `HttpFetcher` trait，真实实现（`ureq`）只在 `platforms/windows/updater` 里。详见 [docs/auto-update.md](./docs/auto-update.md)。
 
 ---
 

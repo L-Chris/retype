@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（如 v0.1.0），仅手动触发时使用"
+        required: true
+
+permissions:
+  contents: write
+
+# 同一个 tag 的重复推送不互相取消：发布是不可重入的，宁可排队也不要半途中断
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: 构建并发布 Windows 产物
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # ── 1. 版本一致性：tag / Cargo.toml / pubspec 三者必须相同 ────────────
+      # 这一步放在最前面，因为它失败时不该浪费任何构建时间。
+      - name: 校验 tag 与版本号一致
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+          tag_version="${tag#v}"
+
+          cargo_version="$(sed -nE 's/^version = "([^"]+)".*$/\1/p' Cargo.toml | head -n 1)"
+          pubspec_full="$(sed -nE 's/^version:[[:space:]]*([^[:space:]#]+).*$/\1/p' apps/settings/pubspec.yaml | head -n 1)"
+          pubspec_version="${pubspec_full%%+*}"
+
+          echo "tag       : $tag"
+          echo "Cargo.toml: $cargo_version"
+          echo "pubspec   : $pubspec_full (-> $pubspec_version)"
+
+          if [[ -z "$cargo_version" || -z "$pubspec_version" ]]; then
+            echo "读不到版本号" >&2; exit 1
+          fi
+          if [[ "$tag_version" != "$cargo_version" ]]; then
+            echo "tag '$tag' 与 Cargo.toml 版本 '$cargo_version' 不一致。请打 v$cargo_version" >&2
+            exit 1
+          fi
+          if [[ "$cargo_version" != "$pubspec_version" ]]; then
+            echo "Cargo.toml ($cargo_version) 与 pubspec ($pubspec_version) 不一致" >&2
+            exit 1
+          fi
+
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "RETYPE_VERSION=$cargo_version" >> "$GITHUB_ENV"
+
+      # ── 2. 发布说明必须存在（缺了就失败，不要发一个空说明的 release）──────
+      - name: 校验发布说明存在
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="docs/releases/${{ steps.version.outputs.tag }}.md"
+          if [[ ! -f "$notes" ]]; then
+            echo "缺少发布说明: $notes" >&2
+            echo "发布前请先写好这个文件（参考 docs/releases/ 下的既有文件）" >&2
+            exit 1
+          fi
+          echo "发布说明: $notes"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      # ── 3. 质量门 ────────────────────────────────────────────────────────
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace
+
+      # ── 4. 构建产物 ──────────────────────────────────────────────────────
+      # RETYPE_GITHUB_REPO 会被 core/updater 的 option_env! 烘进二进制，
+      # 这样发布出去的 retype-updater.exe 天然知道自己的仓库，用户不需要传 --repo。
+      - name: 构建 release 二进制 (x64)
+        env:
+          RETYPE_GITHUB_REPO: ${{ github.repository }}
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc `
+            -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
+
+      # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md）。
+      # M1 才会发布 x86 包，但这里先验证目标能编译，避免到 M1 才发现依赖不支持。
+      - name: 验证 x86 目标可编译
+        run: |
+          cargo build --release --target i686-pc-windows-msvc -p retype-tsf
+
+      - name: 构建词库
+        run: |
+          cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- `
+            --in data/dict/raw/jieba-dict.txt `
+            --out data/dict/retype-dict.tsv
+
+      - name: TSF 自检
+        run: cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf
+
+      # 延迟预算是 P1 的量化形式，发布前必须复核一遍（release 构建下的真实数字）
+      - name: 首刷延迟基准
+        run: |
+          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --dict data\dict\retype-dict.tsv | Tee-Object -FilePath bench.txt
+          if (Select-String -Path bench.txt -Pattern 'P99 超预算' -Quiet) {
+            Write-Error '首刷 P99 超出 5ms 预算，发布中止'
+            exit 1
+          }
+
+      - name: 验证更新器已烘入仓库地址
+        run: |
+          # 不带 --repo 也应该能工作（仓库地址来自编译期 option_env!）
+          .\target\x86_64-pc-windows-msvc\release\retype-updater.exe check --json | Tee-Object -FilePath update-check.json
+          $code = $LASTEXITCODE
+          # 0 已是最新 / 10 有可用更新 / 2 网络或 API 问题 —— 都不该阻塞发布
+          # 只有 1（参数错误，含「仓库未配置」）说明烘入失败，必须挡下来
+          if ($code -eq 1) { Write-Error "更新器没能确定仓库地址（退出码 1），RETYPE_GITHUB_REPO 烘入失败"; exit 1 }
+          if ($code -gt 10) { Write-Error "更新器返回意外退出码 $code"; exit 1 }
+          Write-Host "更新器自检通过（退出码 $code）"
+
+      # ── 5. 打包 ──────────────────────────────────────────────────────────
+      - name: 打包 zip + sha256
+        shell: pwsh
+        run: |
+          .\platforms\windows\installer\package.ps1 `
+            -Version "$env:RETYPE_VERSION" `
+            -Arch x64 `
+            -TargetDir target\x86_64-pc-windows-msvc `
+            -OutDir dist
+
+      - name: 列出产物
+        shell: bash
+        run: |
+          ls -la dist/
+          echo "--- sha256 ---"
+          cat dist/*.sha256
+
+      - name: 上传 workflow 产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: retype-${{ steps.version.outputs.version }}-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+            bench.txt
+            update-check.json
+          if-no-files-found: error
+
+      # ── 6. 发布 GitHub Release ───────────────────────────────────────────
+      # 产物名必须与 core/updater 的 Platform::asset_suffix() 对齐
+      # （-windows-x64.zip），否则更新器挑不到产物。
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: docs/releases/${{ steps.version.outputs.tag }}.md
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          fail_on_unmatched_files: true
+          # 发布说明由 docs/releases/<tag>.md 手写，不要让 action 再追加一份自动生成的 changelog
+          generate_release_notes: false

@@ -1,0 +1,35 @@
+# retype
+
+## 第三方数据与组件署名
+
+本发行包中的**词库数据**来源于以下 MIT 许可的项目：
+
+### jieba 词频表
+- 项目: https://github.com/fxsjy/jieba (MIT)
+- Rust 移植: https://github.com/messense/jieba-rs (MIT)
+  - Copyright (c) 2018 - 2019 messense
+  - Copyright (c) 2019 Paul Meng
+- 用途: `retype-dict.tsv` 的词条目与词频来自 jieba 的 `dict.txt`
+  （349,045 词，经注音后产出 352,357 条，含多音字变体）
+- 完整许可证文本见本目录 `LICENSE-jieba`
+
+### pinyin 字音数据
+- 项目: https://github.com/mozillazg/rust-pinyin (MIT)
+- 数据源: https://github.com/mozillazg/pinyin-data (MIT)
+- 用途: 构建期为汉字注音（含多音字），以及运行时的单字降级模式
+
+## 构建工具链
+
+- Rust standard library — MIT OR Apache-2.0
+- windows / windows-core (Microsoft) — MIT OR Apache-2.0
+- sha2, serde_json, thiserror, tracing, crossbeam-channel, futures, ureq — 各自 MIT/Apache-2.0
+
+retype 自身代码采用 MIT 许可，见 `LICENSE`。
+
+## 数据隐私
+
+- 用户词库、纠错记录、输入历史**全部保存在本机**
+  （`%LOCALAPPDATA%\retype\`），默认不上传。
+- 上下文（光标前后文本）带有隐私等级标记。密码框与密码管理器进程一律
+  **不采集**；未显式允许的应用，上下文只在本地参与排序，不出网。
+- 详见 `docs/auto-update.md` 与 `ARCHITECTURE.md` 第 4 节。

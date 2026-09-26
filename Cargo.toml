@@ -8,18 +8,21 @@ members = [
     "core/cloud",
     "core/engine",
     "core/ffi",
+    "core/updater",
     "platforms/windows/tsf",
     "platforms/windows/candidate-ui",
     "platforms/windows/diag",
+    "platforms/windows/updater",
     "tools/dict-build",
 ]
 
 [workspace.package]
+# 版本号的唯一真源。CI 会校验 git tag、apps/settings/pubspec.yaml 与此处三者一致
+# （见 .github/workflows/release.yml）。改版本只改这里 + pubspec，不要改别处。
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://example.invalid/retype"
 publish = false
 
 [workspace.dependencies]
@@ -29,12 +32,17 @@ retype-dict = { path = "core/dict" }
 retype-context = { path = "core/context" }
 retype-cloud = { path = "core/cloud" }
 retype-engine = { path = "core/engine" }
+retype-updater = { path = "core/updater" }
 
 pinyin = { version = "0.10", features = ["plain", "heteronym"] }
 thiserror = "2"
 tracing = "0.1"
 crossbeam-channel = "0.5"
 futures = "0.3"
+serde_json = "1"
+sha2 = "0.11"
+# 只在 platforms/windows/updater 里用：core/updater 保持无网络依赖，可离线单测
+ureq = { version = "3", features = ["json"] }
 
 [workspace.dependencies.windows-core]
 version = "0.62"

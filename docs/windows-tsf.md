@@ -136,6 +136,12 @@ Rust 侧需要 `i686-pc-windows-msvc` target：`rustup target add i686-pc-window
 1. **所有 TSF 回调入口 `catch_unwind`**：我们 panic = Chrome 崩溃。
 2. **禁止 `unwrap()` / `expect()` / 数组越界**：clippy `unwrap_used = "deny"`，`panic = "abort"` **不可用**（cdylib 要能捕获），保持默认 unwind。
 3. **DLL 体积与启动开销**：会被注入到每个进程，`opt-level = "s"`、`lto = true`、`strip = true`，避免拖慢应用启动。
+   实测 M0 的 release DLL 是 **1,082 KB**，比预期大得多 —— 大头是 `pinyin` crate
+   内嵌的全量汉字→拼音数据（`retype-dict` 运行时要给用户自造词注音）。
+   M1 的处置：构建期生成一张紧凑的「字→音节 id」表（约 30KB）随词库分发，
+   用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉，目标 ~300 KB。
+   顺带注意：`single_char_fallback()` 会在运行时构造两万多条单字词条，
+   它依赖同一份数据，摘掉 `pinyin` 之前要先把兜底词库也改成预构建产物。
 4. **不要在 `DllMain` 里做任何实事**（loader lock），初始化全部放到 `ActivateEx`。
 5. **线程模型是 Apartment**：不要在工作线程里直接调用主线程拿到的 COM 指针，需要跨线程用 `GIT`（Global Interface Table）或把调用 marshal 回去。**首选做法**：工作线程只算数据，所有 COM 调用回到 TSF 主线程执行。
 

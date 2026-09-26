@@ -14,8 +14,19 @@
 - [x] 云端抽象 + Mock 实现（`CloudPinyin` / `LlmReranker`）
 - [x] 统一内核：首刷 → 二刷 → 合并 → `gen` 过期丢弃
 - [x] `retype-diag` 终端调试台：敲拼音看候选
+- [x] 真实词库跑通：349,045 词 → 352,357 条已注音词条
+- [x] 首刷延迟基准达标（P50 445µs / P99 3.35ms，预算 5ms）
+- [x] 版本号统一为 0.1.0（Cargo workspace 为唯一真源）
+- [x] CI：`ci.yml`（PR/main）+ `release.yml`（tag `v*` → 构建 + 打包 + 发布 Release）
+- [x] 自动更新：`core/updater` + `retype-updater.exe`（check / download + sha256 校验）
 
-**验收**：`cargo test --workspace` 全绿；`retype-diag` 里输入 `nihaomashijie` 能得到「你好吗」「世界」等候选。
+**验收**：`cargo test --workspace` 全绿（204 项）；`retype-diag` 里输入 `nihaomashijie`
+能得到「你好吗世界」；`cargo clippy --workspace --all-targets -- -D warnings` 零警告；
+打 tag 后 CI 产出 `retype-<版本>-windows-x64.zip` + `.sha256` 并发布 Release。
+
+**待验证（需要真实 GitHub 仓库）**：`release.yml` 全流程跑通、
+`retype-updater.exe check` 对真实 release 的解析。仓库尚未配置 remote，
+这两项要等仓库建好后补一次端到端验证。
 
 ---
 
@@ -29,6 +40,9 @@
 - [ ] 候选窗：先用 TSF 原生 `ITfCandidateListUIElement`（省掉自绘，兼容性交给系统）
 - [ ] 系统词库：`tools/dict-build` 产出 `dict.bin`，随 DLL 分发，异步加载
 - [ ] x86 + x64 双架构产出（32 位应用会加载 32 位 TIP）
+- [ ] **把 TIP DLL 从 1,082 KB 压到 ~300 KB**：构建期生成紧凑的「字→音节 id」表
+      （约 30KB）随词库分发，用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉。
+      这个 DLL 被注入到每个宿主进程，体积直接影响宿主启动速度。
 
 **验收矩阵**（每格都要人工过一遍）：
 
@@ -85,10 +99,16 @@
 ## M5 · 产品化
 
 - [ ] 安装器（MSI/EXE）、卸载、升级不丢用户词库
-- [ ] Flutter 设置界面（`apps/settings`）：词库管理、热键、隐私白名单、云端开关、日志
+- [ ] **原子替换正在使用的 TIP DLL**：倾向「版本化目录 + 注册表指向」方案
+      （`%LOCALAPPDATA%\retype\versions\<ver>\` + `InprocServer32` 指过去），
+      切换与回滚都只改一个注册表值，不碰任何被占用的文件。
+      三个候选方案的权衡见 [auto-update.md §4](./auto-update.md)
+- [ ] `retype-updater.exe` 接上安装器：下载校验通过后触发替换
+- [ ] 更新检查的触发时机与频率（设置界面打开时 / 每日计划任务），注意 GitHub 匿名限额 60 次/小时/IP
+- [ ] Flutter 设置界面（`apps/settings`）：词库管理、热键、隐私白名单、云端开关、日志、检查更新
 - [ ] 崩溃上报与延迟打点
 - [ ] 双拼方案（自然码/小鹤/微软）—— 以键位映射层实现，不改内核
-- [ ] Android 端启动：Kotlin IME + JNI → `retype-ffi`
+- [ ] Android 端启动：Kotlin IME + JNI → `retype-ffi`；更新逻辑复用 `core/updater`
 
 ---
 

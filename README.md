@@ -56,20 +56,24 @@ core/                     跨平台内核（Rust，不依赖任何平台 API）
   context/                  上下文采集接口 + 隐私闸门
   cloud/                    CloudPinyin / LlmReranker / StreamingAsr + Mock + 熔断器
   engine/                   统一内核：状态机、首刷/二刷编排、三段式语音、去抖后端
+  updater/                  自动更新核心：semver 比较 · release 解析 · sha256 校验
   ffi/                      C ABI（Android JNI 用）
 platforms/windows/
   tsf/                      TSF TIP DLL（cdylib）—— 唯一的 unsafe 边界
   candidate-ui/             候选窗呈现接口 + 文本渲染
   diag/                     终端调试台（最重要的开发工具）
-  installer/                构建与注册脚本
+  updater/                  retype-updater.exe（独立进程，TIP 绝不做网络 IO）
+  installer/                build.ps1 · package.ps1 · register.ps1
 apps/settings/            Flutter 设置界面
 data/dict/                词库源数据（jieba 词频表，MIT）
 tools/dict-build/         词库构建：词频表 + 注音 → TSV
-docs/                     roadmap · windows-tsf · dict · adr/
+tools/scripts/            fetch-jieba-dict.ps1
+docs/                     roadmap · windows-tsf · dict · auto-update · adr/ · releases/
+.github/workflows/        ci.yml（PR/main）· release.yml（tag v* → 构建并发布）
 ```
 
-依赖方向严格单向，`core/*` 里不允许出现 `windows` crate —— 这条规则保证了 Android 端
-能直接复用整个内核。
+依赖方向严格单向，`core/*` 里不允许出现 `windows` crate —— CI 的 `core-portability`
+job 在 **ubuntu** 上编译全部内核 crate 来强制这条规则，保证 Android 端能直接复用内核。
 
 ---
 
@@ -135,8 +139,14 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 | 首刷按键延迟 P99 | **3.35 ms** | 5 ms ✓ |
 | 词库加载 | 0.65 ~ 1.1 s | **必须异步**（`AsyncDict`） |
 | 词库构建 | 1.2 s | — |
-| TSF 骨架 DLL | 180 KB | 越小越好（注入每个进程） |
-| 测试 | 166 项全绿 | — |
+| TSF TIP DLL | **1,082 KB** | 偏大，M1 要压到 ~300KB（见下） |
+| 发行包 zip | 4.7 MB | — |
+| 测试 | 204 项全绿 | — |
+
+> **DLL 体积是个已知问题**：1MB 里大部分是 `pinyin` crate 内嵌的全量汉字→拼音数据，
+> 因为 `retype-dict` 运行时要给用户自造词注音。TIP 被注入到每个进程，这个体积直接
+> 拖慢宿主启动。M1 的做法：构建期生成一张紧凑的「字→音节 id」表（约 30KB）随词库
+> 一起分发，用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉。
 
 ---
 
@@ -158,6 +168,62 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 
 ---
 
+## 版本号、CI 与发布
+
+**版本号只有两处**，必须一致（CI 的 `version-consistency` job 会挡）：
+
+- `Cargo.toml` 的 `[workspace.package] version` ← 唯一真源，所有 crate 继承
+- `apps/settings/pubspec.yaml` 的 `version:`（写成 `0.1.0+1`，构建号在后）
+
+当前版本：**0.1.0**
+
+| workflow | 触发 | 做什么 |
+|---|---|---|
+| [`ci.yml`](./.github/workflows/ci.yml) | push main / PR | 内核 crate 在 **ubuntu** 编译（跨平台铁律）· Windows 全量 fmt/clippy/test · 词库构建 · 延迟基准（P99 超 5ms 直接失败）· Flutter analyze/test · 版本号一致性 |
+| [`release.yml`](./.github/workflows/release.yml) | push tag `v*.*.*` | 校验 tag==Cargo==pubspec · 质量门 · x64 构建（+ 验证 x86 可编译）· 词库 · 基准 · `package.ps1` 打 zip+sha256 · 发布 GitHub Release |
+
+发版流程：
+
+```powershell
+# 1. 改版本号（Cargo.toml + pubspec.yaml）
+# 2. 写发布说明（缺了这个文件 release 会直接失败，不会发一个空说明的版本）
+#    docs/releases/v0.1.1.md
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+产物命名必须与 `core/updater` 的 `Platform::asset_suffix()` 对齐
+（`retype-<版本>-windows-x64.zip` + 同名 `.sha256`），否则更新器挑不到产物。
+
+## 自动更新
+
+参考 `torto-app` 的机制（查 GitHub `releases/latest` → 比对版本 → 给出 release 页），
+但针对输入法做了三处改动，完整设计见 **[`docs/auto-update.md`](./docs/auto-update.md)**：
+
+1. **更新逻辑不在 TIP DLL 里**，而是独立的 `retype-updater.exe`。
+   TIP 被注入到每个宿主进程，在里面发 HTTP 等于让 Chrome/Word 替我们打流量，
+   而且直接违反 P1。
+2. **完整 semver 比较**（含预发布优先级）。参考实现按点切分整数比，
+   对 `0.2.0-rc.1` 会得出错误结论。
+3. **sha256 校验通过才落盘**，且校验文件必须与产物成对存在 ——
+   自动更新等于「从网上下载一个会被注入到每个进程的 DLL」，校验不是可选项。
+
+```powershell
+retype-updater.exe check                       # 退出码 0=已最新 10=有更新 2=网络错误
+retype-updater.exe check --json                # 给设置界面用
+retype-updater.exe download --out <目录>        # 下载 + 校验，通过后才写盘
+```
+
+仓库地址解析优先级：`--repo` > 环境变量 `RETYPE_GITHUB_REPO` > 编译期烘入值
+（CI 用 `github.repository` 注入，所以发布的 exe 天然知道自己的仓库；
+开发构建没这个变量会明确报错，不会悄悄打到占位地址）。
+
+**刻意没做**：替换正在使用的 DLL。TIP 被所有进程加载着，直接覆盖会失败或造成
+半更新状态。原子替换属于 M5 安装器（倾向「版本化目录 + 注册表指向」方案，
+切换和回滚都是改一个注册表值）。
+
+---
+
 ## 里程碑
 
 | | 目标 | 状态 |
@@ -167,7 +233,7 @@ Flutter 设置界面：`cd apps/settings; flutter run -d windows`
 | **M2** | 上下文采集 + 用户词库持久化 + 学习闭环 + 候选窗自绘 | ⬜ |
 | **M3** | 二刷接真实云端 + 熔断 + host 进程抽取 | ⬜ |
 | **M4** | 语音输入：流式 ASR + 三段式 + 热键 | ⬜ |
-| **M5** | 安装器 + 设置界面 + 双拼 + Android 端启动 | ⬜ |
+| **M5** | 安装器（原子替换 DLL）+ 设置界面 + 双拼 + Android 端启动 | ⬜ |
 
 M1 的验收是一张**应用兼容性矩阵**（记事本 / Office / Chrome / VS Code / Terminal /
 设置 / 微信），见 [docs/roadmap.md](./docs/roadmap.md#m1--能在-windows-里打中文)。
@@ -180,7 +246,9 @@ M1 的验收是一张**应用兼容性矩阵**（记事本 / Office / Chrome / V
 - [`docs/roadmap.md`](./docs/roadmap.md) —— 里程碑与可验证的验收标准
 - [`docs/windows-tsf.md`](./docs/windows-tsf.md) —— TSF 实现笔记、已验证事实、稳定性红线
 - [`docs/dict.md`](./docs/dict.md) —— 词库管线、二进制格式、打分模型调参
+- [`docs/auto-update.md`](./docs/auto-update.md) —— 自动更新设计与信任边界
 - [`docs/adr/`](./docs/adr) —— 架构决策记录（全 Rust / Mock 先行 / monorepo / 进程内内核）
+- [`docs/releases/`](./docs/releases) —— 每个 tag 的发布说明（release.yml 强制要求存在）
 
 ## 许可与数据来源
 

@@ -1,0 +1,20 @@
+[package]
+name = "retype-updater-cli"
+description = "retype-updater.exe：独立的更新检查/下载工具（TIP DLL 绝不做网络 IO）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "retype-updater"
+path = "src/main.rs"
+
+[dependencies]
+retype-updater = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true
