@@ -165,6 +165,11 @@ jobs:
           }
 
       - name: 验证更新器已烘入仓库地址
+        env:
+          # runner 发出的匿名 api.github.com 请求经常被限流成 HTTP 403，
+          # 那样这一步就只剩「退出码 2」可看，验不出烘入的仓库对不对。
+          # 更新器会读 GITHUB_TOKEN（见 updater/src/main.rs 的 parse_args）。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 不带 --repo 也应该能工作（仓库地址来自编译期 option_env!）
           .\target\x86_64-pc-windows-msvc\release\retype-updater.exe check --json | Tee-Object -FilePath update-check.json
@@ -173,7 +178,18 @@ jobs:
           # 只有 1（参数错误，含「仓库未配置」）说明烘入失败，必须挡下来
           if ($code -eq 1) { Write-Error "更新器没能确定仓库地址（退出码 1），RETYPE_GITHUB_REPO 烘入失败"; exit 1 }
           if ($code -gt 10) { Write-Error "更新器返回意外退出码 $code"; exit 1 }
-          Write-Host "更新器自检通过（退出码 $code）"
+          # 再验一层：成功时输出里有 release_page，失败时有 error（含它请求的 URL），
+          # 两者都必须指向本仓库。仓库还没有任何 release 时无从验证，跳过。
+          $result = Get-Content update-check.json -Raw | ConvertFrom-Json
+          $evidence = if ($result.error) { $result.error } else { $result.release_page }
+          if ($evidence -and $evidence -notlike "*${{ github.repository }}*") {
+            Write-Error "更新器指向的不是 ${{ github.repository }}：$evidence"
+            exit 1
+          }
+          Write-Host "更新器自检通过（退出码 $code；证据 $evidence）"
+          # pwsh 步骤结束时 GitHub 会补一句 `exit $LASTEXITCODE`，
+          # 更新器的 2（网络/API 问题）会被当成步骤失败。判定已做完，显式归零。
+          exit 0
 
       # ── 5. 打包安装器 ────────────────────────────────────────────────────
       # 用 Inno Setup 出 setup.exe，而不是 zip：

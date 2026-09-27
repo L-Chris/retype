@@ -96,6 +96,15 @@ jobs:
         run: |
           cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
 
+      # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md），安装器把它放进 {app}\x86。
+      # retype.iss 的 [Files] 直接引用这个 DLL，缺了 ISCC 会报
+      # 「Source file ... does not exist」并中止 —— 所以下面的安装器步骤依赖它。
+      - name: 构建并测试 x86 TIP
+        run: |
+          cargo build --release --target i686-pc-windows-msvc -p retype-tsf
+          if ($LASTEXITCODE -ne 0) { throw 'x86 build failed' }
+          cargo test --release --target i686-pc-windows-msvc -p retype-tsf
+
       - name: 构建词库
         run: |
           cargo run --release -p retype-dict-build -- `
