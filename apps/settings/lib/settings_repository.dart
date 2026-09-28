@@ -16,11 +16,29 @@ class SettingsSnapshot {
   final String version;
 }
 
+class UpdateOffer {
+  const UpdateOffer({
+    required this.available,
+    required this.installable,
+    this.version,
+    this.releasePage,
+  });
+  final bool available;
+  final bool installable;
+  final String? version;
+  final String? releasePage;
+}
+
 abstract class SettingsRepository {
   Future<SettingsSnapshot> load();
   Future<void> setScheme(PinyinScheme scheme);
   Future<void> setAutoCheck(bool value);
-  Future<void> openUpdates();
+  Future<UpdateOffer> checkUpdates(String currentVersion);
+  Future<String> downloadUpdate(String expectedVersion);
+  Future<int> installUpdate(String path);
+  Future<void> verifyInstallation(String expectedVersion);
+  Future<void> skipUpdate(String version);
+  Future<void> openReleaseNotes(String url);
   Future<void> openFeedback();
   Future<void> openLicense();
   Future<void> openNotice();
@@ -31,6 +49,44 @@ abstract class SettingsRepository {
 class WindowsSettingsRepository implements SettingsRepository {
   const WindowsSettingsRepository();
   static const _channel = MethodChannel('retype/settings');
+
+  Future<String> _installationDirectory() async {
+    final values = await _channel.invokeMapMethod<String, Object?>(
+      'getSettings',
+    );
+    final directory = values?['directory'] as String?;
+    if (directory == null || directory.isEmpty) {
+      throw StateError('未找到已安装的 retype');
+    }
+    return directory;
+  }
+
+  Future<Map<String, dynamic>> _runUpdater(List<String> arguments) async {
+    final directory = await _installationDirectory();
+    final result = await Process.run(
+      '$directory\\retype-updater.exe',
+      arguments,
+      stdoutEncoding: utf8,
+      stderrEncoding: utf8,
+    );
+    Map<String, dynamic>? payload;
+    try {
+      final decoded = jsonDecode(result.stdout as String);
+      if (decoded is Map<String, dynamic>) payload = decoded;
+    } on FormatException {
+      // Prefer the updater's own diagnostic below.
+    }
+    if (result.exitCode != 0 && result.exitCode != 10) {
+      throw StateError(
+        payload?['error'] as String? ??
+            (result.stderr as String).trim().ifEmpty(
+              '更新器退出码 ${result.exitCode}',
+            ),
+      );
+    }
+    if (payload == null) throw StateError('更新器没有返回有效结果');
+    return payload;
+  }
 
   @override
   Future<SettingsSnapshot> load() async {
@@ -73,7 +129,99 @@ class WindowsSettingsRepository implements SettingsRepository {
   Future<void> setAutoCheck(bool value) =>
       _channel.invokeMethod('setAutoCheck', value);
   @override
-  Future<void> openUpdates() => _channel.invokeMethod('openUpdates');
+  Future<UpdateOffer> checkUpdates(String currentVersion) async {
+    final result = await _runUpdater([
+      'check',
+      '--repo',
+      'L-Chris/retype',
+      '--current',
+      currentVersion,
+      '--json',
+    ]);
+    final latest = result['latest'];
+    return UpdateOffer(
+      available: result['update_available'] == true,
+      installable: result['installable'] == true,
+      version: latest is Map ? latest['version'] as String? : null,
+      releasePage: result['release_page'] as String?,
+    );
+  }
+
+  @override
+  Future<String> downloadUpdate(String expectedVersion) async {
+    final root = Platform.environment['LOCALAPPDATA'];
+    if (root == null) throw StateError('无法找到本地更新目录');
+    final directory = await Directory(
+      '$root\\retype\\updates\\${DateTime.now().microsecondsSinceEpoch}',
+    ).create(recursive: true);
+    final result = await _runUpdater([
+      'download',
+      '--repo',
+      'L-Chris/retype',
+      '--json',
+      '--timeout',
+      '300',
+      '--expected-version',
+      expectedVersion,
+      '--out',
+      directory.path,
+    ]);
+    final path = result['downloaded'] as String?;
+    if (path == null || path.isEmpty) throw StateError('下载结果没有安装包路径');
+    return path;
+  }
+
+  @override
+  Future<int> installUpdate(String path) async {
+    await _channel.invokeMethod('installUpdate', path);
+    for (var attempt = 0; attempt < 1200; attempt++) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      final code = await _channel.invokeMethod<int>('installerStatus');
+      if (code != null) return code;
+    }
+    throw StateError('安装等待超时，请检查安装日志');
+  }
+
+  @override
+  Future<void> verifyInstallation(String expectedVersion) async {
+    final directory = await _installationDirectory();
+    final result = await Process.run('powershell.exe', [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      '$directory\\update-verify.ps1',
+      '-ExpectedVersion',
+      expectedVersion,
+    ]);
+    if (result.exitCode != 0) {
+      throw StateError((result.stderr as String).trim().ifEmpty('安装后验证失败'));
+    }
+  }
+
+  @override
+  Future<void> skipUpdate(String version) async {
+    final root = Platform.environment['LOCALAPPDATA'];
+    if (root == null) throw StateError('无法保存跳过版本');
+    final file = File('$root\\retype\\updates\\state.json');
+    Map<String, dynamic> state = {};
+    try {
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is Map<String, dynamic>) state = decoded;
+    } on FileSystemException {
+      // First update check may not have written a state file yet.
+    } on FormatException {
+      // A damaged cache should not block the preference.
+    }
+    state['SkippedVersion'] = version;
+    await file.parent.create(recursive: true);
+    await file.writeAsString(jsonEncode(state));
+  }
+
+  @override
+  Future<void> openReleaseNotes(String url) =>
+      _channel.invokeMethod('openReleaseNotes', url);
   @override
   Future<void> openFeedback() => _channel.invokeMethod('openFeedback');
   @override
@@ -86,4 +234,8 @@ class WindowsSettingsRepository implements SettingsRepository {
 
   @override
   Future<void> closeWindow() => _channel.invokeMethod('closeWindow');
+}
+
+extension on String {
+  String ifEmpty(String fallback) => isEmpty ? fallback : this;
 }

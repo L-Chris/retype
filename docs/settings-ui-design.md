@@ -29,8 +29,8 @@
 
 按参考图居中展示 96 px logo、`retype 输入法`、当前**已安装**版本号。下方单张卡片包含：
 
-- `每天自动检查并提醒` 开关。文案明确不会自动下载安装；状态与现有更新窗口同步。
-- `检查更新` 按钮，打开现有更新窗口。
+- `每天自动检查并提醒` 开关。文案明确不会自动下载安装。
+- `检查更新`、版本说明、跳过版本和下载安装均在本页完成，不再打开独立更新窗口。
 - `反馈问题` 链接，打开项目 GitHub Issues。
 
 底部放 `© 2026 retype · MIT License` 与许可、第三方署名链接。当前项目没有独立的用户协议或隐私政策页面，因此不展示无目标的链接。开发环境无法读取安装元数据时显示“开发版本”，不把 Flutter 包版本误写成机器已安装版本。
@@ -39,12 +39,12 @@
 
 1. 在 `platforms/windows/tsf/src/langbar.rs` 中，把 Win32 右键菜单和 TSF `InitMenu` 都收敛到单个 `设置` 命令；从 `ActiveDir` 解析当前设置程序路径并异步启动，兼容 x86 宿主与 x64 设置程序。
 2. 将 `apps/settings` 从占位页改成上述双页 Flutter Windows 应用。通过一个窄的 Windows 平台接口读取/保存 `HKCU\Software\retype\PinyinScheme`（0 全拼，1 小鹤），并读取 `HKLM64\Software\retype\Version`。复用现有 TSF 的焦点同步机制，避免在按键回调中增加文件或注册表 I/O。
-3. “关于”开关使用 `HKCU\Software\retype\AutoCheck`（DWORD）作为权威值。首次启动设置窗口迁移旧版 `%LOCALAPPDATA%\retype\updates\state.json` 的 `AutoCheck`；更新窗口同步写注册表并保留 JSON 字段。更新计划任务保留，关闭后不发起后台网络检查。
+3. “关于”开关使用 `HKCU\Software\retype\AutoCheck`（DWORD）作为权威值。首次启动设置窗口迁移旧版 `%LOCALAPPDATA%\retype\updates\state.json` 的 `AutoCheck`。更新计划任务保留，关闭后不发起后台网络检查。
 4. Windows 发布流程构建 Flutter 设置程序，并将 exe、Flutter runtime、`data/` 与所需插件作为完整目录放进每次安装的版本目录。开始菜单增加 `retype 设置` 快捷方式；卸载时由安装器清理该版本的应用文件。
 
 ## 验收
 
 - 右键菜单两种 TSF 呈现路径都只显示“设置”；打开/重复打开设置窗，输入目标不失焦异常、宿主不承担 Flutter 运行时。
 - 全拼与小鹤互切后重开设置窗状态一致；返回输入应用后能按新方案输入。x86 与 x64 宿主都能打开同一个设置程序。
-- “关于”显示已安装版本，开关和现有更新窗口互相同步；关闭自动检查后后台任务不访问网络，手动检查仍可用。
+- “关于”显示已安装版本和更新状态；关闭自动检查后后台任务不访问网络，手动检查仍可用。
 - 在干净 Windows 环境安装发布包，确认设置程序所需的 Flutter 文件齐全；验证高 DPI、窄窗口、键盘导航和深浅主题下的可读性。

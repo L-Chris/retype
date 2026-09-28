@@ -147,7 +147,7 @@ Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; Flags: deletekey
 Name: "{group}\retype 设置"; Filename: "{code:GetPayloadDir}\settings\retype.exe"; Comment: "调整输入方案和更新设置"
 Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
 Name: "{group}\retype 调试台"; Filename: "{code:GetPayloadDir}\retype-diag.exe"; Parameters: "--dict ""{code:GetPayloadDir}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
-Name: "{group}\检查更新"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; IconFilename: "{code:GetPayloadDir}\retype.ico"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\update-ui.ps1"""; Comment: "查询 GitHub 上的最新版本"
+Name: "{group}\检查更新"; Filename: "{code:GetPayloadDir}\settings\retype.exe"; Parameters: "--updates"; Comment: "在设置的关于页面检查更新"
 Name: "{group}\许可与署名"; Filename: "{code:GetPayloadDir}\NOTICE.txt"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 

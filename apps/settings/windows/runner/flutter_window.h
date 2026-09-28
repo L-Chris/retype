@@ -10,6 +10,8 @@
 
 #include "win32_window.h"
 
+constexpr UINT kShowUpdatesMessage = WM_APP + 27;
+
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
  public:

@@ -6,14 +6,18 @@
 
 use crate::UpdateError;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 
 /// 计算 sha256，返回小写十六进制。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    let out = h.finalize();
-    let mut s = String::with_capacity(out.len() * 2);
-    for b in out {
+    hex_digest(h.finalize())
+}
+
+fn hex_digest(out: impl AsRef<[u8]>) -> String {
+    let mut s = String::with_capacity(out.as_ref().len() * 2);
+    for &b in out.as_ref() {
         // 手写十六进制，避免引入 hex crate
         s.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
         s.push(char::from_digit((b & 0x0f) as u32, 16).unwrap_or('0'));
@@ -21,9 +25,31 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Hash a downloaded file without keeping the installer in memory.
+pub fn sha256_hex_reader(mut reader: impl Read) -> Result<String, UpdateError> {
+    let mut hash = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&chunk[..count]);
+    }
+    Ok(hex_digest(hash.finalize()))
+}
+
+pub fn verify_sha256_reader(reader: impl Read, expected_hex: &str) -> Result<(), UpdateError> {
+    let actual = sha256_hex_reader(reader)?;
+    compare_sha256(actual, expected_hex)
+}
+
 /// 校验字节内容的 sha256。不匹配返回 `ChecksumMismatch`（带上两个值，便于诊断）。
 pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), UpdateError> {
-    let actual = sha256_hex(bytes);
+    compare_sha256(sha256_hex(bytes), expected_hex)
+}
+
+fn compare_sha256(actual: String, expected_hex: &str) -> Result<(), UpdateError> {
     let expected = expected_hex.trim().to_ascii_lowercase();
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(UpdateError::Malformed(format!(
@@ -103,6 +129,11 @@ mod tests {
         assert!(verify_sha256(b"abd", ABC).is_err(), "内容被改过必须失败");
         let e = verify_sha256(b"abd", ABC).unwrap_err();
         assert!(matches!(e, UpdateError::ChecksumMismatch { .. }));
+        assert!(verify_sha256_reader(&b"abc"[..], ABC).is_ok());
+        assert!(matches!(
+            verify_sha256_reader(&b"abd"[..], ABC),
+            Err(UpdateError::ChecksumMismatch { .. })
+        ));
     }
 
     #[test]

@@ -42,7 +42,10 @@ pub mod version;
 
 pub use github::{parse_release_json, Channel, Platform, Release, ReleaseAsset};
 pub use mock::MockHttp;
-pub use verify::{expected_for, parse_sha256sum, sha256_hex, verify_sha256};
+pub use verify::{
+    expected_for, parse_sha256sum, sha256_hex, sha256_hex_reader, verify_sha256,
+    verify_sha256_reader,
+};
 pub use version::{compare, parse_version, SemVer};
 
 use std::sync::Arc;

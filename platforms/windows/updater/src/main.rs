@@ -28,7 +28,7 @@
 //! | 10 | `check`：发现有可用更新 |
 
 use retype_updater::{
-    expected_for, resolve_repo, verify_sha256, Channel, HttpFetcher, Platform, Response,
+    expected_for, resolve_repo, verify_sha256_reader, Channel, HttpFetcher, Platform, Response,
     UpdateChecker, UpdateError, UpdateStatus,
 };
 use std::path::PathBuf;
@@ -38,6 +38,7 @@ use std::time::Duration;
 /// 与参考实现（torto-app）一致的 15s：更新检查通常发生在设置界面打开时，
 /// 卡住会让整个界面失去响应。
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 
 const EXIT_OK: i32 = 0;
 const EXIT_USAGE: i32 = 1;
@@ -63,6 +64,30 @@ impl UreqFetcher {
             .build()
             .new_agent();
         Self { agent, token }
+    }
+
+    fn download_to(&self, url: &str, path: &std::path::Path) -> Result<u64, (i32, String)> {
+        let response = self
+            .agent
+            .get(url)
+            .header(
+                "User-Agent",
+                concat!("retype-updater/", env!("CARGO_PKG_VERSION")),
+            )
+            .call()
+            .map_err(|e| (EXIT_NETWORK, format!("下载产物失败: {e}")))?;
+        if !(200..300).contains(&response.status().as_u16()) {
+            return Err((EXIT_NETWORK, format!("产物返回 HTTP {}", response.status())));
+        }
+        let mut file = std::fs::File::create(path)
+            .map_err(|e| (EXIT_NETWORK, format!("创建临时文件失败: {e}")))?;
+        let mut reader = response
+            .into_body()
+            .into_with_config()
+            .limit(MAX_INSTALLER_BYTES)
+            .reader();
+        std::io::copy(&mut reader, &mut file)
+            .map_err(|e| (EXIT_NETWORK, format!("下载产物失败: {e}")))
     }
 }
 
@@ -311,30 +336,31 @@ fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf
         )
     })?;
 
-    let resp = fetcher
-        .get(&asset.url)
-        .map_err(|e| (EXIT_NETWORK, format!("下载产物失败: {e}")))?;
-    if !(200..300).contains(&resp.status) {
-        return Err((EXIT_NETWORK, format!("产物返回 HTTP {}", resp.status)));
-    }
-
-    // 先校验，后落盘：磁盘上永远不会出现未经验证的产物
-    if let Err(e) = verify_sha256(&resp.body, &expected) {
-        let msg = match e {
-            UpdateError::ChecksumMismatch { expected, actual } => {
-                format!("sha256 不匹配！期望 {expected}，实际 {actual}。产物已丢弃，未写入磁盘。")
-            }
-            other => format!("校验失败: {other}"),
-        };
-        return Err((EXIT_CHECKSUM, msg));
-    }
-
     std::fs::create_dir_all(&a.out).map_err(|e| (EXIT_USAGE, format!("建不出目录: {e}")))?;
     let dest = a.out.join(&asset.name);
     let partial = dest.with_extension("exe.partial");
-    std::fs::write(&partial, &resp.body).map_err(|e| (EXIT_NETWORK, format!("写文件失败: {e}")))?;
-    // Publish only a complete, verified file. The UI uses a unique transaction directory.
-    std::fs::rename(&partial, &dest).map_err(|e| (EXIT_NETWORK, format!("完成下载失败: {e}")))?;
+    let result = (|| {
+        let size = fetcher.download_to(&asset.url, &partial)?;
+        let file = std::fs::File::open(&partial)
+            .map_err(|e| (EXIT_CHECKSUM, format!("读取下载文件失败: {e}")))?;
+        verify_sha256_reader(file, &expected).map_err(|e| {
+            let msg = match e {
+                UpdateError::ChecksumMismatch { expected, actual } => {
+                    format!("sha256 不匹配！期望 {expected}，实际 {actual}。安装包已丢弃。")
+                }
+                other => format!("校验失败: {other}"),
+            };
+            (EXIT_CHECKSUM, msg)
+        })?;
+        // Only a complete and verified file receives the installer filename.
+        std::fs::rename(&partial, &dest)
+            .map_err(|e| (EXIT_NETWORK, format!("完成下载失败: {e}")))?;
+        Ok::<u64, (i32, String)>(size)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    let size = result?;
     std::fs::write(
         a.out.join(format!("{}.sha256", asset.name)),
         sum_text.as_bytes(),
@@ -344,7 +370,7 @@ fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf
     if !a.json {
         println!("sha256 校验通过: {expected}");
         println!("已下载到: {}", dest.display());
-        println!("大小: {} 字节", resp.body.len());
+        println!("大小: {size} 字节");
         println!();
         println!("下一步：静默运行安装器完成升级（Restart Manager 会处理 DLL 被占用）：");
         println!(
@@ -389,7 +415,7 @@ fn run_verify(a: &Args) -> i32 {
         eprintln!("verify 需要 --file（--sum 可选，默认 <产物>.sha256）");
         return EXIT_USAGE;
     };
-    let bytes = match std::fs::read(file) {
+    let input = match std::fs::File::open(file) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("读不了 {}: {e}", file.display());
@@ -411,17 +437,18 @@ fn run_verify(a: &Args) -> i32 {
         eprintln!("校验文件里没有 {name} 对应的条目");
         return EXIT_NO_ASSET;
     };
-    match verify_sha256(&bytes, &expected) {
+    match verify_sha256_reader(input, &expected) {
         Ok(()) => {
+            let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
             if a.json {
                 println!(
                     "{}",
-                    serde_json::json!({ "file": name, "sha256": expected, "size": bytes.len(), "ok": true })
+                    serde_json::json!({ "file": name, "sha256": expected, "size": size, "ok": true })
                 );
             } else {
                 println!("校验通过: {name}");
                 println!("  sha256 = {expected}");
-                println!("  大小   = {} 字节", bytes.len());
+                println!("  大小   = {size} 字节");
             }
             EXIT_OK
         }
@@ -577,17 +604,25 @@ fn main() {
 
 #[cfg(windows)]
 fn launch_update_ui(args: &[String]) -> i32 {
-    use std::os::windows::process::CommandExt;
     if args.len() > 1 || args.first().is_some_and(|arg| arg != "--background") {
         eprintln!("用法: retype-updater update [--background]");
         return EXIT_USAGE;
     }
     let result = (|| -> std::io::Result<()> {
-        let script = std::env::current_exe()?.with_file_name("update-ui.ps1");
+        let executable = std::env::current_exe()?;
+        if args.is_empty() {
+            let settings = executable.with_file_name("settings").join("retype.exe");
+            std::process::Command::new(settings)
+                .arg("--updates")
+                .spawn()?;
+            return Ok(());
+        }
+        use std::os::windows::process::CommandExt;
+        let script = executable.with_file_name("update-ui.ps1");
         if !script.is_file() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "请通过安装包安装更新窗口",
+                "请通过安装包安装后台更新组件",
             ));
         }
         let root = std::env::var_os("SystemRoot")
@@ -606,9 +641,7 @@ fn launch_update_ui(args: &[String]) -> i32 {
                 "-File",
             ])
             .arg(script);
-        if !args.is_empty() {
-            process.arg("-Background");
-        }
+        process.arg("-Background");
         process.creation_flags(0x08000000).spawn()?;
         Ok(())
     })();
@@ -632,6 +665,7 @@ mod download_tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use retype_updater::{parse_release_json, parse_version};
+    use std::io::{Read, Write};
 
     fn fixture() -> (Args, UpdateStatus) {
         let args = parse_args(&[
@@ -669,5 +703,39 @@ mod download_tests {
         let (args, mut status) = fixture();
         status.asset.as_mut().unwrap().url = "http://github.com/a.exe".into();
         assert!(validate_download(&args, &status).is_err());
+    }
+
+    #[test]
+    fn streams_installer_larger_than_ureqs_default_body_limit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let size = 10 * 1024 * 1024 + 1;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let chunk = [42u8; 64 * 1024];
+            let mut remaining = size;
+            while remaining > 0 {
+                let count = remaining.min(chunk.len());
+                stream.write_all(&chunk[..count]).unwrap();
+                remaining -= count;
+            }
+        });
+        let path = std::env::temp_dir().join(format!(
+            "retype-updater-stream-test-{}.partial",
+            std::process::id()
+        ));
+        let fetcher = UreqFetcher::new(Duration::from_secs(30), None);
+        let result = fetcher.download_to(&format!("http://{address}/setup.exe"), &path);
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), size as u64);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size as u64);
+        std::fs::remove_file(path).unwrap();
     }
 }

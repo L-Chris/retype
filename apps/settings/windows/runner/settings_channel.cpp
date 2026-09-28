@@ -50,24 +50,25 @@ std::string Utf8(const std::wstring& value) {
   return result;
 }
 
+std::wstring Utf16(const std::string& value) {
+  const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                        value.data(), static_cast<int>(value.size()),
+                                        nullptr, 0);
+  if (count <= 0) return {};
+  std::wstring result(count, L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                      static_cast<int>(value.size()), result.data(), count);
+  return result;
+}
+
+HANDLE installer_process = nullptr;
+
 bool OpenPath(const std::wstring& path) {
   return reinterpret_cast<INT_PTR>(
              ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr,
                            SW_SHOWNORMAL)) > 32;
 }
 
-bool OpenUpdates() {
-  const auto directory = ReadInstalledString(L"ActiveDir");
-  if (directory.empty()) return false;
-  const std::wstring script = directory + L"\\update-ui.ps1";
-  if (GetFileAttributesW(script.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-  const std::wstring args =
-      L"-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" +
-      script + L"\"";
-  return reinterpret_cast<INT_PTR>(ShellExecuteW(
-             nullptr, L"open", L"powershell.exe", args.c_str(), nullptr,
-             SW_HIDE)) > 32;
-}
 }  // namespace
 
 std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
@@ -107,7 +108,58 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
           auto version = ReadInstalledString(L"Version");
           values[flutter::EncodableValue("version")] =
               flutter::EncodableValue(Utf8(version.empty() ? L"开发版本" : version));
+          values[flutter::EncodableValue("directory")] =
+              flutter::EncodableValue(Utf8(ReadInstalledString(L"ActiveDir")));
           result->Success(flutter::EncodableValue(values));
+          return;
+        }
+        if (method == "installUpdate") {
+          const auto* value = std::get_if<std::string>(call.arguments());
+          const auto path = value ? Utf16(*value) : std::wstring();
+          if (path.size() < 4 ||
+              _wcsicmp(path.c_str() + path.size() - 4, L".exe") != 0 ||
+              GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            result->Error("invalid_argument", "Invalid installer path");
+            return;
+          }
+          if (installer_process) {
+            result->Error("busy", "An installer is already running");
+            return;
+          }
+          const std::wstring parameters =
+              L"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCLOSEAPPLICATIONS "
+              L"/NORESTARTAPPLICATIONS /RESTARTEXITCODE=3010";
+          SHELLEXECUTEINFOW info{};
+          info.cbSize = sizeof(info);
+          info.fMask = SEE_MASK_NOCLOSEPROCESS;
+          info.hwnd = window;
+          info.lpVerb = L"runas";
+          info.lpFile = path.c_str();
+          info.lpParameters = parameters.c_str();
+          info.nShow = SW_HIDE;
+          if (!ShellExecuteExW(&info) || !info.hProcess) {
+            result->Error("install", "Could not start the elevated installer");
+          } else {
+            installer_process = info.hProcess;
+            result->Success();
+          }
+          return;
+        }
+        if (method == "installerStatus") {
+          if (!installer_process) {
+            result->Error("install", "No installer is running");
+            return;
+          }
+          DWORD code = STILL_ACTIVE;
+          if (!GetExitCodeProcess(installer_process, &code)) {
+            result->Error("install", "Could not read installer status");
+          } else if (code == STILL_ACTIVE) {
+            result->Success();
+          } else {
+            CloseHandle(installer_process);
+            installer_process = nullptr;
+            result->Success(flutter::EncodableValue(static_cast<int32_t>(code)));
+          }
           return;
         }
         if (method == "setScheme") {
@@ -133,8 +185,12 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
           return;
         }
         bool opened = false;
-        if (method == "openUpdates") {
-          opened = OpenUpdates();
+        if (method == "openReleaseNotes") {
+          const auto* value = std::get_if<std::string>(call.arguments());
+          const std::string prefix =
+              "https://github.com/L-Chris/retype/releases/";
+          opened = value && value->rfind(prefix, 0) == 0 &&
+                   OpenPath(Utf16(*value));
         } else if (method == "openFeedback") {
           opened = OpenPath(L"https://github.com/L-Chris/retype/issues");
         } else if (method == "openLicense" || method == "openNotice") {

@@ -55,6 +55,10 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  if (message == kShowUpdatesMessage && settings_channel_) {
+    settings_channel_->InvokeMethod("showUpdates", nullptr);
+    return 0;
+  }
   if (message == WM_NCCALCSIZE && wparam) {
     return 0;  // Flutter owns the entire frame, including the former title area.
   }

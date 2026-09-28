@@ -12,7 +12,7 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 - Full Pinyin and Xiaohe Shuangpin, selectable from the language bar.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
-- An update window with daily checks, version skipping, verified downloads, and installation after user confirmation.
+- Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
 
 The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility across common applications and modern Windows app environments is still being evaluated; see the [validation record](docs/m1-validation.md).
 

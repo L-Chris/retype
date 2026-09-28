@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'settings_repository.dart';
 
-void main() => runApp(const RetypeApp());
+void main(List<String> arguments) =>
+    runApp(RetypeApp(openUpdates: arguments.contains('--updates')));
 
 const _ink = Color(0xFF142B3B);
 const _accent = Color(0xFF138F96);
@@ -10,30 +14,46 @@ const _muted = Color(0xFF657781);
 const _border = Color(0xFFE3E9EC);
 
 class RetypeApp extends StatefulWidget {
-  const RetypeApp({super.key, this.repository});
+  const RetypeApp({super.key, this.repository, this.openUpdates = false});
   final SettingsRepository? repository;
+  final bool openUpdates;
 
   @override
   State<RetypeApp> createState() => _RetypeAppState();
 }
 
 class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
+  static const _channel = MethodChannel('retype/settings');
   late final SettingsRepository repository =
       widget.repository ?? const WindowsSettingsRepository();
   SettingsSnapshot? settings;
   String? error;
   bool saving = false;
-  int page = 0;
+  late int page = widget.openUpdates ? 1 : 0;
+  bool initialUpdateCheckDone = false;
+  bool checkingUpdate = false;
+  bool installingUpdate = false;
+  UpdateOffer? updateOffer;
+  String updateMessage = '检查是否有新版本。';
 
   @override
   void initState() {
     super.initState();
+    if (widget.repository == null) {
+      _channel.setMethodCallHandler((call) async {
+        if (call.method == 'showUpdates' && mounted) {
+          setState(() => page = 1);
+          await _checkUpdate();
+        }
+      });
+    }
     WidgetsBinding.instance.addObserver(this);
     _load();
   }
 
   @override
   void dispose() {
+    if (widget.repository == null) _channel.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -51,9 +71,92 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
           settings = value;
           error = null;
         });
+        if (widget.openUpdates && !initialUpdateCheckDone) {
+          initialUpdateCheckDone = true;
+          unawaited(_checkUpdate());
+        }
       }
     } catch (e) {
       if (mounted) setState(() => error = '读取设置失败：$e');
+    }
+  }
+
+  Future<void> _checkUpdate() async {
+    final current = settings;
+    if (current == null || checkingUpdate || installingUpdate) return;
+    setState(() {
+      checkingUpdate = true;
+      updateMessage = '正在检查更新…';
+    });
+    try {
+      final offer = await repository.checkUpdates(current.version);
+      if (!mounted) return;
+      setState(() {
+        updateOffer = offer;
+        updateMessage = offer.available
+            ? offer.installable
+                  ? '发现新版本 ${offer.version ?? ''}。'
+                  : '发现新版本 ${offer.version ?? ''}，但缺少安装包或校验文件。'
+            : '已是最新版本。';
+      });
+    } catch (e) {
+      if (mounted) setState(() => updateMessage = '检查失败：$e');
+    } finally {
+      if (mounted) setState(() => checkingUpdate = false);
+    }
+  }
+
+  Future<void> _installUpdate() async {
+    final offer = updateOffer;
+    final version = offer?.version;
+    if (offer == null ||
+        !offer.installable ||
+        version == null ||
+        installingUpdate) {
+      return;
+    }
+    setState(() {
+      installingUpdate = true;
+      updateMessage = '正在下载并校验 $version…';
+    });
+    try {
+      final path = await repository.downloadUpdate(version);
+      if (!mounted) return;
+      setState(() => updateMessage = '正在安装；如弹出管理员权限提示，请确认。');
+      final code = await repository.installUpdate(path);
+      if (!mounted) return;
+      if (code == 0) {
+        await repository.verifyInstallation(version);
+        await _load();
+        if (mounted) {
+          setState(() {
+            updateOffer = null;
+            updateMessage = '已安装 $version。重新打开正在运行的应用即可使用新版。';
+          });
+        }
+      } else if (code == 3010) {
+        setState(() {
+          updateOffer = null;
+          updateMessage = '安装已准备完成，请手动重启电脑后生效。';
+        });
+      } else {
+        setState(() => updateMessage = '安装失败，退出码：$code。请检查安装日志。');
+      }
+    } catch (e) {
+      if (mounted) setState(() => updateMessage = '更新未完成：$e');
+    } finally {
+      if (mounted) setState(() => installingUpdate = false);
+    }
+  }
+
+  Future<void> _skipUpdate() async {
+    final version = updateOffer?.version;
+    if (version == null) return;
+    try {
+      await repository.skipUpdate(version);
+      if (mounted) setState(() => updateMessage = '已跳过 $version 的自动提醒。');
+    } catch (e) {
+      if (mounted) setState(() => updateMessage = '保存跳过版本失败：$e');
     }
   }
 
@@ -419,10 +522,66 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
                     endIndent: 22,
                     color: _border,
                   ),
-                  _actionRow(
-                    Icons.system_update_alt,
-                    '检查更新',
-                    () => _open(repository.openUpdates),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 14, 22, 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '更新',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          updateMessage,
+                          style: const TextStyle(color: _muted),
+                        ),
+                        if (checkingUpdate || installingUpdate) ...[
+                          const SizedBox(height: 14),
+                          const LinearProgressIndicator(),
+                        ],
+                        const SizedBox(height: 14),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 8,
+                          children: [
+                            OutlinedButton(
+                              onPressed: checkingUpdate || installingUpdate
+                                  ? null
+                                  : _checkUpdate,
+                              child: const Text('检查更新'),
+                            ),
+                            if (updateOffer?.available == true &&
+                                updateOffer?.installable == true)
+                              FilledButton(
+                                onPressed: installingUpdate
+                                    ? null
+                                    : _installUpdate,
+                                child: const Text('下载并安装'),
+                              ),
+                            if (updateOffer?.releasePage != null)
+                              TextButton(
+                                onPressed: () => _open(
+                                  () => repository.openReleaseNotes(
+                                    updateOffer!.releasePage!,
+                                  ),
+                                ),
+                                child: const Text('版本说明'),
+                              ),
+                            if (updateOffer?.available == true)
+                              TextButton(
+                                onPressed: installingUpdate
+                                    ? null
+                                    : _skipUpdate,
+                                child: const Text('跳过此版本'),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                   const Divider(
                     height: 1,

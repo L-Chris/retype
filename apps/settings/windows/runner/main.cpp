@@ -17,6 +17,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       if (existing) {
         ShowWindow(existing, SW_RESTORE);
         SetForegroundWindow(existing);
+        if (wcsstr(command_line, L"--updates")) {
+          PostMessageW(existing, kShowUpdatesMessage, 0, 0);
+        }
         break;
       }
       Sleep(100);
