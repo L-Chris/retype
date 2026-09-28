@@ -212,22 +212,25 @@ CI 里有一步专门断言这两边一致，改一边忘另一边会直接红�
    自动更新等于「从网上下载一个会被注入到每个进程的 DLL」，校验不是可选项。
 4. 发的是 **Inno Setup 安装包**而不是 zip：输入法要写 HKLM 的 CTF 注册表键、
    要把 8.9MB 词库放进 Program Files、还要处理「DLL 正被所有进程占用」。
-   占用问题交给 Windows 的 Restart Manager，比我们自己发明机制可靠得多，
-   于是自动更新最后一步就是 `setup.exe /VERYSILENT /NORESTART`。
+   每次安装进入独立版本目录，再切换注册路径；已打开的应用继续使用旧 DLL。
+   升级不关闭应用、不自动重启，同版本修复也分配新目录。
 
 ```powershell
 retype-updater.exe check                       # 退出码 0=已最新 10=有更新 2=网络错误
 retype-updater.exe check --json                # 给设置界面用
 retype-updater.exe download --out <目录>        # 下载 + 校验，通过后才写盘
+retype-updater.exe update                      # 打开更新窗口，确认后下载并安装
+retype-updater.exe update --background         # 自动检查，有新版本才提醒
 ```
 
 仓库地址解析优先级：`--repo` > 环境变量 `RETYPE_GITHUB_REPO` > 编译期烘入值
 （CI 用 `github.repository` 注入，所以发布的 exe 天然知道自己的仓库；
 开发构建没这个变量会明确报错，不会悄悄打到占位地址）。
 
-**刻意没做**：替换正在使用的 DLL。TIP 被所有进程加载着，直接覆盖会失败或造成
-半更新状态。原子替换属于 M5 安装器（倾向「版本化目录 + 注册表指向」方案，
-切换和回滚都是改一个注册表值）。
+语言栏右键和开始菜单都提供更新入口。当前用户的计划任务在登录后、每天检查，
+本地限频为 24 小时；可在更新窗口关闭自动检查或跳过版本。后台检查不会自动安装。
+安装后校验版本、双架构 DLL 哈希、COM 路径和输入法名称。旧应用需重新打开以加载新版。
+从旧安装器迁移时，如果仍有待重启替换任务，必须先完成该次重启。
 
 ---
 

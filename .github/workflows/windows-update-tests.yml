@@ -1,0 +1,64 @@
+name: Windows update integration
+on:
+  push:
+    branches: ["test/update-flow"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE) { throw 'fmt failed' }
+          cargo clippy --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'clippy failed' }
+          cargo test --workspace
+          if ($LASTEXITCODE) { throw 'tests failed' }
+          powershell -NoProfile -File platforms/windows/installer/test-update-state.ps1
+          if ($LASTEXITCODE) { throw 'state tests failed' }
+      - name: Build both architectures
+        shell: pwsh
+        env:
+          RETYPE_GITHUB_REPO: L-Chris/retype
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc -p retype-tsf -p retype-updater-cli -p retype-diag -p retype-dict-build
+          if ($LASTEXITCODE) { throw 'x64 failed' }
+          cargo build --release --target i686-pc-windows-msvc -p retype-tsf
+          if ($LASTEXITCODE) { throw 'x86 failed' }
+          cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- --in data/dict/raw/jieba-dict.txt --out data/dict/retype-dict.tsv
+          if ($LASTEXITCODE) { throw 'dictionary failed' }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $version = (Select-String Cargo.toml '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          & $iscc /Qp "/DMyAppVersion=$version" "/DRepoRoot=$env:GITHUB_WORKSPACE" /DBaseDir=target\x86_64-pc-windows-msvc\release /DOutDir=dist platforms/windows/installer/retype.iss
+          if ($LASTEXITCODE) { throw 'installer failed' }
+      - name: Real upgrade while DLLs remain loaded
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $setup = Get-ChildItem dist/*-setup.exe | Select-Object -First 1
+          & platforms/windows/installer/test-upgrade.ps1 -Setup $setup.FullName
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: update-integration-logs
+          path: |
+            ${{ runner.temp }}/*install.log
+            ${{ runner.temp }}/*upgrade.log
+            ${{ runner.temp }}/*repair.log

@@ -77,7 +77,11 @@ impl HttpFetcher for UreqFetcher {
                 "User-Agent",
                 concat!("retype-updater/", env!("CARGO_PKG_VERSION")),
             );
-        if let Some(t) = &self.token {
+        if let Some(t) = self
+            .token
+            .as_ref()
+            .filter(|_| url.starts_with("https://api.github.com/"))
+        {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
         match req.call() {
@@ -120,6 +124,7 @@ struct Args {
     json: bool,
     file: Option<PathBuf>,
     sum: Option<PathBuf>,
+    expected_version: Option<String>,
 }
 
 fn usage() -> String {
@@ -131,6 +136,7 @@ retype-updater {} —— 检查 / 下载更新
   retype-updater check    [选项]
   retype-updater download [选项] --out <目录>
   retype-updater verify   --file <产物> [--sum <sha256文件>]
+  retype-updater update   [--background]  打开更新窗口 / 后台检查提醒
 
 选项:
   --repo <owner/name>   GitHub 仓库。优先级：本参数 > 环境变量 RETYPE_GITHUB_REPO
@@ -141,6 +147,7 @@ retype-updater {} —— 检查 / 下载更新
   --timeout <秒>        单次请求超时，默认 {DEFAULT_TIMEOUT_SECS}
   --token <t>           GitHub token，用于提高 API 限额；也可用环境变量 GITHUB_TOKEN
   --out <目录>          download 的落盘目录
+  --expected-version <ver>  下载时必须匹配已向用户展示的版本
   --file <路径>         verify 的待校验产物
   --sum <路径>          verify 的 sha256 文件，默认 <产物>.sha256
   --json                以 JSON 输出（给设置界面调用）
@@ -178,6 +185,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         json: false,
         file: None,
         sum: None,
+        expected_version: None,
     };
 
     let mut i = 0;
@@ -215,6 +223,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--out" => a.out = PathBuf::from(val(&mut i)?),
             "--file" => a.file = Some(PathBuf::from(val(&mut i)?)),
             "--sum" => a.sum = Some(PathBuf::from(val(&mut i)?)),
+            "--expected-version" => a.expected_version = Some(val(&mut i)?),
             "--json" => a.json = true,
             other => return Err(format!("未知参数: {other}")),
         }
@@ -277,6 +286,7 @@ fn status_to_json(s: &UpdateStatus, platform: Platform) -> String {
 /// 顺序是刻意的：先拿校验值再拿产物，这样任何一个环节失败都不会在磁盘上
 /// 留下一个「看起来像是对的」的文件。
 fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf, (i32, String)> {
+    validate_download(a, s)?;
     let (Some(asset), Some(checksum)) = (&s.asset, &s.checksum_asset) else {
         return Err((
             EXIT_NO_ASSET,
@@ -321,7 +331,10 @@ fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf
 
     std::fs::create_dir_all(&a.out).map_err(|e| (EXIT_USAGE, format!("建不出目录: {e}")))?;
     let dest = a.out.join(&asset.name);
-    std::fs::write(&dest, &resp.body).map_err(|e| (EXIT_NETWORK, format!("写文件失败: {e}")))?;
+    let partial = dest.with_extension("exe.partial");
+    std::fs::write(&partial, &resp.body).map_err(|e| (EXIT_NETWORK, format!("写文件失败: {e}")))?;
+    // Publish only a complete, verified file. The UI uses a unique transaction directory.
+    std::fs::rename(&partial, &dest).map_err(|e| (EXIT_NETWORK, format!("完成下载失败: {e}")))?;
     std::fs::write(
         a.out.join(format!("{}.sha256", asset.name)),
         sum_text.as_bytes(),
@@ -342,6 +355,32 @@ fn download(a: &Args, fetcher: &UreqFetcher, s: &UpdateStatus) -> Result<PathBuf
         println!("详见 docs/auto-update.md §4。");
     }
     Ok(dest)
+}
+
+fn validate_download(a: &Args, s: &UpdateStatus) -> Result<(), (i32, String)> {
+    if let Some(expected) = &a.expected_version {
+        if s.latest.as_ref().map(|r| r.version.to_string()).as_ref() != Some(expected) {
+            return Err((EXIT_NO_ASSET, "发布版本已变化，请重新检查更新".into()));
+        }
+    }
+    if let Some(asset) = &s.asset {
+        if asset.name.contains(['/', '\\', ':']) || asset.name.starts_with('.') {
+            return Err((EXIT_NO_ASSET, "安装包文件名不合法".into()));
+        }
+        let Some(checksum) = &s.checksum_asset else {
+            return Err((EXIT_NO_ASSET, "缺少校验文件".into()));
+        };
+        if checksum.name != format!("{}.sha256", asset.name)
+            || !asset.url.starts_with("https://")
+            || !checksum.url.starts_with("https://")
+        {
+            return Err((
+                EXIT_NO_ASSET,
+                "安装包与校验文件不匹配，或下载地址不安全".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 离线校验一个已下载的产物。不发任何网络请求。
@@ -404,6 +443,9 @@ fn run_verify(a: &Args) -> i32 {
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().is_some_and(|arg| arg == "update") {
+        std::process::exit(launch_update_ui(&argv[1..]));
+    }
     let a = match parse_args(&argv) {
         Ok(a) => a,
         Err(msg) => {
@@ -530,5 +572,102 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(windows)]
+fn launch_update_ui(args: &[String]) -> i32 {
+    use std::os::windows::process::CommandExt;
+    if args.len() > 1 || args.first().is_some_and(|arg| arg != "--background") {
+        eprintln!("用法: retype-updater update [--background]");
+        return EXIT_USAGE;
+    }
+    let result = (|| -> std::io::Result<()> {
+        let script = std::env::current_exe()?.with_file_name("update-ui.ps1");
+        if !script.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "请通过安装包安装更新窗口",
+            ));
+        }
+        let root = std::env::var_os("SystemRoot")
+            .ok_or_else(|| std::io::Error::other("SystemRoot is missing"))?;
+        let mut process = std::process::Command::new(
+            PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        );
+        process
+            .args([
+                "-NoProfile",
+                "-STA",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(script);
+        if !args.is_empty() {
+            process.arg("-Background");
+        }
+        process.creation_flags(0x08000000).spawn()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => EXIT_OK,
+        Err(error) => {
+            eprintln!("{error}");
+            EXIT_USAGE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_update_ui(_args: &[String]) -> i32 {
+    eprintln!("更新窗口仅支持 Windows。");
+    EXIT_USAGE
+}
+
+#[cfg(test)]
+mod download_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use retype_updater::{parse_release_json, parse_version};
+
+    fn fixture() -> (Args, UpdateStatus) {
+        let args = parse_args(&[
+            "download".into(),
+            "--expected-version".into(),
+            "0.2.0".into(),
+        ])
+        .unwrap();
+        let release = parse_release_json(br#"{"tag_name":"v0.2.0","html_url":"https://github.com/L-Chris/retype/releases/tag/v0.2.0","assets":[{"name":"retype-0.2.0-windows-x64-setup.exe","browser_download_url":"https://github.com/a.exe","size":100},{"name":"retype-0.2.0-windows-x64-setup.exe.sha256","browser_download_url":"https://github.com/a.sha256","size":100}]}"#).unwrap();
+        let status = UpdateStatus {
+            current: parse_version("0.1.0").unwrap(),
+            update_available: true,
+            release_page: Some(release.html_url.clone()),
+            asset: release.asset(Platform::WindowsX64).cloned(),
+            checksum_asset: release.checksum_asset(Platform::WindowsX64).cloned(),
+            latest: Some(release),
+        };
+        (args, status)
+    }
+    #[test]
+    fn refuses_changed_release_and_unpaired_checksum() {
+        let (mut args, mut status) = fixture();
+        assert!(validate_download(&args, &status).is_ok());
+        args.expected_version = Some("0.1.9".into());
+        assert!(validate_download(&args, &status).is_err());
+        args.expected_version = None;
+        status.checksum_asset.as_mut().unwrap().name = "another.exe.sha256".into();
+        assert!(validate_download(&args, &status).is_err());
+    }
+    #[test]
+    fn refuses_path_traversal_and_insecure_downloads() {
+        let (args, mut status) = fixture();
+        status.asset.as_mut().unwrap().name = "..\\setup.exe".into();
+        assert!(validate_download(&args, &status).is_err());
+        let (args, mut status) = fixture();
+        status.asset.as_mut().unwrap().url = "http://github.com/a.exe".into();
+        assert!(validate_download(&args, &status).is_err());
     }
 }

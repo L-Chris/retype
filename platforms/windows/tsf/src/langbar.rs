@@ -266,6 +266,8 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
                             3,
                             w!("小鹤双拼"),
                         )?;
+                        AppendMenuW(menu, MF_SEPARATOR, 0, windows_core::PCWSTR::null())?;
+                        AppendMenuW(menu, MF_STRING, 4, w!("检查更新…"))?;
                         Ok(TrackPopupMenu(
                             menu,
                             TPM_RETURNCMD | TPM_NONOTIFY,
@@ -295,6 +297,7 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
             (1, "中文 / English  (Ctrl+Space)", chinese),
             (2, "全拼", scheme == PinyinScheme::Full),
             (3, "小鹤双拼", scheme == PinyinScheme::Flypy),
+            (4, "检查更新…", false),
         ] {
             // SAFETY: Text slice stays alive during the synchronous call; no submenu is requested.
             unsafe {
@@ -315,6 +318,7 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
             1 => self.action(edit::Work::Toggle),
             2 => self.action(edit::Work::Scheme(PinyinScheme::Full)),
             3 => self.action(edit::Work::Scheme(PinyinScheme::Flypy)),
+            4 => crate::preferences::open_updates(),
             _ => Err(E_INVALIDARG.into()),
         }
     }

@@ -89,7 +89,7 @@ OutputBaseFilename=retype-{#MyAppVersion}-windows-x64-setup
 SourceDir={#RepoRoot}
 SetupIconFile={#RepoRoot}\apps\settings\windows\runner\resources\app_icon.ico
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={app}\retype-diag.exe
+UninstallDisplayIcon={code:GetPayloadDir}\retype-diag.exe
 LicenseFile={#RepoRoot}\LICENSE
 
 Compression=lzma2/max
@@ -104,41 +104,46 @@ PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
-; ---- DLL 正被占用时的处理 ------------------------------------
-; TIP DLL 被注入到**每一个**正在运行的进程里，升级时它几乎一定是被占用的。
-; Restart Manager 会列出占用进程让用户选择关闭；关不掉的由 Inno 自动登记为
-; 「重启后替换」，并在结束页提示重启。这比我们自己在 M5 设计「版本化目录 +
-; 注册表指向」要可靠得多 —— 那套方案已作废，见 docs/auto-update.md。
-CloseApplications=yes
+; 每次安装写入独立版本目录；旧应用继续持有旧 DLL，避免覆盖占用文件。
+; 同版本修复也分配新目录。升级不关闭用户应用、不自动重启。
+CloseApplications=no
 RestartApplications=no
 
 [Files]
+Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 路径都相对 SourceDir（= RepoRoot）
 ; TSF TIP。ignoreversion 是必须的：Rust 的 cdylib 没有 VERSIONINFO 资源，
 ; Windows 无法按文件版本判断新旧，只能无条件覆盖。
-Source: "{#BaseDir}\retype_ime.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit
-Source: "{#X86Dir}\retype_ime.dll"; DestDir: "{app}\x86"; Flags: ignoreversion regserver 32bit
-Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BaseDir}\retype_ime.dll"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion regserver 64bit
+Source: "{#X86Dir}\retype_ime.dll"; DestDir: "{code:GetPayloadDir}\x86"; Flags: ignoreversion regserver 32bit
+Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 更新器：自动更新的执行者（TIP DLL 自己绝不做网络 IO）
-Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
-Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 已注音词库（约 8.9MB，包里最大的一块）
-Source: "{#DictFile}"; DestDir: "{app}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
-Source: "data\dict\retype-dict.bin"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DictFile}"; DestDir: "{code:GetPayloadDir}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
+Source: "data\dict\retype-dict.bin"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 许可与第三方数据署名（jieba / pinyin 均为 MIT，发行时必须附带）
-Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "NOTICE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "NOTICE.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+
+[INI]
+Filename: "{code:GetPayloadDir}\installed.ini"; Section: "Installation"; Key: "Version"; String: "{#MyAppVersion}"
+Filename: "{code:GetPayloadDir}\installed.ini"; Section: "Installation"; Key: "x64"; String: "{code:GetPayloadHash64}"
+Filename: "{code:GetPayloadDir}\installed.ini"; Section: "Installation"; Key: "x86"; String: "{code:GetPayloadHash32}"
 
 [Registry]
+Root: HKLM64; Subkey: "SOFTWARE\retype"; ValueType: string; ValueName: "ActiveDir"; ValueData: "{code:GetPayloadDir}"; Flags: uninsdeletevalue
+Root: HKLM64; Subkey: "SOFTWARE\retype"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletevalue
 ; 清理旧版误写的 COM 路径；正确注册由 DLL 的 regserver 完成。
 Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; Flags: deletekey
 [Icons]
-Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
-Name: "{group}\retype 调试台"; Filename: "{app}\retype-diag.exe"; Parameters: "--dict ""{app}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
-Name: "{group}\检查更新"; Filename: "{app}\retype-updater.exe"; Parameters: "check"; Comment: "查询 GitHub 上的最新版本"
-Name: "{group}\许可与署名"; Filename: "{app}\NOTICE.txt"
+Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
+Name: "{group}\retype 调试台"; Filename: "{code:GetPayloadDir}\retype-diag.exe"; Parameters: "--dict ""{code:GetPayloadDir}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
+Name: "{group}\检查更新"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\update-ui.ps1"""; Comment: "查询 GitHub 上的最新版本"
+Name: "{group}\许可与署名"; Filename: "{code:GetPayloadDir}\NOTICE.txt"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
 [UninstallDelete]
@@ -149,21 +154,77 @@ Type: filesandordirs; Name: "{app}\*.log"
 var
   DeleteUserData: Boolean;
   UserProfileAdded: Boolean;
+  PayloadSuffix: String;
+  Previous64, Previous32: String;
+  InstallCommitted, RegistrationStarted: Boolean;
+
+function GetPayloadDir(Param: String): String;
+begin
+  Result := ExpandConstant('{app}\versions\{#MyAppVersion}-') + PayloadSuffix;
+end;
+
+function GetPayloadHash64(Param: String): String;
+begin
+  Result := GetSHA256OfFile(GetPayloadDir('') + '\retype_ime.dll');
+end;
+
+function GetPayloadHash32(Param: String): String;
+begin
+  Result := GetSHA256OfFile(GetPayloadDir('') + '\x86\retype_ime.dll');
+end;
+
+function InitializeSetup: Boolean;
+begin
+  PayloadSuffix := GetDateTimeString('yyyymmddhhnnss', '-', ':') + '-' + IntToStr(Random(1000000));
+  RegQueryStringValue(HKLM64, 'Software\Classes\CLSID\{#TipCLSID}\InprocServer32', '', Previous64);
+  RegQueryStringValue(HKLM32, 'Software\Classes\CLSID\{#TipCLSID}\InprocServer32', '', Previous32);
+  Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Pending: String;
+begin
+  Result := '';
+  if RegQueryMultiStringValue(HKLM64, 'SYSTEM\CurrentControlSet\Control\Session Manager',
+    'PendingFileRenameOperations', Pending) then
+    if Pos(Lowercase(ExpandConstant('{app}\')), Lowercase(Pending)) > 0 then
+      Result := '上一次安装仍有文件等待重启替换。请先保存工作并重启，再安装此版本，避免旧注册任务覆盖新版。';
+end;
+
+procedure DeinitializeSetup;
+var
+  Code: Integer;
+begin
+  if RegistrationStarted and not InstallCommitted then begin
+    if (Previous64 <> '') and FileExists(Previous64) then
+      Exec(ExpandConstant('{sys}\regsvr32.exe'), '/s "' + Previous64 + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    if (Previous32 <> '') and FileExists(Previous32) then
+      Exec(ExpandConstant('{syswow64}\regsvr32.exe'), '/s "' + Previous32 + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  end;
+end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
+  if CurStep = ssInstall then RegistrationStarted := True;
   if CurStep = ssPostInstall then
   begin
     // Machine COM registration and user keyboard selection are separate operations.
     // In particular, UAC may have used another administrator's account.
     UserProfileAdded := ExecAsOriginalUser(
-      ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
-      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\user-profile.ps1') + '"',
+      ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + GetPayloadDir('') + '\user-profile.ps1"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     UserProfileAdded := UserProfileAdded and (ResultCode = 0);
     Log(Format('User keyboard enrollment: %d', [ResultCode]));
+    if not ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + GetPayloadDir('') + '\update-task.ps1"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Log('Could not configure update task');
+    Log(Format('Update task enrollment: %d', [ResultCode]));
+    InstallCommitted := True;
   end;
 end;
 
@@ -223,11 +284,14 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    if not Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
-      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\user-profile.ps1') + '" -Uninstall',
+    if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{reg:HKLM64\Software\retype,ActiveDir}\user-profile.ps1') + '" -Uninstall',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
       Log('Could not start user keyboard removal');
     Log(Format('User keyboard removal: %d', [ResultCode]));
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{reg:HKLM64\Software\retype,ActiveDir}\update-task.ps1') + '" -Uninstall',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
   if CurUninstallStep = usPostUninstall then
   begin

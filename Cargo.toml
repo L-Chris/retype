@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 # 版本号的唯一真源。CI 会校验 git tag、apps/settings/pubspec.yaml 与此处三者一致
 # （见 .github/workflows/release.yml）。改版本只改这里 + pubspec，不要改别处。
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
