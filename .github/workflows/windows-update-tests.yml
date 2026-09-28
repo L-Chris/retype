@@ -39,7 +39,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'x64 failed' }
           cargo build --release --target i686-pc-windows-msvc -p retype-tsf
           if ($LASTEXITCODE) { throw 'x86 failed' }
-          cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- --in data/dict/raw/jieba-dict.txt --out data/dict/retype-dict.tsv
+          cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- --out data/dict/retype-dict.tsv
           if ($LASTEXITCODE) { throw 'dictionary failed' }
       - uses: subosito/flutter-action@v2
         with:

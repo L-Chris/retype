@@ -124,13 +124,13 @@ Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{code:GetPaylo
 Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-; 已注音词库（约 8.9MB，包里最大的一块）
+; 万象 Base 已注音词库
 Source: "{#DictFile}"; DestDir: "{code:GetPayloadDir}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
 Source: "data\dict\retype-dict.bin"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-; 许可与第三方数据署名（jieba / pinyin 均为 MIT，发行时必须附带）
+; 许可与第三方数据署名（万象词库为 CC BY 4.0）
 Source: "LICENSE"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "NOTICE.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\wanxiang-base\LICENSE"; DestDir: "{code:GetPayloadDir}"; DestName: "LICENSE-wanxiang"; Flags: ignoreversion
 Source: "data\dict\raw\LICENSE-Unicode.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 
 [INI]
@@ -266,7 +266,7 @@ begin
       '【当前版本的能力边界】' + #13#10 +
       'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +
       '语言栏「中 / A」可点击切换中英，右键「设置」可切换全拼 / 小鹤双拼。' + #13#10 +
-      '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–5 或鼠标选词，Esc 取消，回车输入原拼音。' + #13#10 +
+      '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–8 或鼠标选词，- / = 翻页，Esc 取消，回车输入原拼音。' + #13#10 +
       '应用兼容性仍在验证中。升级后请重新打开使用输入法的应用；如提示重启，请先保存工作。';
   end;
 end;

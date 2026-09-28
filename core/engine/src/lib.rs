@@ -182,6 +182,47 @@ mod tests {
     }
 
     #[test]
+    fn flypy_third_key_refreshes_candidates_without_showing_raw_letters() {
+        let (dict, _) = from_pairs([
+            ("没", "mei", 1000.0),
+            ("我", "wo", 2000.0),
+            ("没有", "mei you", 5000.0),
+            ("渥恩", "wo en", 1.0),
+        ]);
+        let cloud = offline_cloud(Duration::from_millis(100));
+        let kernel = Kernel::new(
+            KernelConfig {
+                pinyin_scheme: retype_types::PinyinScheme::Flypy,
+                rerank_enabled: false,
+                ..Default::default()
+            },
+            Arc::new(dict),
+            Arc::new(Learner::new(Arc::new(UserDict::new()))),
+            Arc::clone(&cloud),
+        );
+        let backend = InlineBackend::new(kernel, cloud);
+        type_str(&backend, "mwy");
+        let render = backend.render();
+        assert_eq!(render.composition, "mwy");
+        assert_eq!(render.candidates[0].text, "没有");
+        assert!(render.candidates.iter().all(|c| !c.text.contains('y')));
+        assert_eq!(
+            committed_of(&backend.submit(key_ev(Key::Space))).as_deref(),
+            Some("没有")
+        );
+
+        type_str(&backend, "woe");
+        let render = backend.render();
+        assert_eq!(render.candidates[0].text, "我");
+        assert!(render.candidates.iter().all(|c| !c.text.contains('e')));
+        assert_eq!(
+            committed_of(&backend.submit(key_ev(Key::Char(',')))).as_deref(),
+            Some("我e"),
+            "typing punctuation must not discard the unmatched suffix"
+        );
+    }
+
+    #[test]
     fn numeric_selection_does_not_choose_hidden_next_page() {
         // One item per page makes candidate 2 invisible even though it exists.
         let mut kernel = Kernel::new(
@@ -390,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn minus_and_plus_turn_candidate_pages_without_committing() {
+    fn minus_and_equals_turn_pages_but_plus_is_punctuation() {
         let mut kernel = Kernel::new(
             KernelConfig {
                 decode: retype_pinyin::DecodeOptions {
@@ -408,8 +449,8 @@ mod tests {
         let before = kernel.render_state();
         assert!(before.candidates.len() > before.page_size);
         let next = last_render(&kernel.handle(InputEvent::Key {
-            key: Key::Char('+'),
-            mods: Modifiers::SHIFT,
+            key: Key::Char('='),
+            mods: Modifiers::NONE,
             source: InputSource::Keyboard,
         }));
         assert_eq!(next.page_start, before.page_size);
@@ -417,6 +458,14 @@ mod tests {
         let previous = last_render(&kernel.handle(key_ev(Key::Char('-'))));
         assert_eq!(previous.page_start, 0);
         assert_eq!(previous.composition, before.composition);
+
+        let plus = kernel.handle(InputEvent::Key {
+            key: Key::Char('+'),
+            mods: Modifiers::SHIFT,
+            source: InputSource::Keyboard,
+        });
+        assert!(committed_of(&plus).is_some());
+        assert!(plus.iter().any(|a| matches!(a, KernelAction::PassThrough)));
     }
 
     #[test]
@@ -874,7 +923,7 @@ mod tests {
     // ── 降级 ────────────────────────────────────────────────────
 
     #[test]
-    fn empty_dict_still_produces_candidates() {
+    fn empty_dict_keeps_raw_letters_out_of_candidates() {
         let user = Arc::new(UserDict::new());
         let learner: Arc<dyn LearningStore> = Arc::new(Learner::new(Arc::clone(&user)));
         let empty: Arc<dyn Lexicon> = Arc::new(MemoryDict::default());
@@ -891,11 +940,10 @@ mod tests {
         let b = InlineBackend::new(k, cloud);
         let acts = type_str(&b, "nihao");
         let r = last_render(&acts);
-        assert!(
-            !r.candidates.is_empty(),
-            "词库空了也必须给出候选（原样字母）"
-        );
+        assert!(r.candidates.is_empty(), "原样字母只留在组字串中");
+        assert_eq!(r.composition, "nihao");
         assert!(r.status.contains(StatusFlags::DEGRADED), "并且要标记降级");
+        assert_eq!(committed_of(&key(&b, Key::Enter)).as_deref(), Some("nihao"));
     }
 
     #[test]

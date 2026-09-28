@@ -4,24 +4,28 @@
 
 本发行包中的**词库数据**来自以下项目：
 
-### jieba 词频表
-- 项目: https://github.com/fxsjy/jieba (MIT)
-- Rust 移植: https://github.com/messense/jieba-rs (MIT)
-  - Copyright (c) 2018 - 2019 messense
-  - Copyright (c) 2019 Paul Meng
-- 用途: `retype-dict.tsv` 的词条目与词频来自 jieba 的 `dict.txt`
-  （349,045 行原始数据；构建时会过滤不适用的词条并展开多音字）
-- 完整许可证文本见本目录 `LICENSE-jieba`
+### 万象拼音 Base 词库
+- 项目: https://github.com/amzxyz/rime-wanxiang
+- 上游版本: v18.0.14，发布包 `rime-wanxiang-base.zip`
+- 来源文件: `zi.dict.yaml`、`jichu.dict.yaml`、
+  `lianxiang.dict.yaml`、`duoyin.dict.yaml`
+- 用途: `retype-dict.tsv` / `retype-dict.bin` 的词条、逐词读音与权重。
+  构建时去掉声调，保留拼音与权重，并过滤当前解码器
+  尚不能使用的六字以上词条及非汉字词条。
+- 许可: Creative Commons Attribution 4.0 International (CC BY 4.0)。
+  上游词库及本项目的转换产物均保留该数据许可；完整文本见
+  `LICENSE-wanxiang`（源码中为 `data/dict/raw/wanxiang-base/LICENSE`）。
+  retype 与上游项目无关联，上游作者未为本项目背书。
 
 ### pinyin 字音数据
 - 项目: https://github.com/mozillazg/rust-pinyin (MIT)
 - 数据源: https://github.com/mozillazg/pinyin-data (MIT)
-- 用途: 构建期为汉字注音（含多音字），以及运行时的单字降级模式
+- 用途: 词库缺失时的单字降级模式，以及开发辅助工具；默认词库使用万象逐词注音
 
 ### Unicode Unihan 读音频率数据
 - 项目: https://www.unicode.org/reports/tr38/
 - 数据: Unicode 15.1.0 `kHanyuPinlu`，源自《现代汉语频率词典》
-- 用途: 按实际读音频率分配单字词频，避免“无 mó”等特定场景读音占据常用候选首位
+- 用途: 单字降级与开发辅助工具中的多音字权重；不参与默认万象词库的构建
 - 许可: Unicode License V3；完整文本见本目录 `LICENSE-Unicode.txt`
 
 ## 构建工具链

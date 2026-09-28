@@ -192,6 +192,73 @@ mod tests {
     }
 
     #[test]
+    fn flypy_incomplete_syllables_preview_dictionary_matches() {
+        let mut lex = TestLex::default();
+        for (text, pinyin, score) in [
+            ("啊", "a", -2.0),
+            ("妈", "ma", -3.0),
+            ("我", "wo", -1.0),
+            ("一", "yi", -1.5),
+            ("没", "mei", -2.5),
+            ("没有", "mei you", -0.5),
+        ] {
+            lex.add(text, pinyin, score);
+        }
+        let opts = DecodeOptions::default();
+        for (input, expected) in [("a", "啊"), ("m", "妈"), ("w", "我"), ("y", "一")] {
+            let out = shuangpin::decode(input, &lex, &opts);
+            assert!(
+                out.candidates
+                    .iter()
+                    .any(|c| c.text == expected && c.consumed == 1),
+                "{input} should preview {expected}: {:?}",
+                out.candidates
+            );
+        }
+        let out = shuangpin::decode("mwy", &lex, &opts);
+        assert!(
+            out.candidates
+                .iter()
+                .any(|c| c.text == "没有" && c.consumed == 3),
+            "third key should refresh phrase candidates: {:?}",
+            out.candidates
+        );
+    }
+
+    #[test]
+    fn unmatched_suffix_stays_out_of_clean_prefix_candidates() {
+        let mut lex = TestLex::default();
+        lex.add("我", "wo", -1.0);
+        lex.add("窝", "wo", -2.0);
+        let out = Decoder::new().decode("woe", &lex);
+        assert!(out
+            .candidates
+            .iter()
+            .any(|c| c.source == retype_types::CandidateSource::Raw));
+        for expected in ["我", "窝"] {
+            assert!(
+                out.candidates
+                    .iter()
+                    .any(|c| c.text == expected && c.consumed == 2),
+                "{expected} must remain selectable without the trailing e"
+            );
+        }
+    }
+
+    #[test]
+    fn flypy_jiuu_and_qiuu_follow_the_actual_pronunciation() {
+        let mut lex = TestLex::default();
+        lex.add("技术", "ji shu", -1.0);
+        lex.add("奇数", "ji shu", -2.0);
+        let opts = DecodeOptions::default();
+        let ji = shuangpin::decode("jiuu", &lex, &opts);
+        let qi = shuangpin::decode("qiuu", &lex, &opts);
+        assert!(ji.candidates.iter().any(|c| c.text == "技术"));
+        assert!(ji.candidates.iter().any(|c| c.text == "奇数"));
+        assert!(!qi.candidates.iter().any(|c| c.text == "奇数"));
+    }
+
+    #[test]
     fn empty_lexicon_degrades_to_raw_letters() {
         // ARCHITECTURE.md §7：词库缺失 → 降级，但绝不能没有输出
         let out = Decoder::new().decode("nihao", &EmptyLexicon);

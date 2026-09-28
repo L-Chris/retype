@@ -104,18 +104,29 @@ pub trait IClassFactory_Impl: windows_core::IUnknownImpl {
 `EnableLanguageProfile` / `EnableLanguageProfileByDefault` 的 Enable 状态并不等于已加入
 Windows 用户键盘列表；此前的半启用状态会导致设置页面显示异常。
 
-当前是 M1 桌面预览：已实现中文上屏、候选窗；AppContainer 支持尚未验证。
-因此保留「仅桌面」限制，不注册 `GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT` 来伪装兼容。
-可在桌面宿主中选择；现代应用中灰色不可用仍是预期边界。安装包包含 x64 DLL 和 `x86` 子目录中的 32 位 DLL，共用根目录词库。
+为让系统搜索栏等现代及 UI-less 宿主列出 retype，注册时声明
+`GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT` 与 `GUID_TFCAT_TIPCAP_UIELEMENTENABLED`；
+默认安装目录中的 DLL 与只读词库位于 `Program Files` 下的同一版本目录，
+供受限宿主读取。语言栏接口不可用时
+继续激活按键与编辑会话；UI-less 宿主要求自己绘制候选时不创建弹窗。
+这解决输入法在现代宿主里被过滤的注册问题，但不等于已实现搜索框的
+原生候选融合（`ITfFnSearchCandidateProvider`、
+`ITfIntegratableCandidateListUIElement`）。安装包包含 x64 DLL 和 `x86`
+子目录中的 32 位 DLL，共用根目录词库。
 在干净 Windows 测试机安装新构建的安装器后，可运行只读验收：
 
 ```powershell
 cargo test -p retype-tsf installed_tip_ -- --ignored --test-threads=1
 ```
 
-该检查验证中文配置已启用、可枚举为键盘服务，以及 COM 能从已注册 DLL 创建 TIP，并在测试进程内激活（不切换用户桌面的输入法）。
+该检查验证中文配置已启用、可枚举为键盘服务、注册了现代应用和 UI-less 类别，以及 COM 能从已注册 DLL 创建 TIP，并在测试进程内激活（不切换用户桌面的输入法）。
 普通 `cargo test` 不修改系统注册；此验收默认跳过。卸载后也应检查 retype 的 COM 类、
 语言配置和类别记录均已移除。
+
+系统搜索栏还需在安装新版后的实际 Windows 会话中验收：聚焦任务栏搜索框，
+用 `Win+Space` 选择 retype，输入 `nihao` 并按空格，应上屏「你好」；
+关闭、重开搜索框后再次检查候选窗与切换状态。旧版 `SearchHost.exe` 若仍在运行，
+需要让该宿主重新启动以加载新 DLL。
 
 ---
 ## 必须实现的接口清单

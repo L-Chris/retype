@@ -415,7 +415,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 20),
             const Text(
-              '单按 Shift 切换中英文；组字时用 - 和 + 翻候选页。',
+              '单按 Shift 切换中英文；组字时用 - 和 = 翻候选页。',
               style: TextStyle(fontSize: 13, color: _muted),
             ),
           ],

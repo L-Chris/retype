@@ -81,6 +81,7 @@ pub fn format_status(s: StatusFlags) -> String {
 fn source_tag(c: CandidateSource) -> &'static str {
     match c {
         CandidateSource::Local => " ",
+        CandidateSource::Raw => "字母",
         CandidateSource::SingleChar => "字",
         CandidateSource::User => "习",
         CandidateSource::Cloud => "云",

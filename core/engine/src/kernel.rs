@@ -351,7 +351,7 @@ impl Kernel {
             Key::PageUp => self.page(-1, actions),
             Key::PageDown => self.page(1, actions),
             Key::Char('-') => self.page(-1, actions),
-            Key::Char('+') => self.page(1, actions),
+            Key::Char('=') => self.page(1, actions),
             // 标点/符号：先把组字内容按首选上屏，再把标点交回宿主
             Key::Char(_) => {
                 if self.has_composition() {
@@ -452,6 +452,11 @@ impl Kernel {
             }
         };
         self.candidates = out.candidates;
+        // Raw paths keep the decoder total, but the candidate window must show
+        // only text backed by a dictionary match. Unmatched keys stay underlined
+        // in the composition and can still be committed with Enter.
+        self.candidates
+            .retain(|c| c.source != retype_types::CandidateSource::Raw);
         self.candidates.truncate(self.cfg.candidate_cap);
         self.syllables = out.syllables;
         self.selected = 0;
@@ -562,7 +567,14 @@ impl Kernel {
     /// 上屏首选（整句），用于「组字中直接打标点」的场景。
     fn commit_best(&mut self, actions: &mut Vec<KernelAction>) {
         let text = match self.candidates.first() {
-            Some(c) => format!("{}{}", self.committed_text(), c.text),
+            Some(c) => {
+                let remainder = if c.consumed == 0 {
+                    ""
+                } else {
+                    &self.buffer[c.consumed.min(self.buffer.len())..]
+                };
+                format!("{}{}{}", self.committed_text(), c.text, remainder)
+            }
             None => self.composition_text(),
         };
         self.reset_composition();

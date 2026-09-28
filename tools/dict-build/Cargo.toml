@@ -1,6 +1,6 @@
 [package]
 name = "retype-dict-build"
-description = "词库构建：词频表 + 注音 → 已注音词库（docs/dict.md）"
+description = "万象 Base 词库构建：去声调，生成已注音词库（docs/dict.md）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

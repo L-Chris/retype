@@ -9,6 +9,8 @@ use crate::{Generation, SyllableId};
 pub enum CandidateSource {
     /// 本地词库（首刷）
     Local,
+    /// 解码兜底路径中的原样字母；保留给诊断，不展示为中文候选
+    Raw,
     /// 单字降级
     SingleChar,
     /// 用户词库 / 个人常用

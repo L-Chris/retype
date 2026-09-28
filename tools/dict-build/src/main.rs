@@ -1,29 +1,26 @@
 //! 词库构建工具（docs/dict.md）。
 //!
-//! 输入：jieba 词频表 `词 词频 [词性]`
-//! 输出：已注音词库 `词\t拼音\t词频`，可被 `retype_dict::load_annotated` 直接加载。
+//! 输入：万象拼音 Base Rime 词库。
+//! 输出：去声调的已注音词库 `词\t拼音\t权重`。
 //!
-//! 注音在**构建期**完成，运行时不需要再跑一遍全量汉字注音 —— 这是
-//! 「词典加载不能阻塞输入线程」（P1）能在 M1 用 mmap 二进制实现的前提。
+//! 保留上游逐词注音与权重；运行时不再猜多音字读音。
 //!
 //! 用法：
 //! ```text
 //! cargo run -p retype-dict-build --release -- \
-//!     --in  data/dict/raw/jieba-dict.txt \
 //!     --out data/dict/retype-dict.tsv
 //! ```
 
 use retype_dict::annotate;
-use retype_pinyin::syllables;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
 struct Args {
-    input: PathBuf,
+    inputs: Vec<PathBuf>,
     output: PathBuf,
-    min_freq: f64,
+    min_weight: f64,
     max_word_len: usize,
     verify: bool,
 }
@@ -31,10 +28,13 @@ struct Args {
 impl Default for Args {
     fn default() -> Self {
         Self {
-            input: PathBuf::from("data/dict/raw/jieba-dict.txt"),
+            inputs: ["zi", "jichu", "lianxiang", "duoyin"]
+                .into_iter()
+                .map(|name| PathBuf::from(format!("data/dict/raw/wanxiang-base/{name}.dict.yaml")))
+                .collect(),
             output: PathBuf::from("data/dict/retype-dict.tsv"),
-            min_freq: 1.0,
-            max_word_len: 8,
+            min_weight: 1.0,
+            max_word_len: 5,
             verify: true,
         }
     }
@@ -45,17 +45,15 @@ fn usage() -> String {
 retype-dict-build —— 构建已注音词库
 
 用法:
-  retype-dict-build [--in <词频表>] [--out <输出.tsv>]
-                    [--min-freq <n>] [--max-word-len <n>] [--no-verify]
+  retype-dict-build [--in <词库.yaml>]... [--out <输出.tsv>]
+                    [--min-weight <n>] [--max-word-len <n>] [--no-verify]
 
 参数:
-  --in             输入词频表，jieba 格式：`词 词频 [词性]`
-                   默认 data/dict/raw/jieba-dict.txt
-  --out            输出已注音词库，格式：`词<TAB>拼音<TAB>词频`
+  --in             万象 Base Rime 词库，可重复指定；默认单字、基础词、联想词、多音词
+  --out            输出已注音词库，格式：`词<TAB>拼音<TAB>权重`
                    默认 data/dict/retype-dict.tsv（已在 .gitignore 中）
-  --min-freq       词频下限，低于此值的词丢弃（默认 1）
-                   想要更小更快的词库可以设成 50，代价是生僻词打不出来
-  --max-word-len   词长上限（字符数，默认 8）
+  --min-weight     权重下限，低于此值的词丢弃（默认 1）
+  --max-word-len   词长上限（字符数，默认 5，与解码器上限一致）
   --no-verify      跳过构建后的回读校验
 "
     .to_string()
@@ -63,6 +61,7 @@ retype-dict-build —— 构建已注音词库
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut a = Args::default();
+    let mut custom_inputs = false;
     let mut i = 0;
     while i < argv.len() {
         let k = argv[i].as_str();
@@ -74,12 +73,18 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         };
         match k {
             "-h" | "--help" => return Err(String::new()),
-            "--in" => a.input = PathBuf::from(next(&mut i)?),
+            "--in" => {
+                if !custom_inputs {
+                    a.inputs.clear();
+                    custom_inputs = true;
+                }
+                a.inputs.push(PathBuf::from(next(&mut i)?));
+            }
             "--out" => a.output = PathBuf::from(next(&mut i)?),
-            "--min-freq" => {
-                a.min_freq = next(&mut i)?
+            "--min-weight" => {
+                a.min_weight = next(&mut i)?
                     .parse()
-                    .map_err(|_| "--min-freq 需要数字".to_string())?
+                    .map_err(|_| "--min-weight 需要数字".to_string())?
             }
             "--max-word-len" => {
                 a.max_word_len = next(&mut i)?
@@ -91,6 +96,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         }
         i += 1;
     }
+    if a.inputs.is_empty() || !a.min_weight.is_finite() || a.min_weight <= 0.0 {
+        return Err("输入词库和权重下限必须有效".into());
+    }
     Ok(a)
 }
 
@@ -100,16 +108,51 @@ struct Stats {
     emitted: usize,
     words: usize,
     skipped_malformed: usize,
-    skipped_low_freq: usize,
+    skipped_low_weight: usize,
     skipped_long: usize,
     skipped_non_han: usize,
     skipped_no_pinyin: usize,
 }
 
+fn unaccent(c: char) -> Option<char> {
+    match c {
+        'ā' | 'á' | 'ǎ' | 'à' => Some('a'),
+        'ē' | 'é' | 'ě' | 'è' | 'ê' => Some('e'),
+        'ī' | 'í' | 'ǐ' | 'ì' => Some('i'),
+        'ō' | 'ó' | 'ǒ' | 'ò' => Some('o'),
+        'ū' | 'ú' | 'ǔ' | 'ù' => Some('u'),
+        'ü' | 'ǖ' | 'ǘ' | 'ǚ' | 'ǜ' => Some('v'),
+        'ń' | 'ň' | 'ǹ' => Some('n'),
+        'ḿ' => Some('m'),
+        c if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// Base 词库保留逐词带调拼音；当前引擎使用去声调后的音节。
+fn plain_pinyin(raw: &str, word_len: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut count = 0;
+    for item in raw.split_whitespace() {
+        if count > 0 {
+            out.push(' ');
+        }
+        for c in item.chars() {
+            if matches!(c, '\u{0300}'..='\u{036f}') {
+                continue;
+            }
+            out.push(unaccent(c)?);
+        }
+        count += 1;
+    }
+    if count != word_len || annotate::parse_pinyin(&out)?.len() != count {
+        return None;
+    }
+    Some(out)
+}
+
 fn build(args: &Args) -> Result<Stats, String> {
     let started = Instant::now();
-    let infile = std::fs::File::open(&args.input)
-        .map_err(|e| format!("打不开 {}: {e}", args.input.display()))?;
     if let Some(parent) = args.output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -119,87 +162,74 @@ fn build(args: &Args) -> Result<Stats, String> {
     let outfile = std::fs::File::create(&args.output)
         .map_err(|e| format!("写不了 {}: {e}", args.output.display()))?;
 
-    let mut reader = BufReader::with_capacity(1 << 16, infile);
     let mut w = BufWriter::with_capacity(1 << 20, outfile);
     let mut line = String::new();
     let mut stats = Stats::default();
-    let mut saw_namo = false;
-
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| format!("读词频表失败: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        stats.lines += 1;
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        let mut it = t.split_whitespace();
-        let (Some(word), Some(freq_s)) = (it.next(), it.next()) else {
-            stats.skipped_malformed += 1;
-            continue;
-        };
-        let Ok(freq) = freq_s.parse::<f64>() else {
-            stats.skipped_malformed += 1;
-            continue;
-        };
-        if freq < args.min_freq {
-            stats.skipped_low_freq += 1;
-            continue;
-        }
-        if word.chars().count() > args.max_word_len {
-            stats.skipped_long += 1;
-            continue;
-        }
-        if !annotate::all_han(word) {
-            stats.skipped_non_han += 1;
-            continue;
-        }
-        let freq = annotate::effective_frequency(word, freq);
-        let variants = annotate::weighted_variants(word);
-        if variants.is_empty() {
-            stats.skipped_no_pinyin += 1;
-            continue;
-        }
-        let ambiguous = annotate::is_ambiguous(word);
-        for (ids, share) in variants {
-            let py: Vec<&str> = ids
-                .iter()
-                .filter_map(|id| syllables::name_of(*id))
-                .collect();
-            if py.len() != ids.len() {
-                stats.skipped_no_pinyin += 1;
+    for input in &args.inputs {
+        let infile =
+            std::fs::File::open(input).map_err(|e| format!("打不开 {}: {e}", input.display()))?;
+        let mut reader = BufReader::with_capacity(1 << 16, infile);
+        let mut in_body = false;
+        loop {
+            line.clear();
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| format!("读取 {} 失败: {e}", input.display()))?;
+            if n == 0 {
+                break;
+            }
+            stats.lines += 1;
+            let t = line.trim();
+            if !in_body {
+                in_body = t == "...";
                 continue;
             }
-            // flags 用第 4 列带上，加载方目前忽略它，留给 M2 的上下文打分
-            writeln!(
-                w,
-                "{word}\t{}\t{}\t{}",
-                py.join(" "),
-                freq * share,
-                ambiguous as u8
-            )
-            .map_err(|e| format!("写输出失败: {e}"))?;
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let mut cols = t.split('\t');
+            let (Some(word), Some(raw_pinyin), Some(weight_s)) =
+                (cols.next(), cols.next(), cols.next())
+            else {
+                stats.skipped_malformed += 1;
+                continue;
+            };
+            let Ok(weight) = weight_s.parse::<f64>() else {
+                stats.skipped_malformed += 1;
+                continue;
+            };
+            if !weight.is_finite() || weight <= 0.0 {
+                stats.skipped_malformed += 1;
+                continue;
+            }
+            if weight < args.min_weight {
+                stats.skipped_low_weight += 1;
+                continue;
+            }
+            let word_len = word.chars().count();
+            if word_len > args.max_word_len {
+                stats.skipped_long += 1;
+                continue;
+            }
+            if !annotate::all_han(word) {
+                stats.skipped_non_han += 1;
+                continue;
+            }
+            let Some(pinyin) = plain_pinyin(raw_pinyin, word_len) else {
+                stats.skipped_no_pinyin += 1;
+                continue;
+            };
+            writeln!(w, "{word}\t{pinyin}\t{weight}").map_err(|e| format!("写输出失败: {e}"))?;
             stats.emitted += 1;
+            stats.words += 1;
         }
-        stats.words += 1;
-        if word == "南无" {
-            saw_namo = true;
+        if !in_body {
+            return Err(format!("{} 缺少 Rime 词库正文标记 ...", input.display()));
         }
-
-        if stats.lines % 50_000 == 0 {
-            eprintln!("  ... 已处理 {} 行，产出 {} 条", stats.lines, stats.emitted);
-        }
+        eprintln!("已处理 {}，累计产出 {} 条", input.display(), stats.emitted);
     }
-    // Jieba's general word list omits this restricted but valid reading.
-    if !saw_namo {
-        writeln!(w, "南无\tna mo\t50\t0").map_err(|e| format!("写输出失败: {e}"))?;
-        stats.emitted += 1;
-        stats.words += 1;
+    if stats.emitted == 0 {
+        return Err("词库没有可用词条".into());
     }
     w.flush().map_err(|e| format!("flush 失败: {e}"))?;
     let binary_path = args.output.with_extension("bin");
@@ -210,11 +240,11 @@ fn build(args: &Args) -> Result<Stats, String> {
     let (binary, _) =
         retype_dict::binary::load(std::fs::File::open(&binary_path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    if retype_pinyin::Lexicon::len(&binary) != count {
-        return Err("二进制词库回读数量不一致".into());
+    if retype_pinyin::Lexicon::len(&binary) == 0 || retype_pinyin::Lexicon::len(&binary) > count {
+        return Err("二进制词库回读数量无效".into());
     }
     eprintln!(
-        "构建完成: {} 词 → {} 条（含多音字变体），耗时 {:?}",
+        "构建完成: {} 词 → {} 条，耗时 {:?}",
         stats.words,
         stats.emitted,
         started.elapsed()
@@ -248,6 +278,8 @@ fn verify(args: &Args) -> Result<(), String> {
         ("输入法", "shu ru fa"),
         ("没收", "mo shou"),
         ("南无", "na mo"),
+        ("奇数", "ji shu"),
+        ("快捷键", "kuai jie jian"),
     ] {
         let Some(ids) = annotate::parse_pinyin(py) else {
             return Err(format!("测试拼音非法: {py}"));
@@ -277,7 +309,9 @@ fn main() {
         }
     };
 
-    eprintln!("输入: {}", args.input.display());
+    for input in &args.inputs {
+        eprintln!("输入: {}", input.display());
+    }
     eprintln!("输出: {}", args.output.display());
     let stats = match build(&args) {
         Ok(s) => s,
@@ -287,8 +321,8 @@ fn main() {
         }
     };
     eprintln!(
-        "过滤明细: 低词频 {} / 超长 {} / 非汉字 {} / 无法注音 {} / 格式错误 {}",
-        stats.skipped_low_freq,
+        "过滤明细: 低权重 {} / 超长 {} / 非汉字 {} / 无法注音 {} / 格式错误 {}",
+        stats.skipped_low_weight,
         stats.skipped_long,
         stats.skipped_non_han,
         stats.skipped_no_pinyin,
@@ -299,5 +333,23 @@ fn main() {
             eprintln!("错误: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_readings_keep_word_pronunciation_without_tone() {
+        assert_eq!(plain_pinyin("jī shù", 2).as_deref(), Some("ji shu"));
+        assert_eq!(plain_pinyin("jī shù", 2).as_deref(), Some("ji shu"));
+        assert_eq!(plain_pinyin("lǜ sè", 2).as_deref(), Some("lv se"));
+        assert_eq!(
+            plain_pinyin("kuài jié jiàn", 3).as_deref(),
+            Some("kuai jie jian")
+        );
+        assert_eq!(plain_pinyin("qí shù", 3), None);
+        assert_eq!(plain_pinyin("jī;dk shù;mw", 2), None);
     }
 }

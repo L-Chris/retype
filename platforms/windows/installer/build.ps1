@@ -46,11 +46,11 @@ if ($LASTEXITCODE -ne 0) { throw "x86 TIP 构建失败" }
 $dictTsv = Join-Path $repoRoot 'data\dict\retype-dict.tsv'
 if (-not $SkipDict -or -not (Test-Path $dictTsv) -or -not (Test-Path (Join-Path $repoRoot 'data\dict\retype-dict.bin'))) {
   Step "2/5 构建词库"
-  $raw = Join-Path $repoRoot 'data\dict\raw\jieba-dict.txt'
+  $raw = Join-Path $repoRoot 'data\dict\raw\wanxiang-base\jichu.dict.yaml'
   if (-not (Test-Path $raw)) {
-    Write-Warning "缺少 $raw —— 运行 tools\scripts\fetch-jieba-dict.ps1 获取，或跳过词库（会退化成单字模式）"
+    throw "缺少 $raw —— 万象 Base 词库源数据未就绪"
   } else {
-    cargo run --release -p retype-dict-build -- --in $raw --out $dictTsv
+    cargo run --release -p retype-dict-build -- --out $dictTsv
     if ($LASTEXITCODE -ne 0) { throw "词库构建失败" }
   }
 } else {
@@ -84,6 +84,9 @@ Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.d
 Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
+Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force
+Copy-Item (Join-Path $repoRoot 'NOTICE.txt') $dist -Force
+Copy-Item (Join-Path $repoRoot 'data\dict\raw\wanxiang-base\LICENSE') (Join-Path $dist 'LICENSE-wanxiang') -Force
 foreach ($f in @('retype_ime.dll', 'retype-diag.exe', 'retype-dict.tsv')) {
   $p = Join-Path $dist $f
   if (Test-Path $p) {

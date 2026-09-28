@@ -107,9 +107,7 @@ jobs:
 
       - name: 构建词库
         run: |
-          cargo run --release -p retype-dict-build -- `
-            --in data/dict/raw/jieba-dict.txt `
-            --out data/dict/retype-dict.tsv
+          cargo run --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
 
       - name: TSF 自检（不注册、不注入任何进程）
         run: cargo test --release -p retype-tsf

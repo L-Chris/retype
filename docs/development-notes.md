@@ -21,7 +21,7 @@ cargo run -p retype-diag --release -- --bench --dict data/dict/retype-dict.tsv
 Use `:help` in the tool for its interactive commands. The dictionary build command is:
 
 ```powershell
-cargo run -p retype-dict-build --release -- --in data/dict/raw/jieba-dict.txt --out data/dict/retype-dict.tsv
+cargo run -p retype-dict-build --release -- --out data/dict/retype-dict.tsv
 ```
 
 ## Pitfalls recorded during development
@@ -32,7 +32,7 @@ cargo run -p retype-dict-build --release -- --in data/dict/raw/jieba-dict.txt --
 - In this version of the bindings, use `windows_core::BOOL`; `Param<T, InterfaceType>` accepts a borrow, for example `AdviseKeyEventSink(tid, &sink, true)`.
 - The `pinyin` crate can return `lü`; normalize it to `lv` before matching the syllable table.
 - K-best traceback cannot rely on `(position, slot index)` because top-k insertion and truncation change indexes. The engine uses an `Rc` chain and a regression test.
-- Unigram scoring favors some low-frequency whole words over sensible segmentations. The `word_bonus` correction and measurement are in [dictionary notes](dict.md).
+- Unigram scoring can favor implausible segmentations. The current formula and its limits are in [dictionary notes](dict.md); historical tuning is in [performance notes](performance.md).
 - Inno Setup scripts containing Chinese must be saved with a UTF-8 BOM. Without it, the compiler can silently write garbled profile names.
 - A TSF DLL may remain loaded in another application during an upgrade. Install into a new version directory, then update registration; see [automatic updates](auto-update.md).
 

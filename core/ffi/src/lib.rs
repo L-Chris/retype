@@ -22,10 +22,10 @@ pub extern "C" fn retype_syllable_count() -> u32 {
     retype_pinyin::syllables::count() as u32
 }
 
-/// 内核自检：装配一个空词库内核，喂一串按键，确认能出候选且不 panic。
+/// 内核自检：装配一个空词库内核，喂一串按键，确认能组字且不 panic。
 ///
 /// 返回 0 表示通过；非 0 是失败码。
-/// 这条路径同时验证了 §7 的降级：空词库时必须给出原样字母而不是空列表。
+/// 空词库时不在候选窗显示原样字母，但回车仍应提交这些字母。
 #[no_mangle]
 pub extern "C" fn retype_kernel_selftest() -> c_int {
     let code = std::panic::catch_unwind(|| {
@@ -63,8 +63,8 @@ pub extern "C" fn retype_kernel_selftest() -> c_int {
         if rendered == 0 {
             return 1; // 一次都没渲染
         }
-        if k.candidate_texts().is_empty() {
-            return 2; // 空词库也必须给出候选
+        if !k.candidate_texts().is_empty() {
+            return 2; // 原样字母不应作为候选展示
         }
         // 上屏路径
         let acts = k.handle(InputEvent::Key {

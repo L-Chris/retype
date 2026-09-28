@@ -326,10 +326,14 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
         let screen = GetDC(None);
         let dc = CreateCompatibleDC(Some(screen));
         let color = CreateCompatibleBitmap(screen, size, size);
-        let mask_bytes = vec![0u8; (((size + 15) / 16) * 2 * size) as usize];
+        // In an AND mask, 1 means transparent. Start with a transparent canvas,
+        // then draw only the glyph as opaque pixels.
+        let mask_bytes = vec![0xffu8; (((size + 15) / 16) * 2 * size) as usize];
         let mask = CreateBitmap(size, size, 1, 1, Some(mask_bytes.as_ptr().cast()));
+        let mask_dc = CreateCompatibleDC(Some(screen));
+        let old_mask = SelectObject(mask_dc, mask.into());
         let old = SelectObject(dc, color.into());
-        let brush = CreateSolidBrush(COLORREF(0x00b97028));
+        let brush = CreateSolidBrush(COLORREF(0x00000000));
         let mut rect = RECT {
             left: 0,
             top: 0,
@@ -354,18 +358,34 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
             w!("Microsoft YaHei UI"),
         );
         let previous_font = SelectObject(dc, font.into());
+        let previous_mask_font = SelectObject(mask_dc, font.into());
         SetBkMode(dc, TRANSPARENT);
+        SetBkMode(mask_dc, TRANSPARENT);
         SetTextColor(dc, COLORREF(0x00ffffff));
+        SetTextColor(mask_dc, COLORREF(0x00000000));
+        let mut glyph: Vec<u16> = (if chinese { "中" } else { "A" }).encode_utf16().collect();
         DrawTextW(
             dc,
-            &mut (if chinese { "中" } else { "A" })
-                .encode_utf16()
-                .collect::<Vec<_>>(),
+            &mut glyph,
             &mut rect,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
+        let mut mask_rect = RECT {
+            left: 0,
+            top: 0,
+            right: size,
+            bottom: size,
+        };
+        DrawTextW(
+            mask_dc,
+            &mut glyph,
+            &mut mask_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
         SelectObject(dc, previous_font);
+        SelectObject(mask_dc, previous_mask_font);
         SelectObject(dc, old);
+        SelectObject(mask_dc, old_mask);
         let icon = CreateIconIndirect(&ICONINFO {
             fIcon: BOOL(1),
             hbmMask: mask,
@@ -377,6 +397,7 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
         let _ = DeleteObject(mask.into());
         let _ = DeleteObject(color.into());
         let _ = DeleteDC(dc);
+        let _ = DeleteDC(mask_dc);
         ReleaseDC(None, screen);
         icon
     }
@@ -386,6 +407,41 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn mode_icons_leave_the_background_transparent() -> Result<()> {
+        // SAFETY: Inspect a copy of each icon's AND mask and release all GDI handles.
+        unsafe {
+            for chinese in [true, false] {
+                let icon = mode_icon(chinese)?;
+                let mut info = ICONINFO::default();
+                GetIconInfo(icon, &mut info)?;
+                let screen = GetDC(None);
+                let dc = CreateCompatibleDC(Some(screen));
+                let old = SelectObject(dc, info.hbmMask.into());
+                let size = GetSystemMetrics(SM_CXSMICON).max(16);
+                let corner = GetPixel(dc, 0, 0);
+                let mut opaque_pixels = 0;
+                for y in 0..size {
+                    for x in 0..size {
+                        if GetPixel(dc, x, y) == COLORREF(0) {
+                            opaque_pixels += 1;
+                        }
+                    }
+                }
+                SelectObject(dc, old);
+                let _ = DeleteDC(dc);
+                ReleaseDC(None, screen);
+                let _ = DeleteObject(info.hbmMask.into());
+                let _ = DeleteObject(info.hbmColor.into());
+                DestroyIcon(icon)?;
+                assert_eq!(corner, COLORREF(0x00ffffff));
+                assert!(opaque_pixels > 0);
+            }
+        }
+        Ok(())
+    }
+
     #[implement(ITfLangBarItemSink)]
     struct Updates(Arc<AtomicU32>);
     impl ITfLangBarItemSink_Impl for Updates_Impl {

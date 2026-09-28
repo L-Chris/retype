@@ -140,8 +140,9 @@ impl TipState {
         match crate::langbar::LanguageBar::attach(self, &mgr) {
             Ok(bar) => *lock(&self.language_bar) = Some(bar),
             Err(error) => {
-                let _ = self.deactivate();
-                return Err(error);
+                // Some packaged hosts do not expose a language-bar manager. The
+                // key sink and edit sessions remain usable without a mode icon.
+                tracing::warn!("TSF language bar is unavailable: {error}");
             }
         }
         Ok(())
@@ -534,7 +535,7 @@ mod tests {
         assert!(wants_key(Key::Char('2'), Modifiers::NONE, true, true));
         assert!(!wants_key(Key::Space, Modifiers::CTRL, false, false));
         assert!(!wants_key(Key::Char('a'), Modifiers::SHIFT, true, false));
-        assert!(wants_key(Key::Char('+'), Modifiers::SHIFT, true, true));
+        assert!(wants_key(Key::Char('='), Modifiers::NONE, true, true));
         assert!(wants_key(Key::Char('-'), Modifiers::NONE, true, true));
     }
 

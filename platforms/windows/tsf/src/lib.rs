@@ -105,7 +105,7 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
     S_FALSE_HR
 }
 
-/// 不依赖 TSF 的自检：装配一次会话，喂一串按键，确认内核能出候选、不 panic。
+/// 不依赖 TSF 的自检：装配一次会话，喂一串按键，确认组字和单字降级候选正常。
 ///
 /// 给安装器和 CI 用 —— 「DLL 能被加载」和「装进去真能打字」是两件事，
 /// 这个函数仅验证内核链路，不验证系统注册或宿主中文上屏。
@@ -136,9 +136,29 @@ pub fn selftest() -> Result<String, String> {
     if last != "nihaomashijie" {
         return Err(format!("组字串不对，期望 nihaomashijie，实际 {last:?}"));
     }
+    // 词库异步加载期间原样字母不会显示为候选；等单字降级表装入后再验中文候选。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !session.dict_ready() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if !session.dict_ready() {
+        return Err("单字降级词库未能加载".into());
+    }
+    backend.submit(InputEvent::Key {
+        key: Key::Escape,
+        mods: Modifiers::NONE,
+        source: InputSource::Keyboard,
+    });
+    for c in "ni".chars() {
+        backend.submit(InputEvent::Key {
+            key: Key::Char(c),
+            mods: Modifiers::NONE,
+            source: InputSource::Keyboard,
+        });
+    }
     let n = backend.with_kernel(|k| k.candidate_texts().len());
     if n == 0 {
-        return Err("没有任何候选：即使词库缺失也应给出原样字母".into());
+        return Err("单字降级词库未给出 ni 的中文候选".into());
     }
     // 停用一次，确认 deactivate 路径不会炸
     state

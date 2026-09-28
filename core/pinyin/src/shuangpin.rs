@@ -5,8 +5,11 @@ use crate::{
     decode::{build_lattice_with, decode_lattice},
     syllables, DecodeOptions, DecodeOutput, Lexicon,
 };
-use retype_types::SyllableId;
-use std::{collections::HashMap, sync::OnceLock};
+use retype_types::{Candidate, CandidateSource, SyllableId};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, OnceLock},
+};
 
 pub fn encode(syllable: &str) -> Option<[u8; 2]> {
     let first = *syllable.as_bytes().first()?;
@@ -105,7 +108,122 @@ fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
 pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOutput {
     let normalized = crate::normalize(input);
     let lattice = build_lattice_with(&normalized, lex, opts, options);
-    decode_lattice(&normalized, lattice, opts)
+    let mut output = decode_lattice(&normalized, lattice, opts);
+    if normalized
+        .rsplit('\'')
+        .next()
+        .is_some_and(|segment| segment.len() % 2 == 1)
+    {
+        let mut candidates = incomplete_code_candidates(&normalized, lex, opts);
+        let mut raw = Vec::new();
+        for candidate in output.candidates {
+            if candidate.source == CandidateSource::Raw {
+                raw.push(candidate);
+            } else {
+                candidates.push(candidate);
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        let mut seen = HashSet::new();
+        candidates.retain(|c| seen.insert(c.text.clone()));
+        candidates.extend(raw.into_iter().filter(|c| seen.insert(c.text.clone())));
+        output.candidates = candidates;
+    }
+    output
+}
+
+/// Preview dictionary matches while the last Flypy syllable has only its first key.
+/// A three-key input such as `mwy` queries phrases for `mei` + `y*`, so `没有`
+/// can appear before the user types the fourth key.
+fn incomplete_code_candidates(
+    input: &str,
+    lex: &dyn Lexicon,
+    opts: &DecodeOptions,
+) -> Vec<Candidate> {
+    let Some(&first_key) = input.as_bytes().last() else {
+        return Vec::new();
+    };
+    if !first_key.is_ascii_lowercase() {
+        return Vec::new();
+    }
+    let complete = input[..input.len() - 1].trim_end_matches('\'');
+    let prefixes: Vec<Vec<SyllableId>> = if complete.is_empty() {
+        vec![Vec::new()]
+    } else {
+        let decoded = decode(complete, lex, opts);
+        let mut seen = HashSet::new();
+        decoded
+            .candidates
+            .into_iter()
+            .filter(|c| c.source != CandidateSource::Raw && c.consumed == complete.len())
+            .map(|c| c.syllables)
+            .filter(|ids| seen.insert(ids.clone()))
+            .collect()
+    };
+    if prefixes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut final_ids = HashSet::new();
+    for (code, ids) in table() {
+        if code[0] == first_key {
+            final_ids.extend(ids.iter().copied());
+        }
+    }
+    // Keep pronunciations and scores until the top candidates are known. Building
+    // display strings for every homophone on each keystroke is needlessly costly.
+    let mut matches: HashMap<Arc<str>, (Vec<SyllableId>, f32)> = HashMap::new();
+    let mut entries = Vec::new();
+    for prefix in prefixes {
+        for id in &final_ids {
+            let mut syllables = prefix.clone();
+            syllables.push(*id);
+            entries.clear();
+            lex.lookup(&syllables, &mut entries);
+            for entry in &entries {
+                let score = entry.logp + opts.word_bonus;
+                let slot = matches
+                    .entry(Arc::clone(&entry.text))
+                    .or_insert_with(|| (syllables.clone(), score));
+                if score > slot.1 {
+                    *slot = (syllables.clone(), score);
+                }
+            }
+        }
+    }
+    let mut ranked: Vec<_> = matches.into_iter().collect();
+    ranked.sort_by(|(a_text, (_, a_score)), (b_text, (_, b_score))| {
+        b_score
+            .partial_cmp(a_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a_text.cmp(b_text))
+    });
+    ranked
+        .into_iter()
+        .take(64)
+        .map(|(text, (syllables, score))| Candidate {
+            source: if text.chars().count() == 1 {
+                CandidateSource::SingleChar
+            } else {
+                CandidateSource::Local
+            },
+            comment: syllables
+                .iter()
+                .filter_map(|id| syllables::name_of(*id))
+                .collect::<Vec<_>>()
+                .join("'"),
+            syllable_len: syllables.len(),
+            consumed: input.len(),
+            syllables,
+            score,
+            text: text.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

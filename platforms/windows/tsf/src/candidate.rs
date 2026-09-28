@@ -45,7 +45,7 @@ impl CandidateWindow {
         anchor: RECT,
     ) -> Result<()> {
         *self.data.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
-        if state.composition.is_empty() {
+        if state.composition.is_empty() || state.candidates.is_empty() {
             self.hide();
             return Ok(());
         }
@@ -66,24 +66,43 @@ impl CandidateWindow {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .requested = true;
-                if let Ok(ui_mgr) = mgr.cast::<ITfUIElementMgr>() {
-                    let mut show = BOOL(1);
-                    let mut id = 0;
-                    let ui: ITfUIElement = element.cast()?;
-                    if ui_mgr.BeginUIElement(&ui, &mut show, &mut id).is_ok() {
-                        self.visibility
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .requested = show.as_bool();
-                        self.ui = Some((ui_mgr, id));
-                    }
-                }
+                let ui_mgr: ITfUIElementMgr = mgr.cast()?;
+                let mut show = BOOL(1);
+                let mut id = 0;
+                let ui: ITfUIElement = element.cast()?;
+                ui_mgr.BeginUIElement(&ui, &mut show, &mut id)?;
+                self.visibility
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .requested = show.as_bool();
+                self.ui = Some((ui_mgr, id));
                 self.element = Some(element);
             }
             if let Some((ui_mgr, id)) = &self.ui {
                 let _ = ui_mgr.UpdateUIElement(*id);
             }
-            let owner = ctx.GetActiveView().and_then(|v| v.GetWnd()).ok();
+            // A UI-less host renders the candidate list itself. Do not create a
+            // popup inside that host, even if it accepts our UI element updates.
+            if !self
+                .visibility
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .requested
+            {
+                if let Some(window) = self.window {
+                    let _ = ShowWindow(window, SW_HIDE);
+                }
+                return Ok(());
+            }
+            let owner = ctx
+                .GetActiveView()
+                .and_then(|view| view.GetWnd())
+                .ok()
+                .filter(|window| !window.is_invalid())
+                .or_else(|| {
+                    let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+                    (!focused.is_invalid()).then_some(focused)
+                });
             if self
                 .window
                 .is_some_and(|window| !IsWindow(Some(window)).as_bool())

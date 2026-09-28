@@ -168,7 +168,7 @@ fn load_dict(path: &str) -> Arc<AsyncDict> {
         eprintln!(
             "[警告] 词库 {path} 不存在，降级为「全量单字」模式。\n\
              先构建完整词库：\n  \
-             cargo run -p retype-dict-build --release -- --in data/dict/raw/jieba-dict.txt --out {DEFAULT_DICT}"
+             cargo run -p retype-dict-build --release -- --out {DEFAULT_DICT}"
         );
         holder.install(Arc::new(retype_dict::single_char_fallback()));
         return holder;
@@ -565,18 +565,21 @@ fn key_ev(k: Key) -> InputEvent {
 /// 首刷延迟基准。这条线是 P1 的量化形式：
 /// 按键 → 候选上屏的本地路径必须远小于一帧（16.7ms）。
 fn bench(cli: &Cli) {
-    let inputs = [
-        "nihao",
-        "nihaomashijie",
-        "woxiangchifan",
-        "shanghai",
-        "xian",
-        "zhongguorenmin",
-        "jintiantianqibucuo",
-        "rengongzhineng",
-        "yuyanshurumodel",
-        "mingtianwanshangwomenyiqichifanba",
-    ];
+    let inputs: &[&str] = match cli.scheme {
+        PinyinScheme::Full => &[
+            "nihao",
+            "nihaomashijie",
+            "woxiangchifan",
+            "shanghai",
+            "xian",
+            "zhongguorenmin",
+            "jintiantianqibucuo",
+            "rengongzhineng",
+            "yuyanshurumodel",
+            "mingtianwanshangwomenyiqichifanba",
+        ],
+        PinyinScheme::Flypy => &["a", "m", "w", "y", "mwy", "woe", "nihc", "qiuu"],
+    };
 
     // 基准要隔离二刷：关掉云端，只测本地首刷
     let dict = load_dict(&cli.dict);
@@ -590,6 +593,7 @@ fn bench(cli: &Cli) {
     ));
     let kernel = Kernel::new(
         KernelConfig {
+            pinyin_scheme: cli.scheme,
             rerank_enabled: false,
             decode: decode_options(cli),
             ..Default::default()
@@ -639,7 +643,11 @@ fn bench(cli: &Cli) {
 
     // 顺带看几个真实解码结果，确认词库确实生效
     println!("\n── 抽样解码结果 ──");
-    for s in ["nihaomashijie", "shanghai", "rengongzhineng", "xian"] {
+    let examples: &[&str] = match cli.scheme {
+        PinyinScheme::Full => &["nihaomashijie", "shanghai", "rengongzhineng", "xian"],
+        PinyinScheme::Flypy => &["a", "mwy", "woe", "nihc", "qiuu"],
+    };
+    for s in examples {
         for c in s.chars() {
             backend.submit(key_ev(Key::Char(c)));
         }

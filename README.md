@@ -9,7 +9,8 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 ## Features
 
 - Windows TSF input method for 64-bit and 32-bit desktop applications.
-- Full Pinyin and Xiaohe Shuangpin, selectable from the language bar.
+- Full Pinyin and Xiaohe Shuangpin, selectable from the language bar; incomplete Shuangpin codes preview matching characters and phrases.
+- A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
 - Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
@@ -20,7 +21,7 @@ The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility
 
 Download the Windows installer from the [latest release](https://github.com/L-Chris/retype/releases/latest). It includes both 64-bit and 32-bit input components. If an earlier installer has a pending restart, complete that restart before upgrading.
 
-Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `+` to turn candidate pages. Right-click the mode icon and choose **Settings** to change the Pinyin scheme or check for updates. Reopen applications that were already running after an update so they load the new input component.
+Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme or check for updates. Reopen applications that were already running after an update so they load the new input component.
 
 ## Build from source
 
@@ -49,4 +50,4 @@ Detailed acceptance criteria and current gaps are in the [roadmap](docs/roadmap.
 
 ## License
 
-Code is MIT licensed. Dictionary data and attribution are described in [NOTICE.txt](NOTICE.txt) and [data/dict/raw/LICENSE-jieba](data/dict/raw/LICENSE-jieba).
+Code is MIT licensed. The bundled Wanxiang Base dictionary is CC BY 4.0; its source and attribution are in [NOTICE.txt](NOTICE.txt) and [its license](data/dict/raw/wanxiang-base/LICENSE).

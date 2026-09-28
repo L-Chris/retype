@@ -88,12 +88,12 @@ pub fn update(
     unsafe {
         let dpi = GetDpiForWindow(window).max(96) as i32;
         let dc = GetDC(Some(window));
-        let face = font(18, dpi, 400);
+        let face = font(15, dpi, 400);
         let previous = SelectObject(dc, face.into());
-        let pad = px(7, dpi);
-        let gap = px(3, dpi);
-        let row = px(38, dpi);
-        let viewport = max_width.min(px(720, dpi)).max(px(100, dpi));
+        let pad = px(5, dpi);
+        let gap = px(2, dpi);
+        let row = px(30, dpi);
+        let viewport = max_width.clamp(100, 480);
         let visible = render.visible();
         let mut desired = Vec::with_capacity(visible.len());
         for candidate in visible {
@@ -103,7 +103,7 @@ pub fn update(
                 &candidate.text.encode_utf16().collect::<Vec<_>>(),
                 &mut size,
             );
-            desired.push((size.cx + px(42, dpi)).clamp(px(54, dpi), px(240, dpi)));
+            desired.push((size.cx + px(29, dpi)).clamp(px(43, dpi), px(180, dpi)));
         }
         let available = (viewport - pad * 2 - gap * (desired.len() as i32 - 1).max(0)).max(1);
         let share = available / (desired.len() as i32).max(1);
@@ -126,7 +126,7 @@ pub fn update(
             x += width + gap;
         }
         let width = if cells.is_empty() {
-            px(80, dpi)
+            px(60, dpi)
         } else {
             x - gap + pad
         };
@@ -147,7 +147,7 @@ pub fn update(
         if old != 0 {
             drop(Box::from_raw(old as *mut Frame));
         }
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, px(14, dpi), px(14, dpi));
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, px(10, dpi), px(10, dpi));
         if SetWindowRgn(window, Some(region), false) == 0 {
             let _ = DeleteObject(region.into());
         }
@@ -218,24 +218,24 @@ unsafe fn paint(window: HWND, frame: &Frame) {
         let bg = CreateSolidBrush(COLORREF(0x00fdfcfc));
         FillRect(dc, &bounds, bg);
         let _ = DeleteObject(bg.into());
-        rounded(dc, bounds, 0x00fdfcfc, 0x00e6e2df, px(16, frame.scale));
+        rounded(dc, bounds, 0x00fdfcfc, 0x00e6e2df, px(10, frame.scale));
         SetBkMode(dc, TRANSPARENT);
-        let small = font(13, frame.scale, 400);
-        let main = font(18, frame.scale, 400);
+        let small = font(11, frame.scale, 400);
+        let main = font(15, frame.scale, 400);
         let old_font = SelectObject(dc, small.into());
         let p = |v| px(v, frame.scale);
         for (i, (candidate, cell)) in frame.render.visible().iter().zip(&frame.cells).enumerate() {
             let selected = frame.render.page_start + i == frame.render.selected;
             if selected {
-                rounded(dc, *cell, 0x00968f13, 0x00968f13, p(11));
+                rounded(dc, *cell, 0x00968f13, 0x00968f13, p(8));
             }
             SelectObject(dc, small.into());
             text(
                 dc,
                 &(i + 1).to_string(),
                 RECT {
-                    left: cell.left + p(9),
-                    right: cell.left + p(25),
+                    left: cell.left + p(6),
+                    right: cell.left + p(19),
                     ..*cell
                 },
                 if selected { 0x00ffffff } else { 0x009a938e },
@@ -246,8 +246,8 @@ unsafe fn paint(window: HWND, frame: &Frame) {
                 dc,
                 &candidate.text,
                 RECT {
-                    left: cell.left + p(25),
-                    right: cell.right - p(8),
+                    left: cell.left + p(19),
+                    right: cell.right - p(5),
                     ..*cell
                 },
                 if selected { 0x00ffffff } else { 0x00443d34 },

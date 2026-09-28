@@ -161,7 +161,7 @@ impl Session {
             KernelConfig {
                 pinyin_scheme: crate::preferences::scheme(),
                 decode: retype_pinyin::DecodeOptions {
-                    page_size: 5,
+                    page_size: 8,
                     ..Default::default()
                 },
                 rerank_enabled: false,
@@ -214,6 +214,7 @@ mod tests {
             started.elapsed()
         );
         assert!(!s.dict_ready(), "文件不存在时不该立刻就绪");
+        assert_eq!(s.backend.with_kernel(|k| k.render_state().page_size), 8);
     }
 
     #[test]

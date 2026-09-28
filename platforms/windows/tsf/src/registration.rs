@@ -7,11 +7,12 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::UI::TextServices::*;
 use windows_core::{w, Error, Result, PCWSTR};
 
-// Desktop support only until AppContainer input and UI paths have been validated.
-// SYSTRAYSUPPORT permits the modern input indicator without falsely advertising
-// IMMERSIVESUPPORT. Keep registration and removal symmetric.
+// The installed DLL and dictionary live under Program Files so packaged hosts can
+// load them. Keep registration and removal symmetric across both registry views.
 const CATEGORIES: &[windows_core::GUID] = &[
     GUID_TFCAT_TIP_KEYBOARD,
+    GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+    GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
     GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
     GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
 ];
@@ -226,6 +227,28 @@ mod tests {
         let _apartment = ComApartment::new()?;
         // SAFETY: COM is initialized; all interfaces and buffers remain on this thread.
         unsafe {
+            let categories: ITfCategoryMgr =
+                CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
+            for (category, purpose) in [
+                (GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT, "packaged Windows hosts"),
+                (GUID_TFCAT_TIPCAP_UIELEMENTENABLED, "UI-less hosts"),
+            ] {
+                let items = categories.EnumItemsInCategory(&category)?;
+                let mut found = false;
+                loop {
+                    let mut ids = [windows_core::GUID::zeroed()];
+                    let mut fetched = 0;
+                    items.Next(&mut ids, Some(&mut fetched)).ok()?;
+                    if fetched == 0 {
+                        break;
+                    }
+                    if ids[0] == CLSID_RETYPE_TIP {
+                        found = true;
+                        break;
+                    }
+                }
+                assert!(found, "installed retype must support {purpose}");
+            }
             let profiles: ITfInputProcessorProfiles =
                 CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
             let description = profiles.GetLanguageProfileDescription(

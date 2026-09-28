@@ -215,7 +215,11 @@ impl Edit_Impl {
                     let window = lock(&state.window).take();
                     if let Some(mut window) = window {
                         if let Some(manager) = manager {
-                            let _ = window.update(state, &manager, &self.context, &render, rect);
+                            if let Err(error) =
+                                window.update(state, &manager, &self.context, &render, rect)
+                            {
+                                tracing::warn!("TSF candidate UI update failed: {error}");
+                            }
                         }
                         *lock(&state.window) = Some(window);
                     }

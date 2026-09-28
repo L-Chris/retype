@@ -257,10 +257,15 @@ fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
         let cur = dp[i].clone();
         for beam in cur.iter() {
             for (ei, e) in lattice.edges[i].iter().enumerate() {
+                let score = beam.score + e.score;
+                let destination = &dp[e.to];
+                if destination.len() >= k && score <= destination[k - 1].score {
+                    continue;
+                }
                 insert_node(
                     &mut dp[e.to],
                     Rc::new(Node {
-                        score: beam.score + e.score,
+                        score,
                         from: i as u32,
                         edge: ei as u32,
                         prev: Some(Rc::clone(beam)),
@@ -347,7 +352,11 @@ fn path_to_candidate(
         Candidate {
             text,
             comment,
-            source: CandidateSource::Local,
+            source: if has_raw {
+                CandidateSource::Raw
+            } else {
+                CandidateSource::Local
+            },
             syllable_len: len,
             consumed,
             syllables: ids,
@@ -366,6 +375,8 @@ fn prefix_candidates(lattice: &Lattice, path: &[(usize, usize)]) -> Vec<Candidat
     let mut text = String::new();
     let mut ids: Vec<SyllableId> = Vec::new();
     let mut consumed = 0usize;
+    let mut score = 0.0;
+    let mut ended_on_word = false;
     for (from, ei) in path {
         let Some(edge) = lattice.edges.get(*from).and_then(|v| v.get(*ei)) else {
             break;
@@ -375,9 +386,14 @@ fn prefix_candidates(lattice: &Lattice, path: &[(usize, usize)]) -> Vec<Candidat
             EdgeText::Word(t) => {
                 text.push_str(t);
                 ids.extend_from_slice(&edge.syllables);
+                score += edge.score;
+                ended_on_word = true;
             }
             // 一旦遇到原样字母，后面的前缀就没有意义了
-            EdgeText::Raw | EdgeText::Skip => break,
+            EdgeText::Raw | EdgeText::Skip => {
+                ended_on_word = false;
+                break;
+            }
         }
         out.push(Candidate {
             text: text.clone(),
@@ -390,11 +406,13 @@ fn prefix_candidates(lattice: &Lattice, path: &[(usize, usize)]) -> Vec<Candidat
             syllable_len: ids.len(),
             consumed,
             syllables: ids.clone(),
-            score: 0.0,
+            score,
         });
     }
-    // 最后一个前缀 == 完整路径，已由 k-best 产出，去掉
-    out.pop();
+    // 完整路径已由 k-best 产出；若遇到原样字母，则保留它之前的最后一个中文词。
+    if ended_on_word {
+        out.pop();
+    }
     out
 }
 
@@ -452,12 +470,20 @@ pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions
         candidates.push(cand);
     }
 
-    // 前缀候选必须沿**首选（且干净）**的那条路径切，否则会切出含原样字母的片段
+    // 整串能切分时只沿首选生成前缀；否则从每条混排路径取原样字母之前的中文部分。
+    // 例如 wo'e 的候选应是「我、窝、握…」，而不是「我e、窝e、握e」。
     if opts.include_prefixes {
-        if let Some(pi) = best_path.and_then(|i| paths.get(i)) {
-            for pc in prefix_candidates(&lattice, &pi.1) {
-                if seen.insert(pc.text.clone()) {
-                    candidates.push(pc);
+        let prefix_paths: Vec<usize> = if any_clean {
+            best_path.into_iter().collect()
+        } else {
+            (0..paths.len()).collect()
+        };
+        for pi in prefix_paths {
+            if let Some((_, path)) = paths.get(pi) {
+                for pc in prefix_candidates(&lattice, path) {
+                    if seen.insert(pc.text.clone()) {
+                        candidates.push(pc);
+                    }
                 }
             }
         }
