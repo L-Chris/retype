@@ -29,6 +29,7 @@ function Test-RetypeInstallation($Installation) {
   }
   $profile = Get-ItemProperty 'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\0x00000804\{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
   if ($profile.Description -ne ('retype ' + [char]0x8f93 + [char]0x5165 + [char]0x6cd5)) { throw 'Registered input method name is invalid.' }
+  & (Join-Path $Installation.Directory 'user-profile.ps1') -Verify
 }
 function Read-UpdateState([string]$Path) {
   $state = @{ AutoCheck = $true; LastCheck = ''; SkippedVersion = ''; Stage = 'idle'; TargetVersion = ''; Error = '' }

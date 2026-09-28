@@ -7,7 +7,7 @@
   Run as the actual desktop user, not an alternate administrator account.
 #>
 [CmdletBinding()]
-param([switch]$Uninstall)
+param([switch]$Uninstall, [switch]$Verify)
 $ErrorActionPreference = 'Stop'
 $tip = '0804:{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
 
@@ -47,6 +47,17 @@ namespace Retype {
         void IsEnabledLanguageProfile(ref Guid clsid, ushort lang, ref Guid profile, [MarshalAs(UnmanagedType.Bool)] out bool enabled);
     }
     public static class UserInputProfile {
+        public static bool IsEnabled() {
+            var instance = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("33C53A50-F456-4884-B049-85FD643ECFED")));
+            try {
+                var profiles = (IInputProcessorProfiles)instance;
+                var clsid = new Guid("7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52");
+                var profile = new Guid("A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74");
+                bool enabled;
+                profiles.IsEnabledLanguageProfile(ref clsid, 0x0804, ref profile, out enabled);
+                return enabled;
+            } finally { Marshal.ReleaseComObject(instance); }
+        }
         public static void SetEnabled(bool enabled) {
             var instance = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("33C53A50-F456-4884-B049-85FD643ECFED")));
             try {
@@ -70,6 +81,12 @@ namespace Retype {
 '@
 }
 # 0 = append/enable, 1 = uninstall. Never change the user's default input method.
+if ($Verify) {
+  if ($before -notcontains $tip -or -not [Retype.UserInputProfile]::IsEnabled()) {
+    throw 'The current user keyboard is missing or disabled.'
+  }
+  return
+}
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
 if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {
   throw 'InstallLayoutOrTip failed. The keyboard was not successfully configured.'

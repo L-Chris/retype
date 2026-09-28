@@ -16,6 +16,9 @@ jobs:
           targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+          cache-on-failure: true
       - name: Validate
         shell: pwsh
         run: |
@@ -43,7 +46,7 @@ jobs:
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
-          $version = (Select-String Cargo.toml '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
           & $iscc /Qp "/DMyAppVersion=$version" "/DRepoRoot=$env:GITHUB_WORKSPACE" /DBaseDir=target\x86_64-pc-windows-msvc\release /DOutDir=dist platforms/windows/installer/retype.iss
           if ($LASTEXITCODE) { throw 'installer failed' }
       - name: Real upgrade while DLLs remain loaded

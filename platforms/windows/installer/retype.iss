@@ -154,6 +154,7 @@ Type: filesandordirs; Name: "{app}\*.log"
 var
   DeleteUserData: Boolean;
   UserProfileAdded: Boolean;
+  AutoUpdatesReady: Boolean;
   PayloadSuffix: String;
   Previous64, Previous32: String;
   InstallCommitted, RegistrationStarted: Boolean;
@@ -219,10 +220,10 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     UserProfileAdded := UserProfileAdded and (ResultCode = 0);
     Log(Format('User keyboard enrollment: %d', [ResultCode]));
-    if not ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    AutoUpdatesReady := ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
       '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + GetPayloadDir('') + '\update-task.ps1"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-      Log('Could not configure update task');
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    AutoUpdatesReady := AutoUpdatesReady and (ResultCode = 0);
     Log(Format('Update task enrollment: %d', [ResultCode]));
     InstallCommitted := True;
   end;
@@ -239,10 +240,14 @@ end;
 // 2) M1 预览的使用方法与兼容性边界
 procedure CurPageChanged(CurPageID: Integer);
 var
-  ProfileMessage: String;
+  ProfileMessage, UpdateMessage: String;
 begin
   if CurPageID = wpFinished then
   begin
+    if AutoUpdatesReady then
+      UpdateMessage := '已启用每日更新检查，可在「检查更新」窗口关闭；安装新版前会征求确认。'
+    else
+      UpdateMessage := '自动检查任务未能创建。仍可使用开始菜单或语言栏的「检查更新」。';
     if UserProfileAdded then
       ProfileMessage := '已加入当前用户的键盘列表。请在桌面应用中用 Win+Space 选择 retype。'
     else
@@ -251,6 +256,7 @@ begin
       '{#MyAppName} {#MyAppVersion} 已安装。' + #13#10 + #13#10 +
       '【选择输入法】' + #13#10 +
       ProfileMessage + #13#10 +
+      UpdateMessage + #13#10 +
       '当前仅支持桌面宿主；现代应用兼容性尚未完成。' + #13#10 + #13#10 +
       '【当前版本的能力边界】' + #13#10 +
       'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +

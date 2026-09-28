@@ -120,7 +120,7 @@ try {
         $state.Stage = 'installing'; Save-UpdateState $state $statePath
         $label.Text = '正在安装；如弹出 Windows 管理员权限提示，请确认。'
         $script:phase = 'install'; $close.Enabled = $false
-        $script:process = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCLOSEAPPLICATIONS','/NORESTARTAPPLICATIONS','/RESTARTEXITCODE=3010',('/LOG="'+$transaction+'\install.log"')) -Verb RunAs -PassThru
+        $script:process = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCLOSEAPPLICATIONS','/NORESTARTAPPLICATIONS','/RESTARTEXITCODE=3010',('/LOG="'+$transaction+'\install.log"')) -Verb RunAs -WindowStyle Hidden -PassThru
         $null = $process.Handle
       }
     } catch { Show-Failure $_.Exception.Message; if ($Background -and -not $form.Visible) { $context.ExitThread() } }
