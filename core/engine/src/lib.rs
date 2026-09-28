@@ -390,6 +390,36 @@ mod tests {
     }
 
     #[test]
+    fn minus_and_plus_turn_candidate_pages_without_committing() {
+        let mut kernel = Kernel::new(
+            KernelConfig {
+                decode: retype_pinyin::DecodeOptions {
+                    page_size: 1,
+                    ..Default::default()
+                },
+                rerank_enabled: false,
+                ..Default::default()
+            },
+            demo_dict(),
+            Arc::new(Learner::new(Arc::new(UserDict::new()))),
+            offline_cloud(Duration::from_millis(100)),
+        );
+        type_kernel(&mut kernel, "shili");
+        let before = kernel.render_state();
+        assert!(before.candidates.len() > before.page_size);
+        let next = last_render(&kernel.handle(InputEvent::Key {
+            key: Key::Char('+'),
+            mods: Modifiers::SHIFT,
+            source: InputSource::Keyboard,
+        }));
+        assert_eq!(next.page_start, before.page_size);
+        assert_eq!(next.composition, before.composition);
+        let previous = last_render(&kernel.handle(key_ev(Key::Char('-'))));
+        assert_eq!(previous.page_start, 0);
+        assert_eq!(previous.composition, before.composition);
+    }
+
+    #[test]
     fn apostrophe_forces_syllable_boundary() {
         let f = fixture(false);
         let acts = type_str(&f.backend, "xi'an");

@@ -11,10 +11,11 @@ HKLM 64 位视图 Software\retype 的 ActiveDir、Version 指向当前安装，�
 
 ## 入口
 
-语言栏右键和开始菜单提供更新窗口。retype-updater update 打开窗口；update --background 后台检查。
+语言栏右键“设置”打开设置窗口，“关于”页可以检查更新；开始菜单也保留“检查更新”快捷方式。retype-updater update 打开更新窗口；update --background 后台检查。
 当前用户任务 retype-update-<SID> 登录两分钟后和每日触发，普通权限运行，不保存密码。
 后台每 24 小时最多检查一次，可关闭或跳过版本；手动检查绕过限频。
 后台只检查和提醒，不自动安装。每用户互斥量阻止重复更新。
+自动检查开关以 HKCU\Software\retype\AutoCheck（DWORD）为准；设置窗口首次打开时迁移旧 state.json 的值，更新窗口同步写入注册表并继续保留 JSON 兼容字段。
 
 ## 流程
 

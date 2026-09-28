@@ -2,7 +2,7 @@
 
 ## 第三方数据与组件署名
 
-本发行包中的**词库数据**来源于以下 MIT 许可的项目：
+本发行包中的**词库数据**来自以下项目：
 
 ### jieba 词频表
 - 项目: https://github.com/fxsjy/jieba (MIT)
@@ -10,13 +10,19 @@
   - Copyright (c) 2018 - 2019 messense
   - Copyright (c) 2019 Paul Meng
 - 用途: `retype-dict.tsv` 的词条目与词频来自 jieba 的 `dict.txt`
-  （349,045 词，经注音后产出 352,357 条，含多音字变体）
+  （349,045 行原始数据；构建时会过滤不适用的词条并展开多音字）
 - 完整许可证文本见本目录 `LICENSE-jieba`
 
 ### pinyin 字音数据
 - 项目: https://github.com/mozillazg/rust-pinyin (MIT)
 - 数据源: https://github.com/mozillazg/pinyin-data (MIT)
 - 用途: 构建期为汉字注音（含多音字），以及运行时的单字降级模式
+
+### Unicode Unihan 读音频率数据
+- 项目: https://www.unicode.org/reports/tr38/
+- 数据: Unicode 15.1.0 `kHanyuPinlu`，源自《现代汉语频率词典》
+- 用途: 按实际读音频率分配单字词频，避免“无 mó”等特定场景读音占据常用候选首位
+- 许可: Unicode License V3；完整文本见本目录 `LICENSE-Unicode.txt`
 
 ## 构建工具链
 

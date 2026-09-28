@@ -35,6 +35,8 @@ try {
   New-Item -ItemType Directory -Path $transaction | Out-Null
   $script:process = $null; $script:phase = ''; $script:offer = $null
   $form = New-Object Windows.Forms.Form
+  $iconPath = Join-Path $PSScriptRoot 'retype.ico'
+  if (Test-Path -LiteralPath $iconPath) { $form.Icon = [Drawing.Icon]::new($iconPath) }
   $form.Text = 'retype 更新'; $form.ClientSize = New-Object Drawing.Size(560,310)
   $form.StartPosition = 'CenterScreen'; $form.FormBorderStyle = 'FixedDialog'; $form.MaximizeBox = $false
   $label = New-Object Windows.Forms.Label
@@ -48,7 +50,15 @@ try {
   $progress.SetBounds(24,178,512,12); $progress.Style = 'Marquee'; $form.Controls.Add($progress)
   $auto = New-Object Windows.Forms.CheckBox
   $auto.SetBounds(24,207,290,24); $auto.Text = '每天自动检查并提醒（不自动安装）'; $auto.Checked = [bool]$state.AutoCheck
-  $auto.Add_CheckedChanged({ $state.AutoCheck = $auto.Checked; Save-UpdateState $state $statePath }); $form.Controls.Add($auto)
+  $auto.Add_CheckedChanged({
+    Save-AutoCheckPreference $auto.Checked
+    $state.AutoCheck = $auto.Checked
+    Save-UpdateState $state $statePath
+  }); $form.Controls.Add($auto)
+  $form.Add_Activated({
+    $preference = Read-AutoCheckPreference
+    if ($null -ne $preference -and $auto.Checked -ne $preference) { $auto.Checked = $preference }
+  })
   $install = New-Object Windows.Forms.Button
   $install.SetBounds(24,252,125,32); $install.Text = '下载并安装'; $install.Enabled = $false; $form.Controls.Add($install)
   $skip = New-Object Windows.Forms.Button

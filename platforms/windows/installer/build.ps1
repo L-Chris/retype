@@ -99,6 +99,13 @@ Write-Host "  注册进系统(M1) : platforms\windows\installer\register.ps1（�
 
 if ($Installer) {
   Step "6/6 构建 Inno Setup 安装器"
+  Push-Location (Join-Path $repoRoot 'apps\settings')
+  try {
+    flutter pub get
+    if ($LASTEXITCODE -ne 0) { throw "Flutter 依赖获取失败" }
+    flutter build windows --release
+    if ($LASTEXITCODE -ne 0) { throw "设置程序构建失败" }
+  } finally { Pop-Location }
   $iscc = @(
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe",

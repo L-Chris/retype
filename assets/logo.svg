@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">retype</title>
+  <rect width="128" height="128" rx="28" fill="#142b3b"/>
+  <path d="M42 48v40M47 62C56 45 67 42 79 49" fill="none" stroke="#f8fbff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M86 68v19" fill="none" stroke="#54d6ce" stroke-width="8" stroke-linecap="round"/>
+</svg>

@@ -197,6 +197,19 @@ jobs:
       # 还要处理「TIP DLL 正被所有进程占用」—— 让用户手动解压再跑脚本是不负责任的。
       # Restart Manager 负责占用检测与重启后替换，自动更新因此变成
       # 「下载 setup.exe → 校验 sha256 → /VERYSILENT 静默升级」。
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.47.0"
+      - name: 构建 Windows 设置程序
+        working-directory: apps/settings
+        shell: pwsh
+        run: |
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter dependencies failed' }
+          flutter build windows --release
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows build failed' }
+
       - name: 安装 Inno Setup
         shell: pwsh
         run: |

@@ -52,7 +52,7 @@
 目标：真正装进系统，在主流应用里可用。这是**产品能不能活下来**的一关（test.md 第六节）。
 
 - [x] TSF 基础管线：`ITfKeyEventSink`（含无副作用预判）、`ITfEditSession`、`ITfCompositionSink`、`ITfTextEditSink`、`ITfThreadFocusSink`；延迟写锁、拒绝写锁和过期请求已测试
-- [x] 注册与激活：TSF 中文配置、`ITfLangBarItemButton` 中/A 状态图标、模式通知、方案菜单与保留快捷键
+- [x] 注册与激活：TSF 中文配置、`ITfLangBarItemButton` 中/A 状态图标、品牌图标、模式通知和方案菜单
 - [x] 组字串显示：`ITfDisplayAttributeProvider` 提供下划线属性，宿主负责绘制
 - [x] 候选窗：`ITfCandidateListUIElement` 暴露候选数据，桌面无激活窗口负责显示；响应宿主 Show/Hide 与布局变化。此接口不会自动替输入法绘制窗口
 - [x] 系统词库：`tools/dict-build` 产出 `retype-dict.bin`，随 DLL 分发，异步加载；保留 TSV 调试用途
@@ -61,7 +61,7 @@
       （约 30KB）随词库分发，用 cargo feature 把 `pinyin` crate 从 TIP 里摘掉。
       这个 DLL 被注入到每个宿主进程，体积直接影响宿主启动速度。
 
-0.1.3 已加入中/A 状态图标、系统开关状态同步、全拼/小鹤菜单与持久化设置。横排候选窗采用原生 GDI 绘制，支持圆角、选中态和鼠标点选；Direct2D、暗色主题仍是后续工作。`Ctrl+Space` 已注册为 TSF 保留键，但本机自动化实测未触发切换，仍需排查系统/宿主快捷键分发；图标点击切换已验证。构建期紧凑注音表已替代运行时 `pinyin` 数据，DLL 尚未达到 300 KB 目标。
+0.1.3 已加入中/A 状态图标、系统开关状态同步、全拼/小鹤菜单与持久化设置。横排候选窗采用原生 GDI 绘制，支持圆角、选中态和鼠标点选；Direct2D、暗色主题仍是后续工作。早期 `Ctrl+Space` 在本机自动化中未成功触发；当前开发版改为单按 Shift 切换，组字时用 `-`、`+` 翻页，仍需在常用桌面应用中验收。品牌图标已嵌入 TSF DLL，系统输入指示器可在模式图标右侧读取。构建期紧凑注音表已替代运行时 `pinyin` 数据，DLL 尚未达到 300 KB 目标。
 
 **已验证**：自建 RichEdit 桌面窗口用真实按键输入 `nihao`，显示「你好」候选，空格上屏、Esc 取消并关闭候选窗。内存 `ITextStoreACP` 测试通过真实 TSF 验证组字、提交、取消、标点和异步写锁。详细记录见 [M1 验证记录](./m1-validation.md)。
 

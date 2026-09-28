@@ -89,7 +89,7 @@ OutputBaseFilename=retype-{#MyAppVersion}-windows-x64-setup
 SourceDir={#RepoRoot}
 SetupIconFile={#RepoRoot}\apps\settings\windows\runner\resources\app_icon.ico
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={code:GetPayloadDir}\retype-diag.exe
+UninstallDisplayIcon={code:GetPayloadDir}\retype.ico
 LicenseFile={#RepoRoot}\LICENSE
 
 Compression=lzma2/max
@@ -111,6 +111,9 @@ RestartApplications=no
 
 [Files]
 Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "apps\settings\windows\runner\resources\app_icon.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
+; Flutter desktop bundle must stay together (exe, runtime DLL and data directory).
+Source: "apps\settings\build\windows\x64\runner\Release\*"; DestDir: "{code:GetPayloadDir}\settings"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; 路径都相对 SourceDir（= RepoRoot）
 ; TSF TIP。ignoreversion 是必须的：Rust 的 cdylib 没有 VERSIONINFO 资源，
 ; Windows 无法按文件版本判断新旧，只能无条件覆盖。
@@ -128,6 +131,7 @@ Source: "data\dict\retype-dict.bin"; DestDir: "{code:GetPayloadDir}"; Flags: ign
 Source: "LICENSE"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "NOTICE.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "data\dict\raw\LICENSE-jieba"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\LICENSE-Unicode.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 
 [INI]
 Filename: "{code:GetPayloadDir}\installed.ini"; Section: "Installation"; Key: "Version"; String: "{#MyAppVersion}"
@@ -140,9 +144,10 @@ Root: HKLM64; Subkey: "SOFTWARE\retype"; ValueType: string; ValueName: "Version"
 ; 清理旧版误写的 COM 路径；正确注册由 DLL 的 regserver 完成。
 Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; Flags: deletekey
 [Icons]
+Name: "{group}\retype 设置"; Filename: "{code:GetPayloadDir}\settings\retype.exe"; Comment: "调整输入方案和更新设置"
 Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
 Name: "{group}\retype 调试台"; Filename: "{code:GetPayloadDir}\retype-diag.exe"; Parameters: "--dict ""{code:GetPayloadDir}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
-Name: "{group}\检查更新"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\update-ui.ps1"""; Comment: "查询 GitHub 上的最新版本"
+Name: "{group}\检查更新"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; IconFilename: "{code:GetPayloadDir}\retype.ico"; Parameters: "-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\update-ui.ps1"""; Comment: "查询 GitHub 上的最新版本"
 Name: "{group}\许可与署名"; Filename: "{code:GetPayloadDir}\NOTICE.txt"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
@@ -245,9 +250,9 @@ begin
   if CurPageID = wpFinished then
   begin
     if AutoUpdatesReady then
-      UpdateMessage := '已启用每日更新检查，可在「检查更新」窗口关闭；安装新版前会征求确认。'
+      UpdateMessage := '已启用每日更新检查，可在「设置」的「关于」页面关闭；安装新版前会征求确认。'
     else
-      UpdateMessage := '自动检查任务未能创建。仍可使用开始菜单或语言栏的「检查更新」。';
+      UpdateMessage := '自动检查任务未能创建。仍可在「设置」的「关于」页面手动检查。';
     if UserProfileAdded then
       ProfileMessage := '已加入当前用户的键盘列表。请在桌面应用中用 Win+Space 选择 retype。'
     else
@@ -260,7 +265,7 @@ begin
       '当前仅支持桌面宿主；现代应用兼容性尚未完成。' + #13#10 + #13#10 +
       '【当前版本的能力边界】' + #13#10 +
       'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +
-      '语言栏「中 / A」可点击切换中英，右键菜单切换全拼 / 小鹤双拼。' + #13#10 +
+      '语言栏「中 / A」可点击切换中英，右键「设置」可切换全拼 / 小鹤双拼。' + #13#10 +
       '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–5 或鼠标选词，Esc 取消，回车输入原拼音。' + #13#10 +
       '应用兼容性仍在验证中。升级后请重新打开使用输入法的应用；如提示重启，请先保存工作。';
   end;

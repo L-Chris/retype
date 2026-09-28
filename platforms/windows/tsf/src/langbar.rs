@@ -165,10 +165,6 @@ impl Button_Impl {
                 if let Some(session) = state.session() {
                     let event = match work {
                         edit::Work::Toggle => InputEvent::ToggleChinese,
-                        edit::Work::Scheme(scheme) => {
-                            crate::preferences::save_scheme(scheme)?;
-                            InputEvent::SetPinyinScheme(scheme)
-                        }
                         _ => return Ok(()),
                     };
                     session.submit(event);
@@ -219,7 +215,7 @@ impl ITfLangBarItem_Impl for Button_Impl {
         let (chinese, scheme) = self.mode();
         Ok(BSTR::from(
             format!(
-                "retype · {} · {}\n点击切换中英 / Ctrl+Space；菜单切换拼音方案",
+                "retype · {} · {}\n点击或单按 Shift 切换中英；右键打开设置",
                 if chinese { "中文" } else { "英文" },
                 if scheme == PinyinScheme::Flypy {
                     "小鹤双拼"
@@ -240,34 +236,8 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
                 // SAFETY: Modal menu belongs to the foreground host; Windows returns a command ID.
                 unsafe {
                     let menu = CreatePopupMenu()?;
-                    let (_, scheme) = self.mode();
                     let result = (|| -> Result<u32> {
-                        AppendMenuW(menu, MF_STRING, 1, w!("中文 / English  (Ctrl+Space)"))?;
-                        AppendMenuW(menu, MF_SEPARATOR, 0, windows_core::PCWSTR::null())?;
-                        AppendMenuW(
-                            menu,
-                            MF_STRING
-                                | if scheme == PinyinScheme::Full {
-                                    MF_CHECKED
-                                } else {
-                                    MF_UNCHECKED
-                                },
-                            2,
-                            w!("全拼"),
-                        )?;
-                        AppendMenuW(
-                            menu,
-                            MF_STRING
-                                | if scheme == PinyinScheme::Flypy {
-                                    MF_CHECKED
-                                } else {
-                                    MF_UNCHECKED
-                                },
-                            3,
-                            w!("小鹤双拼"),
-                        )?;
-                        AppendMenuW(menu, MF_SEPARATOR, 0, windows_core::PCWSTR::null())?;
-                        AppendMenuW(menu, MF_STRING, 4, w!("检查更新…"))?;
+                        AppendMenuW(menu, MF_STRING, 1, w!("设置"))?;
                         Ok(TrackPopupMenu(
                             menu,
                             TPM_RETURNCMD | TPM_NONOTIFY,
@@ -292,33 +262,22 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
         }
     }
     fn InitMenu(&self, menu: Ref<'_, ITfMenu>) -> Result<()> {
-        let (chinese, scheme) = self.mode();
-        for (id, label, checked) in [
-            (1, "中文 / English  (Ctrl+Space)", chinese),
-            (2, "全拼", scheme == PinyinScheme::Full),
-            (3, "小鹤双拼", scheme == PinyinScheme::Flypy),
-            (4, "检查更新…", false),
-        ] {
-            // SAFETY: Text slice stays alive during the synchronous call; no submenu is requested.
-            unsafe {
-                menu.ok()?.AddMenuItem(
-                    id,
-                    if checked { TF_LBMENUF_RADIOCHECKED } else { 0 },
-                    HBITMAP::default(),
-                    HBITMAP::default(),
-                    &label.encode_utf16().collect::<Vec<_>>(),
-                    std::ptr::null_mut(),
-                )?;
-            }
+        // SAFETY: Text slice stays alive during the synchronous call.
+        unsafe {
+            menu.ok()?.AddMenuItem(
+                1,
+                0,
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &"设置".encode_utf16().collect::<Vec<_>>(),
+                std::ptr::null_mut(),
+            )?;
         }
         Ok(())
     }
     fn OnMenuSelect(&self, id: u32) -> Result<()> {
         match id {
-            1 => self.action(edit::Work::Toggle),
-            2 => self.action(edit::Work::Scheme(PinyinScheme::Full)),
-            3 => self.action(edit::Work::Scheme(PinyinScheme::Flypy)),
-            4 => crate::preferences::open_updates(),
+            1 => crate::preferences::open_settings(),
             _ => Err(E_INVALIDARG.into()),
         }
     }

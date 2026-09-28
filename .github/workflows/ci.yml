@@ -126,6 +126,18 @@ jobs:
 
       # 在 main 上就把安装器构建一遍：改 retype.iss 时能立刻知道能不能编译，
       # 不用靠发 release 来试（Inno 的语法错误只有 ISCC 自己会报）。
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: "3.47.0"
+      - name: 构建 Windows 设置程序
+        working-directory: apps/settings
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+          flutter build windows --release
+
       - name: 安装 Inno Setup
         shell: pwsh
         run: |

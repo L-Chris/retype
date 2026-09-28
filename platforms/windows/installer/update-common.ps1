@@ -15,6 +15,9 @@ function Test-RetypeInstallation($Installation) {
   $metadata = @{}
   foreach ($entry in $manifest) { foreach ($key in $entry.Keys) { $metadata[$key] = $entry[$key] } }
   if ($metadata.Version -ne $Installation.Version) { throw 'Installed version metadata does not match.' }
+  foreach ($relative in @('settings\retype.exe','settings\flutter_windows.dll','settings\data\icudtl.dat','settings\data\flutter_assets\AssetManifest.bin')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Installation.Directory $relative))) { throw "Settings bundle is incomplete: $relative" }
+  }
   foreach ($arch in @('x64','x86')) {
     $relative = if ($arch -eq 'x64') { 'retype_ime.dll' } else { 'x86\retype_ime.dll' }
     $dll = Join-Path $Installation.Directory $relative
@@ -31,14 +34,33 @@ function Test-RetypeInstallation($Installation) {
   if ($profile.Description -ne ('retype ' + [char]0x8f93 + [char]0x5165 + [char]0x6cd5)) { throw 'Registered input method name is invalid.' }
   & (Join-Path $Installation.Directory 'user-profile.ps1') -Verify
 }
-function Read-UpdateState([string]$Path) {
+function Read-UpdateState([string]$Path, [switch]$IgnorePreference) {
   $state = @{ AutoCheck = $true; LastCheck = ''; SkippedVersion = ''; Stage = 'idle'; TargetVersion = ''; Error = '' }
   if (Test-Path -LiteralPath $Path) {
     try { $loaded = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
       foreach ($key in @($state.Keys)) { if ($null -ne $loaded.$key) { $state[$key] = $loaded.$key } }
     } catch { } # A corrupt preference file must not prevent manual recovery.
   }
+  if (-not $IgnorePreference) {
+    $preference = Read-AutoCheckPreference
+    if ($null -ne $preference) { $state.AutoCheck = $preference }
+  }
   return $state
+}
+function Read-AutoCheckPreference {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\retype')
+  if (-not $key) { return $null }
+  try {
+    $value = $key.GetValue('AutoCheck', $null)
+    if ($null -eq $value) { return $null }
+    return [bool]([int]$value -ne 0)
+  } finally { $key.Dispose() }
+}
+function Save-AutoCheckPreference([bool]$Enabled) {
+  $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\retype')
+  if (-not $key) { throw 'Cannot open retype preferences.' }
+  try { $key.SetValue('AutoCheck', [int]$Enabled, [Microsoft.Win32.RegistryValueKind]::DWord) }
+  finally { $key.Dispose() }
 }
 function Save-UpdateState($State, [string]$Path) {
   $temporary = "$Path.tmp"

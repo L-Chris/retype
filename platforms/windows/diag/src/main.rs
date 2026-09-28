@@ -20,7 +20,7 @@ use retype_engine::{
 use retype_pinyin::Lexicon;
 use retype_types::{
     AsrEvent, ContextSnapshot, InputEvent, InputSource, KernelAction, Key, LearningStore,
-    Modifiers, PrivacyLevel, RenderState, VoiceEvent,
+    Modifiers, PinyinScheme, PrivacyLevel, RenderState, VoiceEvent,
 };
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -38,6 +38,7 @@ struct Cli {
     word_bonus: Option<f32>,
     /// 覆盖 k-best 宽度
     kbest: Option<usize>,
+    scheme: PinyinScheme,
     /// `--explain <拼音>`：打印候选的音节切分与得分后退出
     explain: Option<String>,
 }
@@ -52,6 +53,7 @@ impl Default for Cli {
             context: None,
             word_bonus: None,
             kbest: None,
+            scheme: PinyinScheme::Full,
             explain: None,
         }
     }
@@ -65,7 +67,7 @@ retype-diag —— retype 输入内核的终端调试台
 用法:
   retype-diag [--dict <path>] [--inline] [--bench] [--no-cloud] [--context <文本>]
 
-  --dict      已注音词库（tools/dict-build 的产物）。默认 {DEFAULT_DICT}
+  --dict      已注音词库 .tsv 或 .bin（tools/dict-build 的产物）。默认 {DEFAULT_DICT}
               文件不存在时会退化成「全量单字」模式，正好用来验证降级路径
   --inline    同步执行二刷（结果确定，便于断言）；默认走异步 LocalBackend
   --bench     跑一遍首刷延迟基准后退出
@@ -76,6 +78,7 @@ retype-diag —— retype 输入内核的终端调试台
               word_bonus 是这个偏差的部分补偿：太小 → 垃圾长词条压过常用词，
               太大 → 退化成全单字。用 --explain 观察逐边得分来调。
   --k <n>     覆盖 k-best 宽度
+  --scheme <full|flypy>  选择全拼或小鹤双拼（默认 full）
 
 REPL 命令:
   <字母>        当成拼音输入，例如  nihaomashijie
@@ -143,6 +146,13 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
                 )
             }
             "--explain" => c.explain = Some(val(&mut i)?),
+            "--scheme" => {
+                c.scheme = match val(&mut i)?.as_str() {
+                    "full" => PinyinScheme::Full,
+                    "flypy" => PinyinScheme::Flypy,
+                    _ => return Err("--scheme 只接受 full 或 flypy".to_string()),
+                }
+            }
             other => return Err(format!("未知参数: {other}")),
         }
         i += 1;
@@ -172,7 +182,12 @@ fn load_dict(path: &str) -> Arc<AsyncDict> {
             return holder;
         }
     };
-    match retype_dict::load_annotated(std::io::BufReader::with_capacity(1 << 16, f)) {
+    let loaded = if p.extension().is_some_and(|ext| ext == "bin") {
+        retype_dict::binary::load(f)
+    } else {
+        retype_dict::load_annotated(std::io::BufReader::with_capacity(1 << 16, f))
+    };
+    match loaded {
         Ok((d, stats)) => {
             eprintln!(
                 "[词库] {} 词条 / {} 行 / {} trie 节点，加载耗时 {:?}",
@@ -225,6 +240,7 @@ impl App {
             KernelConfig {
                 rerank_enabled: !cli.no_cloud,
                 decode: decode_options(cli),
+                pinyin_scheme: cli.scheme,
                 ..Default::default()
             },
             layered,
@@ -647,12 +663,15 @@ fn explain(cli: &Cli, input: &str) {
     let dict = load_dict(&cli.dict);
     let opts = decode_options(cli);
     println!(
-        "\n── explain {:?}  (word_bonus={}, k={}, raw_penalty={}) ──",
-        input, opts.word_bonus, opts.k, opts.raw_penalty
+        "\n── explain {:?}  (scheme={:?}, word_bonus={}, k={}, raw_penalty={}) ──",
+        input, cli.scheme, opts.word_bonus, opts.k, opts.raw_penalty
     );
 
     use retype_pinyin::{normalize, Decoder};
-    let out = Decoder::with_options(opts.clone()).decode(input, dict.as_ref());
+    let out = match cli.scheme {
+        PinyinScheme::Full => Decoder::with_options(opts.clone()).decode(input, dict.as_ref()),
+        PinyinScheme::Flypy => retype_pinyin::shuangpin::decode(input, dict.as_ref(), &opts),
+    };
     println!("音节切分(首选): {}", out.syllables.join("'"));
     println!(
         "已匹配音节数: {}  含原样字母: {}",
@@ -677,9 +696,11 @@ fn explain(cli: &Cli, input: &str) {
             c.syllable_len
         );
     }
-    println!("\n切分歧义（前 12 种）:");
-    for s in retype_pinyin::all_segmentations(&normalize(input), 12) {
-        println!("  {}", s.join(" + "));
+    if cli.scheme == PinyinScheme::Full {
+        println!("\n切分歧义（前 12 种）:");
+        for s in retype_pinyin::all_segmentations(&normalize(input), 12) {
+            println!("  {}", s.join(" + "));
+        }
     }
 
     // 单音节对照：直接看词库里这个音节下谁的分最高
@@ -704,30 +725,32 @@ fn explain(cli: &Cli, input: &str) {
         println!("  {syl:<6} → {}", top.join("  "));
     }
 
-    // 逐边分解：相同的候选文字可能来自完全不同的切分，
-    // 只有拆开看每一步的 logp 才能解释排序
-    println!("\n逐边分解（top {} 路径）:", out.candidates.len().min(6));
-    for t in retype_pinyin::trace(input, dict.as_ref(), &opts)
-        .iter()
-        .take(6)
-    {
-        println!("  总分 {:>9.3}  {}", t.score, t.text);
-        for s in &t.steps {
-            let syl = if s.syllables.is_empty() {
-                "-".to_string()
-            } else {
-                s.syllables.join("+")
-            };
-            let tag = if s.raw { " [原样字母]" } else { "" };
-            println!(
-                "      {:<8} {:<16} logp={:>8.3}  step={:>8.3}{}{}",
-                s.text,
-                syl,
-                s.logp,
-                s.score,
-                if s.raw { "" } else { "  (-wp)" },
-                tag
-            );
+    if cli.scheme == PinyinScheme::Full {
+        // 逐边分解：相同的候选文字可能来自完全不同的切分，
+        // 只有拆开看每一步的 logp 才能解释排序
+        println!("\n逐边分解（top {} 路径）:", out.candidates.len().min(6));
+        for t in retype_pinyin::trace(input, dict.as_ref(), &opts)
+            .iter()
+            .take(6)
+        {
+            println!("  总分 {:>9.3}  {}", t.score, t.text);
+            for s in &t.steps {
+                let syl = if s.syllables.is_empty() {
+                    "-".to_string()
+                } else {
+                    s.syllables.join("+")
+                };
+                let tag = if s.raw { " [原样字母]" } else { "" };
+                println!(
+                    "      {:<8} {:<16} logp={:>8.3}  step={:>8.3}{}{}",
+                    s.text,
+                    syl,
+                    s.logp,
+                    s.score,
+                    if s.raw { "" } else { "  (-wp)" },
+                    tag
+                );
+            }
         }
     }
 }

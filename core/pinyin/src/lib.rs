@@ -211,6 +211,46 @@ mod tests {
         assert_eq!(a.candidates, b.candidates);
     }
 
+    #[test]
+    fn single_syllable_homophones_remain_available_beyond_kbest() {
+        let mut lex = TestLex::default();
+        for (i, word) in [
+            "于", "与", "语", "雨", "玉", "余", "遇", "欲", "预", "域", "羽", "宇",
+        ]
+        .iter()
+        .enumerate()
+        {
+            lex.add(word, "yu", -(i as f32));
+        }
+        lex.add("鱼", "yu", -30.0);
+        let opts = DecodeOptions {
+            k: 3,
+            ..Default::default()
+        };
+        for out in [
+            decode("yu", &lex, &opts),
+            shuangpin::decode("yu", &lex, &opts),
+        ] {
+            assert_eq!(out.candidates.len(), 13);
+            assert_eq!(out.candidates.last().map(|c| c.text.as_str()), Some("鱼"));
+        }
+    }
+
+    #[test]
+    fn flypy_phrase_survives_competing_candidates() {
+        let mut lex = TestLex::default();
+        for i in 0..12 {
+            lex.add(&format!("候选{i}"), "kuai jie jian", -(i as f32));
+        }
+        lex.add("快捷键", "kuai jie jian", -20.0);
+        let opts = DecodeOptions {
+            k: 3,
+            ..Default::default()
+        };
+        let out = shuangpin::decode("kkjpjm", &lex, &opts);
+        assert!(out.candidates.iter().any(|c| c.text == "快捷键"));
+    }
+
     /// 回归测试：k-best 曾用「(位置, 槽位下标)」回溯，而每层 top-k 是边扩展边
     /// 插入/截断的，槽位下标会失效，于是拼出词库里根本不存在的组合
     /// （真实词库上的表现是「妳好吗世界」压过「你好吗世界」）。

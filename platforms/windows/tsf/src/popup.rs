@@ -1,7 +1,7 @@
 //! Compact, non-activating candidate surface. Native GDI keeps it independent of
 //! a browser/runtime and allows the same TSF visibility contract as desktop hosts.
 use crate::{edit, tip::TipState};
-use retype_types::{PinyinScheme, RenderState};
+use retype_types::RenderState;
 use std::sync::{Arc, Weak};
 use windows::Win32::{
     Foundation::*,
@@ -19,7 +19,6 @@ struct Frame {
     scale: i32,
     width: i32,
     height: i32,
-    scheme: &'static str,
 }
 fn px(value: i32, dpi: i32) -> i32 {
     (value * dpi + 48) / 96
@@ -91,44 +90,50 @@ pub fn update(
         let dc = GetDC(Some(window));
         let face = font(18, dpi, 400);
         let previous = SelectObject(dc, face.into());
-        let pad = px(10, dpi);
-        let mut x = pad;
-        let mut y = px(40, dpi);
-        let row = px(40, dpi);
-        let mut widest = px(230, dpi).min(max_width);
-        let mut cells = Vec::new();
-        for candidate in render.visible() {
+        let pad = px(7, dpi);
+        let gap = px(3, dpi);
+        let row = px(38, dpi);
+        let viewport = max_width.min(px(720, dpi)).max(px(100, dpi));
+        let visible = render.visible();
+        let mut desired = Vec::with_capacity(visible.len());
+        for candidate in visible {
             let mut size = SIZE::default();
             let _ = GetTextExtentPoint32W(
                 dc,
                 &candidate.text.encode_utf16().collect::<Vec<_>>(),
                 &mut size,
             );
-            let width = (size.cx + px(48, dpi))
-                .clamp(px(70, dpi), px(260, dpi))
-                .min((max_width - pad * 2).max(1));
-            if x + width + pad > max_width && x > pad {
-                x = pad;
-                y += row + px(4, dpi);
-            }
+            desired.push((size.cx + px(42, dpi)).clamp(px(54, dpi), px(240, dpi)));
+        }
+        let available = (viewport - pad * 2 - gap * (desired.len() as i32 - 1).max(0)).max(1);
+        let share = available / (desired.len() as i32).max(1);
+        let mut widths: Vec<i32> = desired.iter().map(|width| (*width).min(share)).collect();
+        let mut spare = available - widths.iter().sum::<i32>();
+        for (width, wanted) in widths.iter_mut().zip(desired) {
+            let extra = (wanted - *width).min(spare);
+            *width += extra;
+            spare -= extra;
+        }
+        let mut x = pad;
+        let mut cells = Vec::new();
+        for width in widths {
             cells.push(RECT {
                 left: x,
-                top: y,
+                top: pad,
                 right: x + width,
-                bottom: y + row,
+                bottom: pad + row,
             });
-            x += width + px(3, dpi);
-            widest = widest.max(x + pad);
+            x += width + gap;
         }
-        let width = widest.min(max_width);
-        let height = y + row + px(10, dpi);
+        let width = if cells.is_empty() {
+            px(80, dpi)
+        } else {
+            x - gap + pad
+        };
+        let height = row + pad * 2;
         SelectObject(dc, previous);
         let _ = DeleteObject(face.into());
         ReleaseDC(Some(window), dc);
-        let scheme = tip
-            .session()
-            .map(|s| s.backend.with_kernel(|k| k.config().pinyin_scheme))
-            .unwrap_or_default();
         let frame = Box::new(Frame {
             render: render.clone(),
             context: context.clone(),
@@ -137,11 +142,6 @@ pub fn update(
             scale: dpi,
             width,
             height,
-            scheme: if scheme == PinyinScheme::Flypy {
-                "小鹤"
-            } else {
-                "全拼"
-            },
         });
         let old = SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(frame) as _);
         if old != 0 {
@@ -218,56 +218,27 @@ unsafe fn paint(window: HWND, frame: &Frame) {
         let bg = CreateSolidBrush(COLORREF(0x00fdfcfc));
         FillRect(dc, &bounds, bg);
         let _ = DeleteObject(bg.into());
-        rounded(dc, bounds, 0x00fdfcfc, 0x00e6e2df, px(14, frame.scale));
+        rounded(dc, bounds, 0x00fdfcfc, 0x00e6e2df, px(16, frame.scale));
         SetBkMode(dc, TRANSPARENT);
         let small = font(13, frame.scale, 400);
         let main = font(18, frame.scale, 400);
         let old_font = SelectObject(dc, small.into());
         let p = |v| px(v, frame.scale);
-        text(
-            dc,
-            &frame.render.composition,
-            RECT {
-                left: p(17),
-                top: p(5),
-                right: frame.width - p(112),
-                bottom: p(35),
-            },
-            0x006b635a,
-            DT_LEFT,
-        );
-        text(
-            dc,
-            &format!(
-                "{}  {}/{}",
-                frame.scheme,
-                frame.render.page_start / frame.render.page_size.max(1) + 1,
-                frame.render.page_count().max(1)
-            ),
-            RECT {
-                left: frame.width - p(108),
-                top: p(5),
-                right: frame.width - p(16),
-                bottom: p(35),
-            },
-            0x00928b83,
-            DT_RIGHT,
-        );
         for (i, (candidate, cell)) in frame.render.visible().iter().zip(&frame.cells).enumerate() {
             let selected = frame.render.page_start + i == frame.render.selected;
             if selected {
-                rounded(dc, *cell, 0x00fff0df, 0x00fff0df, p(9));
+                rounded(dc, *cell, 0x00968f13, 0x00968f13, p(11));
             }
             SelectObject(dc, small.into());
             text(
                 dc,
                 &(i + 1).to_string(),
                 RECT {
-                    left: cell.left + p(10),
-                    right: cell.left + p(28),
+                    left: cell.left + p(9),
+                    right: cell.left + p(25),
                     ..*cell
                 },
-                if selected { 0x00c66b25 } else { 0x009d958e },
+                if selected { 0x00ffffff } else { 0x009a938e },
                 DT_LEFT,
             );
             SelectObject(dc, main.into());
@@ -275,11 +246,11 @@ unsafe fn paint(window: HWND, frame: &Frame) {
                 dc,
                 &candidate.text,
                 RECT {
-                    left: cell.left + p(30),
-                    right: cell.right - p(10),
+                    left: cell.left + p(25),
+                    right: cell.right - p(8),
                     ..*cell
                 },
-                if selected { 0x00b75c16 } else { 0x00352e28 },
+                if selected { 0x00ffffff } else { 0x00443d34 },
                 DT_LEFT,
             );
         }

@@ -41,7 +41,7 @@ impl Default for KernelConfig {
             rerank_enabled: true,
             chinese_on_start: true,
             max_buffer_chars: 64,
-            candidate_cap: 32,
+            candidate_cap: 512,
         }
     }
 }
@@ -350,6 +350,8 @@ impl Kernel {
             Key::Down => self.page(1, actions),
             Key::PageUp => self.page(-1, actions),
             Key::PageDown => self.page(1, actions),
+            Key::Char('-') => self.page(-1, actions),
+            Key::Char('+') => self.page(1, actions),
             // 标点/符号：先把组字内容按首选上屏，再把标点交回宿主
             Key::Char(_) => {
                 if self.has_composition() {

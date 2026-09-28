@@ -9,6 +9,7 @@
 use crate::lexicon::{LexEntry, Lexicon};
 use crate::syllables;
 use retype_types::{Candidate, CandidateSource, SyllableId};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,7 +44,7 @@ pub struct DecodeOptions {
 impl Default for DecodeOptions {
     fn default() -> Self {
         Self {
-            k: 8,
+            k: 24,
             page_size: 9,
             word_bonus: 3.5,
             raw_penalty: 20.0,
@@ -411,16 +412,15 @@ pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions
     let bytes = input.as_bytes();
 
     let mut found: Vec<(Candidate, bool, usize)> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
     for (pi, (score, path)) in paths.iter().enumerate() {
         let Some((cand, raw)) = path_to_candidate(bytes, &lattice, path, *score) else {
             continue;
         };
-        if seen.contains(&cand.text) {
+        if !seen.insert(cand.text.clone()) {
             continue;
         }
-        seen.push(cand.text.clone());
         found.push((cand, raw, pi));
     }
 
@@ -456,11 +456,44 @@ pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions
     if opts.include_prefixes {
         if let Some(pi) = best_path.and_then(|i| paths.get(i)) {
             for pc in prefix_candidates(&lattice, &pi.1) {
-                if !seen.contains(&pc.text) {
-                    seen.push(pc.text.clone());
+                if seen.insert(pc.text.clone()) {
                     candidates.push(pc);
                 }
             }
+        }
+    }
+
+    // k-best keeps combined paths bounded. Preserve every direct dictionary match,
+    // including rare homophones and low-frequency phrases, so paging can still reach
+    // words outside the beam without expanding the combinatorial path search.
+    let mut exact_matches: Vec<&Edge> = lattice.edges[0]
+        .iter()
+        .filter(|e| e.to == lattice.n && !e.syllables.is_empty())
+        .filter(|e| matches!(e.text, EdgeText::Word(_)))
+        .collect();
+    exact_matches.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for edge in exact_matches {
+        let EdgeText::Word(text) = &edge.text else {
+            continue;
+        };
+        if seen.insert(text.to_string()) {
+            candidates.push(Candidate {
+                text: text.to_string(),
+                comment: comment_of(&edge.syllables),
+                source: if text.chars().count() == 1 {
+                    CandidateSource::SingleChar
+                } else {
+                    CandidateSource::Local
+                },
+                syllable_len: edge.syllables.len(),
+                consumed: lattice.n,
+                syllables: edge.syllables.clone(),
+                score: edge.score,
+            });
         }
     }
 

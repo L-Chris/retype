@@ -123,6 +123,7 @@ fn build(args: &Args) -> Result<Stats, String> {
     let mut w = BufWriter::with_capacity(1 << 20, outfile);
     let mut line = String::new();
     let mut stats = Stats::default();
+    let mut saw_namo = false;
 
     loop {
         line.clear();
@@ -158,14 +159,14 @@ fn build(args: &Args) -> Result<Stats, String> {
             stats.skipped_non_han += 1;
             continue;
         }
-        let variants = annotate::annotate_variants(word);
+        let freq = annotate::effective_frequency(word, freq);
+        let variants = annotate::weighted_variants(word);
         if variants.is_empty() {
             stats.skipped_no_pinyin += 1;
             continue;
         }
         let ambiguous = annotate::is_ambiguous(word);
-        let per = freq / variants.len() as f64;
-        for ids in variants {
+        for (ids, share) in variants {
             let py: Vec<&str> = ids
                 .iter()
                 .filter_map(|id| syllables::name_of(*id))
@@ -175,15 +176,30 @@ fn build(args: &Args) -> Result<Stats, String> {
                 continue;
             }
             // flags 用第 4 列带上，加载方目前忽略它，留给 M2 的上下文打分
-            writeln!(w, "{word}\t{}\t{per}\t{}", py.join(" "), ambiguous as u8)
-                .map_err(|e| format!("写输出失败: {e}"))?;
+            writeln!(
+                w,
+                "{word}\t{}\t{}\t{}",
+                py.join(" "),
+                freq * share,
+                ambiguous as u8
+            )
+            .map_err(|e| format!("写输出失败: {e}"))?;
             stats.emitted += 1;
         }
         stats.words += 1;
+        if word == "南无" {
+            saw_namo = true;
+        }
 
         if stats.lines % 50_000 == 0 {
             eprintln!("  ... 已处理 {} 行，产出 {} 条", stats.lines, stats.emitted);
         }
+    }
+    // Jieba's general word list omits this restricted but valid reading.
+    if !saw_namo {
+        writeln!(w, "南无\tna mo\t50\t0").map_err(|e| format!("写输出失败: {e}"))?;
+        stats.emitted += 1;
+        stats.words += 1;
     }
     w.flush().map_err(|e| format!("flush 失败: {e}"))?;
     let binary_path = args.output.with_extension("bin");
@@ -230,6 +246,8 @@ fn verify(args: &Args) -> Result<(), String> {
         ("中国", "zhong guo"),
         ("世界", "shi jie"),
         ("输入法", "shu ru fa"),
+        ("没收", "mo shou"),
+        ("南无", "na mo"),
     ] {
         let Some(ids) = annotate::parse_pinyin(py) else {
             return Err(format!("测试拼音非法: {py}"));

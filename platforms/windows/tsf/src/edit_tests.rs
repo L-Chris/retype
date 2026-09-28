@@ -487,6 +487,24 @@ fn run_host() -> Result<()> {
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         request(&state, &context, Work::Toggle)?;
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
+            state: Arc::downgrade(&state),
+        }
+        .into();
+        let shift = WPARAM(0x10);
+        let lp = LPARAM(0);
+        assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+        assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        // Using Shift with another key must not switch modes on release.
+        assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+        let _ = keys.OnTestKeyDown(&context, WPARAM('A' as usize), lp)?;
+        assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;

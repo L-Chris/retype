@@ -12,6 +12,68 @@ use std::sync::OnceLock;
 
 const PRIMARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/char-primary.bin"));
 const EXTRA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/char-extra.bin"));
+const PINLU: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../data/dict/raw/kHanyuPinlu-15.1.0.txt"
+));
+
+fn plain_pinlu(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'ā' | 'á' | 'ǎ' | 'à' => 'a',
+            'ē' | 'é' | 'ě' | 'è' => 'e',
+            'ī' | 'í' | 'ǐ' | 'ì' => 'i',
+            'ō' | 'ó' | 'ǒ' | 'ò' => 'o',
+            'ū' | 'ú' | 'ǔ' | 'ù' => 'u',
+            'ü' | 'ǘ' | 'ǚ' | 'ǜ' => 'v',
+            'ń' | 'ň' | 'ǹ' => 'n',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Pronunciation counts from Unicode Unihan's kHanyuPinlu (15.1.0).
+/// The source corpus is old and incomplete, so readings absent from it are
+/// retained with a small pseudocount rather than deleted.
+fn pinlu_map() -> &'static HashMap<char, HashMap<SyllableId, f64>> {
+    static MAP: OnceLock<HashMap<char, HashMap<SyllableId, f64>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map: HashMap<char, HashMap<SyllableId, f64>> = HashMap::new();
+        for line in PINLU.lines() {
+            let Some((code, readings)) = line.split_once('\t') else {
+                continue;
+            };
+            let mut counts = HashMap::new();
+            for item in readings.split_whitespace() {
+                let Some((spelling, count)) = item.split_once('(') else {
+                    continue;
+                };
+                let Some(id) = syllables::id_of(&plain_pinlu(spelling)) else {
+                    continue;
+                };
+                let Ok(count) = count.trim_end_matches(')').parse::<f64>() else {
+                    continue;
+                };
+                *counts.entry(id).or_insert(0.0) += count;
+            }
+            if counts.is_empty() {
+                continue;
+            }
+            let (start, end) = code.split_once("..").unwrap_or((code, code));
+            let (Ok(start), Ok(end)) =
+                (u32::from_str_radix(start, 16), u32::from_str_radix(end, 16))
+            else {
+                continue;
+            };
+            for cp in start..=end {
+                if let Some(c) = char::from_u32(cp) {
+                    map.insert(c, counts.clone());
+                }
+            }
+        }
+        map
+    })
+}
 
 fn primary(c: char) -> Option<SyllableId> {
     let index = match c as u32 {
@@ -46,6 +108,8 @@ pub static OVERRIDES: &[(&str, &str)] = &[
     ("首都", "shou du"),
     ("都会", "du hui"),
     ("只有", "zhi you"),
+    ("没收", "mo shou"),
+    ("南无", "na mo"),
     ("还行", "hai xing"),
     ("还有", "hai you"),
     ("还原", "huan yuan"),
@@ -133,6 +197,11 @@ pub fn all_han(s: &str) -> bool {
 
 /// 单字的全部读音（多音字会有多个）。
 pub fn char_readings(c: char) -> Vec<SyllableId> {
+    // Upstream includes a spurious "huo" reading for 化. Filtering here also fixes
+    // the single-character fallback dictionary used when the full dictionary is absent.
+    if c == '化' {
+        return syllables::id_of("hua").into_iter().collect();
+    }
     let mut out: Vec<_> = primary(c).into_iter().collect();
     if !is_han(c) {
         return out;
@@ -207,6 +276,58 @@ pub fn annotate_variants(word: &str) -> Vec<Vec<SyllableId>> {
     out
 }
 
+/// A raw single-character count says how often the character appeared, not how
+/// often each reading was used. Keep the previous primary-reading weight so
+/// character sequences do not suddenly outrank whole words, and discount other
+/// readings by their Unihan frequency relative to the primary reading.
+pub fn weighted_variants(word: &str) -> Vec<(Vec<SyllableId>, f64)> {
+    const FALLBACK_SECONDARY_RATIO: f64 = 0.01;
+    const UNATTESTED_COUNT: f64 = 0.1;
+    let variants = annotate_variants(word);
+    let n = variants.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let readings = if word.chars().count() == 1 {
+        word.chars().next().and_then(|c| pinlu_map().get(&c))
+    } else {
+        None
+    };
+    let primary_count = readings.map(|counts| {
+        counts
+            .get(&variants[0][0])
+            .copied()
+            .unwrap_or(UNATTESTED_COUNT)
+    });
+    let base = 1.0 / n as f64;
+    variants
+        .into_iter()
+        .enumerate()
+        .map(|(i, ids)| {
+            let share = if i == 0 || word.chars().count() != 1 {
+                base
+            } else if let (Some(counts), Some(primary)) = (readings, primary_count) {
+                let count = counts.get(&ids[0]).copied().unwrap_or(UNATTESTED_COUNT);
+                base * (count / primary).min(1.0)
+            } else {
+                base * FALLBACK_SECONDARY_RATIO
+            };
+            (ids, share)
+        })
+        .collect()
+}
+
+/// The Jieba source contains some high-frequency singleton artifacts absent
+/// from the modern-Mandarin corpus (e.g. 銆). Keep them typeable, but prevent
+/// that source count from putting an otherwise unattested character first.
+pub fn effective_frequency(word: &str, freq: f64) -> f64 {
+    let mut chars = word.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if !pinlu_map().contains_key(&c) => freq.min(100.0),
+        _ => freq,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -222,6 +343,36 @@ mod tests {
         assert_eq!(names(&annotate("重庆").unwrap()), ["chong", "qing"]);
         assert_eq!(names(&annotate("重要").unwrap()), ["zhong", "yao"]);
         assert_eq!(names(&annotate("银行").unwrap()), ["yin", "hang"]);
+        assert_eq!(names(&annotate("没收").unwrap()), ["mo", "shou"]);
+        assert_eq!(names(&annotate("南无").unwrap()), ["na", "mo"]);
+    }
+
+    #[test]
+    fn hua_does_not_create_a_huo_homophone() {
+        let readings: Vec<_> = annotate_variants("化")
+            .iter()
+            .map(|ids| names(ids))
+            .collect();
+        assert_eq!(readings, vec![vec!["hua"]]);
+        assert!(!is_ambiguous("化"));
+        assert_eq!(names(&char_readings('化')), ["hua"]);
+        assert!(char_readings('重').len() > 1);
+    }
+
+    #[test]
+    fn uncommon_single_char_readings_do_not_split_frequency_evenly() {
+        let variants = weighted_variants("无");
+        assert_eq!(variants.len(), 2);
+        assert_eq!(names(&variants[0].0), ["wu"]);
+        assert_eq!(names(&variants[1].0), ["mo"]);
+        assert_eq!(variants[0].1, 0.5);
+        assert!(variants[1].1 < 0.001);
+        assert!(variants.iter().map(|(_, share)| share).sum::<f64>() < 1.0);
+        let le = weighted_variants("乐");
+        assert_eq!(names(&le[1].0), ["yue"]);
+        assert!(le[1].1 > 0.05, "常用的第二读音不应和南无的 mo 一起压低");
+        assert_eq!(effective_frequency("銆", 6982.0), 100.0);
+        assert_eq!(effective_frequency("无", 42181.0), 42181.0);
     }
 
     #[test]

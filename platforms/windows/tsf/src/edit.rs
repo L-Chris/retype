@@ -27,7 +27,6 @@ pub(crate) enum Work {
     Key(Key, Modifiers),
     Toggle,
     SetChinese(bool),
-    Scheme(retype_types::PinyinScheme),
     Choose(usize, u64),
     Finish(bool),
     Refresh,
@@ -149,19 +148,10 @@ impl Edit_Impl {
                 }
                 InputEvent::ToggleChinese
             }
-            Work::Scheme(scheme) => InputEvent::SetPinyinScheme(scheme),
             Work::Finish(_) | Work::Refresh => return Ok(()),
         };
         let actions = session.submit(event);
-        if let Work::Scheme(scheme) = self.work {
-            if let Err(error) = crate::preferences::save_scheme(scheme) {
-                tracing::warn!("Could not save pinyin scheme: {error}");
-            }
-        }
-        if matches!(
-            self.work,
-            Work::Toggle | Work::SetChinese(_) | Work::Scheme(_)
-        ) {
+        if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
         }
         let mut pass = false;

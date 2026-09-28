@@ -7,11 +7,36 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, WPARAM};
 use windows::Win32::UI::TextServices::*;
 use windows_core::{implement, Interface, Ref, Result, BOOL, GUID};
-const TOGGLE_KEY: GUID = GUID::from_u128(0x9adc1a31_2426_4c80_95f3_79bb71d8932e);
-const TOGGLE_CHORD: TF_PRESERVEDKEY = TF_PRESERVEDKEY {
-    uVKey: 0x20,
-    uModifiers: TF_MOD_CONTROL,
-};
+
+fn is_shift(vk: WPARAM) -> bool {
+    matches!(vk.0 & 0xffff, 0x10 | 0xA0 | 0xA1)
+}
+
+#[derive(Default)]
+struct ShiftTap {
+    pressed: bool,
+    used_with_other_key: bool,
+}
+impl ShiftTap {
+    fn press(&mut self, mods: Modifiers) {
+        if self.pressed {
+            self.used_with_other_key = true;
+        } else {
+            self.pressed = true;
+            self.used_with_other_key = !mods.is_plain();
+        }
+    }
+    fn other_key(&mut self) {
+        if self.pressed {
+            self.used_with_other_key = true;
+        }
+    }
+    fn release(&mut self, mods: Modifiers) -> bool {
+        let toggle = self.pressed && !self.used_with_other_key && mods.is_plain();
+        *self = Self::default();
+        toggle
+    }
+}
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -34,7 +59,7 @@ pub struct TipState {
     focus_cookie: Mutex<Vec<u32>>,
     pub(crate) window: Mutex<Option<CandidateWindow>>,
     language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
-    preserved_key: AtomicBool,
+    shift_tap: Mutex<ShiftTap>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
 }
 impl TipState {
@@ -53,7 +78,7 @@ impl TipState {
             focus_cookie: Mutex::new(Vec::new()),
             window: Mutex::new(Some(CandidateWindow::default())),
             language_bar: Mutex::new(None),
-            preserved_key: AtomicBool::new(false),
+            shift_tap: Mutex::new(ShiftTap::default()),
             mode_bridge: Mutex::new(None),
         })
     }
@@ -112,22 +137,6 @@ impl TipState {
         if let Ok(bridge) = crate::langbar::ModeBridge::attach(self, &mgr) {
             *lock(&self.mode_bridge) = Some(bridge);
         }
-        // SAFETY: TSF dispatches this shortcut through OnPreservedKey even in hosts
-        // that reserve Ctrl+Space before normal key callbacks (for example RichEdit).
-        unsafe {
-            if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
-                self.preserved_key.store(
-                    keys.PreserveKey(
-                        tid,
-                        &TOGGLE_KEY,
-                        &TOGGLE_CHORD,
-                        &"retype 中英切换".encode_utf16().collect::<Vec<_>>(),
-                    )
-                    .is_ok(),
-                    Ordering::SeqCst,
-                );
-            }
-        }
         match crate::langbar::LanguageBar::attach(self, &mgr) {
             Ok(bar) => *lock(&self.language_bar) = Some(bar),
             Err(error) => {
@@ -139,6 +148,7 @@ impl TipState {
     }
     pub fn deactivate(self: &Arc<Self>) -> Result<()> {
         self.activated.store(false, Ordering::SeqCst);
+        *lock(&self.shift_tap) = ShiftTap::default();
         let bridge = lock(&self.mode_bridge).take();
         drop(bridge);
         self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -151,9 +161,6 @@ impl TipState {
             // SAFETY: Registered sinks belong to this manager and client id.
             unsafe {
                 if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
-                    if self.preserved_key.swap(false, Ordering::SeqCst) {
-                        let _ = keys.UnpreserveKey(&TOGGLE_KEY, &TOGGLE_CHORD);
-                    }
                     let _ = keys.UnadviseKeyEventSink(self.tid.load(Ordering::SeqCst));
                 }
                 let cookies = std::mem::take(&mut *lock(&self.focus_cookie));
@@ -254,9 +261,6 @@ impl TipState {
     }
 }
 fn wants_key(key: Key, mods: Modifiers, chinese: bool, composing: bool) -> bool {
-    if key == Key::Space && mods == Modifiers::CTRL {
-        return true;
-    }
     if !mods.is_plain() || !chinese {
         return false;
     }
@@ -376,6 +380,7 @@ impl ITfThreadFocusSink_Impl for FocusSink_Impl {
     fn OnKillThreadFocus(&self) -> Result<()> {
         guarded(|| {
             if let Some(state) = self.state.upgrade() {
+                *lock(&state.shift_tap) = ShiftTap::default();
                 state.epoch.fetch_add(1, Ordering::SeqCst);
                 state.finish(false);
             }
@@ -424,12 +429,7 @@ impl KeyEventSink_Impl {
             state.finish(false);
             return Ok(false.into());
         }
-        let work = if key == Key::Space && mods == Modifiers::CTRL {
-            edit::Work::Toggle
-        } else {
-            edit::Work::Key(key, mods)
-        };
-        match edit::request(&state, ctx, work) {
+        match edit::request(&state, ctx, edit::Work::Key(key, mods)) {
             Ok(()) => Ok(true.into()),
             Err(e) => {
                 tracing::warn!("TSF edit request rejected: {e}");
@@ -448,6 +448,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             if !foreground.as_bool() {
                 if let Some(s) = self.state.upgrade() {
+                    *lock(&s.shift_tap) = ShiftTap::default();
                     s.epoch.fetch_add(1, Ordering::SeqCst);
                     s.finish(false);
                 }
@@ -456,37 +457,58 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnTestKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
-        guarded(|| self.key(ctx, vk, lp, true))
-    }
-    fn OnKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
-        guarded(|| self.key(ctx, vk, lp, false))
-    }
-    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, _vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
-        Ok(false.into())
-    }
-    fn OnKeyUp(&self, _ctx: Ref<'_, ITfContext>, _vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
-        Ok(false.into())
-    }
-    #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM fixes this callback signature.
-    fn OnPreservedKey(&self, ctx: Ref<'_, ITfContext>, guid: *const GUID) -> Result<BOOL> {
         guarded(|| {
-            if guid.is_null() {
-                return Ok(false.into());
-            }
-            // SAFETY: TSF supplies a valid command GUID.
-            if unsafe { *guid } != TOGGLE_KEY {
-                return Ok(false.into());
-            }
             let Some(state) = self.state.upgrade() else {
                 return Ok(false.into());
             };
-            if !state.is_activated() {
-                return Ok(false.into());
+            if is_shift(vk) {
+                return Ok(state.is_activated().into());
             }
-            Ok(edit::request(&state, ctx.ok()?, edit::Work::Toggle)
-                .is_ok()
-                .into())
+            lock(&state.shift_tap).other_key();
+            self.key(ctx, vk, lp, true)
         })
+    }
+    fn OnKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        guarded(|| {
+            if let Some(state) = self.state.upgrade() {
+                if is_shift(vk) {
+                    if state.is_activated() {
+                        lock(&state.shift_tap).press(keymap::read_modifiers());
+                    }
+                    return Ok(false.into());
+                }
+                lock(&state.shift_tap).other_key();
+            }
+            self.key(ctx, vk, lp, false)
+        })
+    }
+    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+        Ok((is_shift(vk)
+            && self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.is_activated() && lock(&state.shift_tap).pressed))
+        .into())
+    }
+    fn OnKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+        if is_shift(vk) {
+            if let Some(state) = self.state.upgrade() {
+                let toggle = lock(&state.shift_tap).release(keymap::read_modifiers());
+                if toggle && state.is_activated() {
+                    if let Ok(ctx) = ctx.ok() {
+                        if let Err(error) = edit::request(&state, ctx, edit::Work::Toggle) {
+                            tracing::warn!("Shift mode switch rejected: {error}");
+                        }
+                    }
+                }
+            }
+        }
+        // Pass the key-up to the host so it never sees a stuck Shift key.
+        Ok(false.into())
+    }
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM fixes this callback signature.
+    fn OnPreservedKey(&self, _ctx: Ref<'_, ITfContext>, _guid: *const GUID) -> Result<BOOL> {
+        Ok(false.into())
     }
 }
 #[cfg(test)]
@@ -510,7 +532,23 @@ mod tests {
         assert!(!wants_key(Key::Char('a'), Modifiers::NONE, false, false));
         assert!(wants_key(Key::Char('a'), Modifiers::NONE, true, false));
         assert!(wants_key(Key::Char('2'), Modifiers::NONE, true, true));
-        assert!(wants_key(Key::Space, Modifiers::CTRL, false, false));
+        assert!(!wants_key(Key::Space, Modifiers::CTRL, false, false));
         assert!(!wants_key(Key::Char('a'), Modifiers::SHIFT, true, false));
+        assert!(wants_key(Key::Char('+'), Modifiers::SHIFT, true, true));
+        assert!(wants_key(Key::Char('-'), Modifiers::NONE, true, true));
+    }
+
+    #[test]
+    fn shift_tap_only_toggles_when_released_alone() {
+        let mut shift = ShiftTap::default();
+        shift.press(Modifiers::SHIFT);
+        assert!(shift.release(Modifiers::NONE));
+        shift.press(Modifiers::SHIFT);
+        shift.other_key();
+        assert!(!shift.release(Modifiers::NONE));
+        shift.press(Modifiers::SHIFT.union(Modifiers::CTRL));
+        assert!(!shift.release(Modifiers::NONE));
+        shift.press(Modifiers::SHIFT);
+        assert!(!shift.release(Modifiers::CTRL));
     }
 }

@@ -135,7 +135,7 @@ bool Win32Window::Create(const std::wstring& title,
   double scale_factor = dpi / 96.0;
 
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       Scale(size.width, scale_factor), Scale(size.height, scale_factor),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -145,6 +145,9 @@ bool Win32Window::Create(const std::wstring& title,
   }
 
   UpdateTheme(window);
+  // Windows 11 rounds this custom frame; earlier Windows versions ignore it.
+  const DWORD round_corners = 2;
+  DwmSetWindowAttribute(window, 33, &round_corners, sizeof(round_corners));
 
   return OnCreate();
 }

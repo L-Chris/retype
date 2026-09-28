@@ -116,17 +116,16 @@ impl DictBuilder {
     /// 自动注音。多音字会展开成多个变体（单字展开全部读音）。
     /// 返回实际插入的变体数；非汉字返回 0。
     pub fn push_word(&mut self, text: &str, freq: f64) -> usize {
-        let variants = annotate::annotate_variants(text);
+        let freq = annotate::effective_frequency(text, freq);
+        let variants = annotate::weighted_variants(text);
         if variants.is_empty() {
             return 0;
         }
         let ambiguous = annotate::is_ambiguous(text);
         let n = variants.len();
-        // 多音字变体平分词频：一个词有 3 种读法时，每种读法下的出现概率约为 1/3
-        let per = if n > 1 { freq / n as f64 } else { freq };
-        for ids in variants {
+        for (ids, share) in variants {
             let f = if ambiguous { flags::AMBIGUOUS } else { 0 };
-            self.push(text, ids, per, f);
+            self.push(text, ids, freq * share, f);
         }
         n
     }
@@ -355,6 +354,26 @@ mod tests {
         out.clear();
         d.lookup(&ids("chong"), &mut out);
         assert!(out.iter().any(|e| &*e.text == "重"));
+    }
+
+    #[test]
+    fn contextual_reading_does_not_inherit_the_full_character_frequency() {
+        let mut b = DictBuilder::default();
+        b.push_word("无", 42_181.0);
+        b.push_word("末", 5_409.0);
+        b.push_word("銆", 6_982.0);
+        b.push_word("摸", 4_552.0);
+        let d = b.build();
+        let mut out = Vec::new();
+        d.lookup(&ids("mo"), &mut out);
+        let score = |word: &str| {
+            out.iter()
+                .find(|e| &*e.text == word)
+                .map(|e| e.logp)
+                .unwrap()
+        };
+        assert!(score("末") > score("无"));
+        assert!(score("摸") > score("銆"));
     }
 
     #[test]
