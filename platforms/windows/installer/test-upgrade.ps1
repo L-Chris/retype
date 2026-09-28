@@ -5,8 +5,20 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') { throw 'Requires an ephemeral Windows Actions runner.' }
 $root = Join-Path $env:ProgramFiles 'retype'
 if (Test-Path -LiteralPath $root) { throw 'Requires a clean runner without retype.' }
-function Install-Package($File, $Log) {
+function Install-Package($File, $Log, [switch]$Legacy) {
   $p = Start-Process -FilePath $File -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCLOSEAPPLICATIONS','/RESTARTEXITCODE=3010',('/LOG="'+$Log+'"')) -WindowStyle Hidden -Wait -PassThru
+  if ($Legacy -and $p.ExitCode -eq 1) {
+    # Published 0.1.4 can fail its post-install user enrollment. Do not accept this
+    # for the candidate: verify the old payload was installed, then normalize only
+    # the legacy user's configuration, as the manual repair did on the real host.
+    $text = Get-Content -LiteralPath $Log -Raw
+    $installed = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{2B7F4C91-8D3E-4A67-B5F0-9C1E7D4A8B23}_is1'
+    if ($installed.DisplayVersion -ne '0.1.4' -or $text -notmatch 'Installation process succeeded' -or $text -notmatch 'User keyboard enrollment: 1') { throw 'Unexpected legacy installation failure.' }
+    Write-Output 'Reproduced the published legacy user-enrollment failure; repairing the legacy fixture.'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\user-profile.ps1"
+    if ($LASTEXITCODE) { throw 'Could not prepare the legacy user profile.' }
+    return
+  }
   if ($p.ExitCode -ne 0) { Get-Content -LiteralPath $Log -Tail 80; throw "Installation failed or needed reboot: $($p.ExitCode)" }
 }
 # Exercise migration from the actually published flat-directory installer.
@@ -17,7 +29,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not fetch legacy release.' }
 $legacySetup = Join-Path $legacy 'retype-0.1.4-windows-x64-setup.exe'
 $expected = ((Get-Content "$legacySetup.sha256" -Raw).Trim() -split '\s+')[0]
 if ((Get-FileHash $legacySetup).Hash -ne $expected) { throw 'Legacy installer checksum mismatch.' }
-Install-Package $legacySetup (Join-Path $env:RUNNER_TEMP 'legacy-install.log')
+Install-Package $legacySetup (Join-Path $env:RUNNER_TEMP 'legacy-install.log') -Legacy
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;

@@ -16,13 +16,18 @@ try {
   $statePath = Join-Path $cache 'state.json'
   $script:state = Read-UpdateState $statePath
   $script:installation = Get-RetypeInstallation
+  $script:healthError = ''
+  try { Test-RetypeInstallation $installation } catch { $script:healthError = $_.Exception.Message }
   # Reconcile an interrupted installation before deciding whether a check is due.
   if ($state.Stage -in @('installing','waiting_restart')) {
     try {
       if ($installation.Version -ne $state.TargetVersion) { throw '预期版本尚未安装。' }
       Test-RetypeInstallation $installation
       $state.Stage = 'complete'; $state.Error = ''
-    } catch { $state.Stage = 'failed'; $state.Error = $_.Exception.Message }
+    } catch {
+      if ($state.Stage -ne 'waiting_restart') { $state.Stage = 'failed' }
+      $state.Error = $_.Exception.Message
+    }
     Save-UpdateState $state $statePath
   }
   if ($Background -and -not (Test-UpdateDue $state)) { return }
@@ -100,6 +105,12 @@ try {
       if ($phase -eq 'check') {
         $script:offer = $result; $progress.Visible = $false
         if (-not $offer.update_available) {
+          if ($healthError) {
+            $label.Text = "已安装版本：$($installation.Version)，但安装状态尚未通过验证。"
+            $details.Text = $healthError + "`r`n如果上次安装要求重启，请先重启；否则可打开版本说明页面下载安装包修复。"
+            $notes.Enabled = [bool]$offer.release_page
+            $form.Show(); return
+          }
           $state.Stage = 'up_to_date'; Save-UpdateState $state $statePath
           $label.Text = "已安装 $($installation.Version)，没有更高的稳定版本。"
           if ($Background) { $context.ExitThread() }; return
