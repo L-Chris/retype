@@ -57,6 +57,8 @@ try {
     $script:stdout = Join-Path $transaction "$Phase.json"
     $script:stderr = Join-Path $transaction "$Phase.log"
     $script:process = Start-Process -FilePath (Join-Path $installation.Directory 'retype-updater.exe') -ArgumentList $Arguments -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    # Retain the native handle before the fast child exits (Windows PowerShell 5.1).
+    $null = $process.Handle
     $progress.Visible = $true
   }
   function Show-Failure([string]$Message) {
@@ -79,6 +81,7 @@ try {
   $timer.Add_Tick({
     if (-not $process -or -not $process.HasExited) { return }
     try {
+      $process.WaitForExit()
       $code = $process.ExitCode; $process.Dispose(); $script:process = $null
       if ($phase -eq 'install') {
         if ($code -eq 3010) { $state.Stage = 'waiting_restart'; $label.Text = '安装已准备完成，需手动重启电脑后生效。' }
@@ -118,6 +121,7 @@ try {
         $label.Text = '正在安装；如弹出 Windows 管理员权限提示，请确认。'
         $script:phase = 'install'; $close.Enabled = $false
         $script:process = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/NOCLOSEAPPLICATIONS','/NORESTARTAPPLICATIONS','/RESTARTEXITCODE=3010',('/LOG="'+$transaction+'\install.log"')) -Verb RunAs -PassThru
+        $null = $process.Handle
       }
     } catch { Show-Failure $_.Exception.Message; if ($Background -and -not $form.Visible) { $context.ExitThread() } }
   })
