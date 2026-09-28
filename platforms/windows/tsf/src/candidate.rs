@@ -1,7 +1,7 @@
 //! TSF candidate discovery plus a no-activate native popup for desktop hosts.
 use retype_types::RenderState;
-use std::sync::{Arc, Mutex};
-use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, HWND, RECT};
+use std::sync::{Arc, Mutex, Weak};
+use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::TextServices::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_core::{implement, Interface, Result, BOOL, BSTR, GUID};
@@ -10,7 +10,7 @@ use windows_core::{implement, Interface, Result, BOOL, BSTR, GUID};
 pub struct CandidateWindow {
     window: Option<HWND>,
     ui: Option<(ITfUIElementMgr, u32)>,
-    element: Option<ITfCandidateListUIElement>,
+    element: Option<ITfCandidateListUIElementBehavior>,
     data: Arc<Mutex<RenderState>>,
     visibility: Arc<Mutex<Visibility>>,
 }
@@ -42,7 +42,7 @@ impl CandidateWindow {
         mgr: &ITfThreadMgr,
         ctx: &ITfContext,
         state: &RenderState,
-        anchor: RECT,
+        anchor: Option<RECT>,
     ) -> Result<()> {
         *self.data.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
         if state.composition.is_empty() || state.candidates.is_empty() {
@@ -56,9 +56,12 @@ impl CandidateWindow {
                     window: self.window,
                     requested: true,
                 }));
-                let element: ITfCandidateListUIElement = Candidates {
+                let element: ITfCandidateListUIElementBehavior = Candidates {
                     data: Arc::clone(&self.data),
                     document: ctx.GetDocumentMgr()?,
+                    context: ctx.clone(),
+                    tip: Arc::downgrade(tip),
+                    selection: Mutex::new(None),
                     visibility: Arc::clone(&self.visibility),
                 }
                 .into();
@@ -94,6 +97,15 @@ impl CandidateWindow {
                 }
                 return Ok(());
             }
+            // UI-less controls can expose a composition without a screen-space
+            // text extent. They still need Begin/UpdateUIElement above so the
+            // host receives candidates; only our own popup requires an anchor.
+            let Some(anchor) = anchor else {
+                if let Some(window) = self.window {
+                    let _ = ShowWindow(window, SW_HIDE);
+                }
+                return Ok(());
+            };
             let owner = ctx
                 .GetActiveView()
                 .and_then(|view| view.GetWnd())
@@ -180,15 +192,39 @@ impl Drop for CandidateWindow {
     }
 }
 
-#[implement(ITfCandidateListUIElement)]
+#[implement(
+    ITfCandidateListUIElementBehavior,
+    ITfIntegratableCandidateListUIElement
+)]
 struct Candidates {
     data: Arc<Mutex<RenderState>>,
     document: ITfDocumentMgr,
+    context: ITfContext,
+    tip: Weak<crate::tip::TipState>,
+    selection: Mutex<Option<(u64, usize)>>,
     visibility: Arc<Mutex<Visibility>>,
 }
 impl Candidates_Impl {
     fn state(&self) -> RenderState {
         self.data.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn selected(&self, state: &RenderState) -> usize {
+        self.selection
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .filter(|(generation, index)| {
+                *generation == state.gen && *index < state.candidates.len()
+            })
+            .map_or(state.selected, |(_, index)| index)
+    }
+
+    fn request(&self, work: crate::edit::Work) -> Result<()> {
+        let tip = self
+            .tip
+            .upgrade()
+            .ok_or(windows::Win32::Foundation::E_FAIL)?;
+        crate::edit::request(&tip, &self.context, work)
     }
 }
 impl ITfUIElement_Impl for Candidates_Impl {
@@ -247,7 +283,8 @@ impl ITfCandidateListUIElement_Impl for Candidates_Impl {
         Ok(self.state().candidates.len() as u32)
     }
     fn GetSelection(&self) -> Result<u32> {
-        Ok(self.state().selected as u32)
+        let state = self.state();
+        Ok(self.selected(&state) as u32)
     }
     fn GetString(&self, index: u32) -> Result<BSTR> {
         self.state()
@@ -265,7 +302,11 @@ impl ITfCandidateListUIElement_Impl for Candidates_Impl {
         unsafe {
             *count = state.page_count() as u32;
             for i in 0..(size as usize).min(state.page_count()) {
-                *indexes.add(i) = (i * state.page_size.max(1)) as u32;
+                *indexes.add(i) = state
+                    .page_starts
+                    .get(i)
+                    .copied()
+                    .unwrap_or(i * state.page_size.max(1)) as u32;
             }
         }
         if (size as usize) < state.page_count() {
@@ -278,6 +319,70 @@ impl ITfCandidateListUIElement_Impl for Candidates_Impl {
     }
     fn GetCurrentPage(&self) -> Result<u32> {
         let s = self.state();
-        Ok((s.page_start / s.page_size.max(1)) as u32)
+        Ok(if s.page_starts.is_empty() {
+            (s.page_start / s.page_size.max(1)) as u32
+        } else {
+            s.page_starts
+                .partition_point(|&start| start <= s.page_start)
+                .saturating_sub(1) as u32
+        })
+    }
+}
+
+impl ITfCandidateListUIElementBehavior_Impl for Candidates_Impl {
+    fn SetSelection(&self, index: u32) -> Result<()> {
+        let state = self.state();
+        if index as usize >= state.candidates.len() {
+            return Err(E_INVALIDARG.into());
+        }
+        *self.selection.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((state.gen, index as usize));
+        Ok(())
+    }
+
+    fn Finalize(&self) -> Result<()> {
+        let state = self.state();
+        self.request(crate::edit::Work::Choose(self.selected(&state), state.gen))
+    }
+
+    fn Abort(&self) -> Result<()> {
+        self.request(crate::edit::Work::Finish(true))
+    }
+}
+
+impl ITfIntegratableCandidateListUIElement_Impl for Candidates_Impl {
+    fn SetIntegrationStyle(&self, _style: &GUID) -> Result<()> {
+        Ok(())
+    }
+
+    fn GetSelectionStyle(&self) -> Result<TfIntegratableCandidateListSelectionStyle> {
+        Ok(STYLE_ACTIVE_SELECTION)
+    }
+
+    fn OnKeyDown(&self, key: WPARAM, flags: LPARAM) -> Result<BOOL> {
+        let Some(tip) = self.tip.upgrade() else {
+            return Ok(BOOL(0));
+        };
+        let scan = (flags.0 as u32 >> 16) & 0xff;
+        let Some(key) = crate::keymap::translate_event(key.0 as u16, scan) else {
+            return Ok(BOOL(0));
+        };
+        let modifiers = crate::keymap::read_modifiers();
+        if !tip.wants(key, modifiers) {
+            return Ok(BOOL(0));
+        }
+        crate::edit::request(&tip, &self.context, crate::edit::Work::Key(key, modifiers))?;
+        Ok(BOOL(1))
+    }
+
+    fn ShowCandidateNumbers(&self) -> Result<BOOL> {
+        Ok(BOOL(1))
+    }
+
+    fn FinalizeExactCompositionString(&self) -> Result<()> {
+        self.request(crate::edit::Work::Key(
+            retype_types::Key::Enter,
+            retype_types::Modifiers::NONE,
+        ))
     }
 }

@@ -120,6 +120,10 @@ impl InlineBackend {
     }
 
     /// 直接访问内核。只对**具体类型**开放，不进 trait（见 `KernelBackend::render` 的注释）。
+    pub fn layout_candidates(&self, widths: &[i32], available: i32, gap: i32) {
+        lock_or_recover(&self.kernel).layout_candidates(widths, available, gap);
+    }
+
     pub fn with_kernel<R>(&self, f: impl FnOnce(&Kernel) -> R) -> R {
         f(&lock_or_recover(&self.kernel))
     }
@@ -254,6 +258,10 @@ impl LocalBackend {
     }
 
     /// 直接访问内核。只对**具体类型**开放，不进 trait（见 `KernelBackend::render` 的注释）。
+    pub fn layout_candidates(&self, widths: &[i32], available: i32, gap: i32) {
+        lock_or_recover(&self.kernel).layout_candidates(widths, available, gap);
+    }
+
     pub fn with_kernel<R>(&self, f: impl FnOnce(&Kernel) -> R) -> R {
         f(&lock_or_recover(&self.kernel))
     }

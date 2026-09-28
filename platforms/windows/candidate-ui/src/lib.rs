@@ -178,6 +178,7 @@ mod tests {
             selected: 0,
             page_size: 9,
             page_start: 0,
+            page_starts: Vec::new(),
             status: StatusFlags::CHINESE.union(StatusFlags::CLOUD_OK),
         }
     }

@@ -45,6 +45,36 @@ pub fn open_settings() -> Result<()> {
     let path = std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..length]))
         .join("settings")
         .join("retype.exe");
+    // Reuse a live settings window only when it belongs to the active install.
+    // This avoids loading a second Flutter process merely to raise the first.
+    unsafe {
+        use windows::Win32::System::Threading::*;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        if let Ok(window) = FindWindowW(w!("FLUTTER_RUNNER_WIN32_WINDOW"), w!("retype 设置")) {
+            let mut pid = 0;
+            GetWindowThreadProcessId(window, Some(&mut pid));
+            if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut executable = [0u16; 32768];
+                let mut len = executable.len() as u32;
+                let found = QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_WIN32,
+                    windows_core::PWSTR(executable.as_mut_ptr()),
+                    &mut len,
+                )
+                .is_ok();
+                let _ = windows::Win32::Foundation::CloseHandle(process);
+                if found
+                    && std::path::Path::new(&String::from_utf16_lossy(&executable[..len as usize]))
+                        == path
+                {
+                    let _ = ShowWindow(window, SW_RESTORE);
+                    let _ = SetForegroundWindow(window);
+                    return Ok(());
+                }
+            }
+        }
+    }
     std::process::Command::new(path)
         .spawn()
         .map_err(|_| windows_core::Error::from(windows::Win32::Foundation::E_FAIL))?;

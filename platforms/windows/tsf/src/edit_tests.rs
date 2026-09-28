@@ -21,6 +21,7 @@ struct Data {
     sink: Option<ITextStoreACPSink>,
     reject: bool,
     defer: bool,
+    no_text_extent: bool,
     deferred_flags: Option<u32>,
 }
 #[implement(ITextStoreACP)]
@@ -330,6 +331,9 @@ impl ITextStoreACP_Impl for Store_Impl {
         prc: *mut windows::Win32::Foundation::RECT,
         pfclipped: *mut windows_core::BOOL,
     ) -> windows_core::Result<()> {
+        if lock(&self.data).no_text_extent {
+            return Err(E_NOTIMPL.into());
+        }
         unsafe {
             *prc = RECT {
                 left: 10 + acpstart * 8,
@@ -351,6 +355,36 @@ impl ITextStoreACP_Impl for Store_Impl {
     }
     fn GetWnd(&self, vcview: u32) -> windows_core::Result<windows::Win32::Foundation::HWND> {
         Ok(HWND::default())
+    }
+}
+
+#[implement(ITfUIElementSink)]
+struct UiLessSink {
+    manager: ITfUIElementMgr,
+    candidates: Arc<Mutex<Vec<String>>>,
+}
+impl ITfUIElementSink_Impl for UiLessSink_Impl {
+    fn BeginUIElement(&self, _id: u32, show: *mut BOOL) -> Result<()> {
+        unsafe { *show = BOOL(0) };
+        Ok(())
+    }
+
+    fn UpdateUIElement(&self, id: u32) -> Result<()> {
+        let ui = unsafe { self.manager.GetUIElement(id)? };
+        let list: ITfCandidateListUIElementBehavior = ui.cast()?;
+        let integrated: ITfIntegratableCandidateListUIElement = ui.cast()?;
+        assert_eq!(
+            unsafe { integrated.GetSelectionStyle()? },
+            STYLE_ACTIVE_SELECTION
+        );
+        if unsafe { list.GetCount()? } > 0 {
+            lock(&self.candidates).push(unsafe { list.GetString(0)? }.to_string());
+        }
+        Ok(())
+    }
+
+    fn EndUIElement(&self, _id: u32) -> Result<()> {
+        Ok(())
     }
 }
 #[test]
@@ -380,6 +414,16 @@ fn run_host() -> Result<()> {
         let context = context.ok_or(E_FAIL)?;
         document.Push(&context)?;
         manager.SetFocus(&document)?;
+        let seen_candidates = Arc::new(Mutex::new(Vec::new()));
+        let ui_manager: ITfUIElementMgr = manager.cast()?;
+        let ui_sink: ITfUIElementSink = UiLessSink {
+            manager: ui_manager,
+            candidates: Arc::clone(&seen_candidates),
+        }
+        .into();
+        let source: ITfSource = manager.cast()?;
+        let _ui_cookie = source.AdviseSink(&ITfUIElementSink::IID, &ui_sink)?;
+        lock(&data).no_text_extent = true;
         let state = TipState::new();
         state.tid.store(tid, Ordering::SeqCst);
         state.activated.store(true, Ordering::SeqCst);
@@ -401,10 +445,10 @@ fn run_host() -> Result<()> {
             retype_types::PinyinScheme::Full,
         ));
         *lock(&state.session) = Some(session);
-        *lock(&state.window) = None;
         for ch in "nihao".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
+        assert!(lock(&seen_candidates).iter().any(|word| word == "你好"));
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "nihao");
         assert!(lock(&state.composition).is_some());
         request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
@@ -454,12 +498,12 @@ fn run_host() -> Result<()> {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
         request(&state, &context, Work::Key(Key::Char('.'), Modifiers::NONE))?;
-        assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好你好.");
+        assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好你好。");
         for ch in "ni".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
         request(&state, &context, Work::Key(Key::Char('0'), Modifiers::NONE))?;
-        assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好你好.ni0");
+        assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好你好。ni0");
         assert!(lock(&state.composition).is_none());
         let session = state.session().expect("active session");
         session.submit(InputEvent::SetPinyinScheme(
@@ -476,12 +520,12 @@ fn run_host() -> Result<()> {
         )?;
         assert_eq!(
             String::from_utf16_lossy(&lock(&data).text),
-            "你好你好.ni0nihc"
+            "你好你好。ni0nihc"
         );
         request(&state, &context, Work::Choose(0, generation))?;
         assert_eq!(
             String::from_utf16_lossy(&lock(&data).text),
-            "你好你好.ni0你好"
+            "你好你好。ni0你好"
         );
         request(&state, &context, Work::Toggle)?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));

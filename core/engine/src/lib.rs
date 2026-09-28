@@ -217,7 +217,7 @@ mod tests {
         assert!(render.candidates.iter().all(|c| !c.text.contains('e')));
         assert_eq!(
             committed_of(&backend.submit(key_ev(Key::Char(',')))).as_deref(),
-            Some("我e"),
+            Some("我e，"),
             "typing punctuation must not discard the unmatched suffix"
         );
     }
@@ -393,15 +393,38 @@ mod tests {
     }
 
     #[test]
-    fn punctuation_commits_best_then_passes_through() {
+    fn punctuation_commits_best_with_chinese_mark() {
         let f = fixture(false);
         type_str(&f.backend, "nihao");
         let acts = key(&f.backend, Key::Char(','));
-        assert_eq!(committed_of(&acts).as_deref(), Some("你好"));
+        assert_eq!(committed_of(&acts).as_deref(), Some("你好，"));
         assert!(
-            acts.iter().any(|a| matches!(a, KernelAction::PassThrough)),
-            "标点必须交回宿主，否则用户打不出逗号"
+            !acts.iter().any(|a| matches!(a, KernelAction::PassThrough)),
+            "中文标点不能再次交回宿主产生重复字符"
         );
+    }
+
+    #[test]
+    fn idle_punctuation_follows_mode_and_pairs_quotes() {
+        let f = fixture(false);
+        for (key_char, expected) in [
+            (',', "，"),
+            ('.', "。"),
+            ('?', "？"),
+            ('"', "“"),
+            ('"', "”"),
+            ('\'', "‘"),
+            ('\'', "’"),
+        ] {
+            let actions = key(&f.backend, Key::Char(key_char));
+            assert_eq!(committed_of(&actions).as_deref(), Some(expected));
+        }
+        f.backend.submit(InputEvent::ToggleChinese);
+        let actions = key(&f.backend, Key::Char(','));
+        assert!(committed_of(&actions).is_none());
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, KernelAction::PassThrough)));
     }
 
     #[test]
@@ -428,6 +451,52 @@ mod tests {
         type_str(&f.backend, "shili");
         let r = last_render(&key(&f.backend, Key::Right));
         assert_eq!(r.selected, 1, "右方向键应移动高亮");
+    }
+
+    #[test]
+    fn measured_pages_keep_navigation_and_number_selection_in_sync() {
+        let (dict, _) = from_pairs([
+            ("实力", "shi li", 5000.0),
+            ("事例", "shi li", 4000.0),
+            ("示例", "shi li", 3000.0),
+        ]);
+        let cloud = offline_cloud(Duration::from_millis(100));
+        let user = Arc::new(UserDict::new());
+        let kernel = Kernel::new(
+            KernelConfig {
+                rerank_enabled: false,
+                ..Default::default()
+            },
+            Arc::new(dict),
+            Arc::new(Learner::new(Arc::clone(&user))),
+            Arc::clone(&cloud),
+        );
+        let f = Fixture {
+            backend: InlineBackend::new(kernel, cloud),
+            user,
+        };
+        type_str(&f.backend, "shili");
+        let original = f.backend.with_kernel(|k| k.render_state());
+        assert!(original.candidates.len() >= 3);
+        let mut widths = vec![180; original.candidates.len()];
+        widths[0] = 90;
+        widths[1] = 90;
+        f.backend.layout_candidates(&widths, 200, 2);
+        let first = f.backend.with_kernel(|k| k.render_state());
+        assert_eq!(first.visible().len(), 2);
+        assert_eq!(first.page_starts[1], 2);
+        assert_eq!(first.candidates, original.candidates);
+        assert!(committed_of(&key(&f.backend, Key::Char('3'))).is_none());
+        let next = last_render(&key(&f.backend, Key::Char('=')));
+        assert_eq!(next.page_start, 2);
+        assert_eq!(next.visible().len(), 1);
+        let previous = last_render(&key(&f.backend, Key::Char('-')));
+        assert_eq!(previous.page_start, 0);
+        let selected = key(&f.backend, Key::Char('2'));
+        assert_eq!(
+            committed_of(&selected).as_deref(),
+            Some(original.candidates[1].text.as_str())
+        );
     }
 
     #[test]

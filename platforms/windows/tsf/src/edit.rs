@@ -196,6 +196,16 @@ impl Edit_Impl {
         let Some(session) = state.session() else {
             return Ok(());
         };
+        let initial = session.backend.with_kernel(|k| k.render_state());
+        // Use the same measured widths for navigation and drawing.
+        let owner = unsafe {
+            self.context
+                .GetActiveView()
+                .and_then(|view| view.GetWnd())
+                .ok()
+        };
+        let (widths, available, gap) = crate::popup::measure(&initial, owner);
+        session.backend.layout_candidates(&widths, available, gap);
         let render = session.backend.with_kernel(|k| k.render_state());
         let c = lock(&state.composition).clone();
         if let Some(c) = c {
@@ -205,26 +215,26 @@ impl Edit_Impl {
             // SAFETY: ec is a valid read/write cookie for this composition's context.
             unsafe {
                 let range = c.object.GetRange()?;
-                let view = self.context.GetActiveView()?;
                 let mut rect = RECT::default();
                 let mut clipped = BOOL(0);
-                if view.GetTextExt(ec, &range, &mut rect, &mut clipped).is_ok()
-                    && !clipped.as_bool()
-                {
-                    let manager = lock(&state.thread_mgr).clone();
-                    let window = lock(&state.window).take();
-                    if let Some(mut window) = window {
-                        if let Some(manager) = manager {
-                            if let Err(error) =
-                                window.update(state, &manager, &self.context, &render, rect)
-                            {
-                                tracing::warn!("TSF candidate UI update failed: {error}");
-                            }
+                let anchor = (self
+                    .context
+                    .GetActiveView()
+                    .and_then(|view| view.GetTextExt(ec, &range, &mut rect, &mut clipped))
+                    .is_ok()
+                    && !clipped.as_bool())
+                .then_some(rect);
+                let manager = lock(&state.thread_mgr).clone();
+                let window = lock(&state.window).take();
+                if let Some(mut window) = window {
+                    if let Some(manager) = manager {
+                        if let Err(error) =
+                            window.update(state, &manager, &self.context, &render, anchor)
+                        {
+                            tracing::warn!("TSF candidate UI update failed: {error}");
                         }
-                        *lock(&state.window) = Some(window);
                     }
-                } else {
-                    state.hide();
+                    *lock(&state.window) = Some(window);
                 }
             }
         }

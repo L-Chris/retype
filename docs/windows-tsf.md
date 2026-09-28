@@ -108,10 +108,11 @@ Windows 用户键盘列表；此前的半启用状态会导致设置页面显示
 `GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT` 与 `GUID_TFCAT_TIPCAP_UIELEMENTENABLED`；
 默认安装目录中的 DLL 与只读词库位于 `Program Files` 下的同一版本目录，
 供受限宿主读取。语言栏接口不可用时
-继续激活按键与编辑会话；UI-less 宿主要求自己绘制候选时不创建弹窗。
-这解决输入法在现代宿主里被过滤的注册问题，但不等于已实现搜索框的
-原生候选融合（`ITfFnSearchCandidateProvider`、
-`ITfIntegratableCandidateListUIElement`）。安装包包含 x64 DLL 和 `x86`
+继续激活按键与编辑会话；UI-less 宿主要求自己绘制候选时不创建弹窗，
+即使宿主不提供光标坐标，也通过 UIElement 发送候选。
+候选列表实现选择、确认和取消接口，并通过
+`ITfIntegratableCandidateListUIElement` 与 `ITfFnSearchCandidateProvider`
+向搜索宿主提供内联候选与只读搜索建议。安装包包含 x64 DLL 和 `x86`
 子目录中的 32 位 DLL，共用根目录词库。
 在干净 Windows 测试机安装新构建的安装器后，可运行只读验收：
 

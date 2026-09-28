@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'settings_repository.dart';
 
@@ -222,11 +223,17 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
   Widget build(BuildContext context) => MaterialApp(
     title: 'retype 设置',
     debugShowCheckedModeBanner: false,
+    locale: const Locale('zh', 'CN'),
+    localizationsDelegates: GlobalMaterialLocalizations.delegates,
+    supportedLocales: const [Locale('zh', 'CN')],
     theme: ThemeData(
       useMaterial3: true,
       colorScheme: ColorScheme.fromSeed(seedColor: _accent),
       fontFamily: 'Microsoft YaHei UI',
+      fontFamilyFallback: const ['Microsoft YaHei', 'Segoe UI'],
       textTheme: ThemeData.light().textTheme.apply(
+        fontFamily: 'Microsoft YaHei UI',
+        fontFamilyFallback: const ['Microsoft YaHei', 'Segoe UI'],
         bodyColor: _ink,
         displayColor: _ink,
       ),

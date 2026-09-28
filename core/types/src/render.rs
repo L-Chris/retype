@@ -119,6 +119,8 @@ pub struct RenderState {
     pub page_size: usize,
     /// 当前页起始下标
     pub page_start: usize,
+    /// Platform-measured page boundaries; empty uses fixed-size pages.
+    pub page_starts: Vec<usize>,
     pub status: StatusFlags,
 }
 
@@ -135,6 +137,9 @@ impl RenderState {
     }
 
     pub fn page_count(&self) -> usize {
+        if !self.page_starts.is_empty() {
+            return self.page_starts.len();
+        }
         let size = self.page_size.max(1);
         self.candidates.len().div_ceil(size)
     }

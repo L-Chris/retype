@@ -25,6 +25,7 @@ mod langbar;
 mod popup;
 mod preferences;
 mod registration;
+mod search;
 pub mod session;
 pub mod tip;
 

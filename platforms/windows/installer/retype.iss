@@ -111,6 +111,7 @@ RestartApplications=no
 
 [Files]
 Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "platforms\windows\installer\refresh-hosts.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "apps\settings\windows\runner\resources\app_icon.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
 ; Flutter desktop bundle must stay together (exe, runtime DLL and data directory).
 Source: "apps\settings\build\windows\x64\runner\Release\*"; DestDir: "{code:GetPayloadDir}\settings"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -160,6 +161,7 @@ var
   DeleteUserData: Boolean;
   UserProfileAdded: Boolean;
   AutoUpdatesReady: Boolean;
+  SearchRefreshReady: Boolean;
   PayloadSuffix: String;
   Previous64, Previous32: String;
   InstallCommitted, RegistrationStarted: Boolean;
@@ -230,6 +232,11 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     AutoUpdatesReady := AutoUpdatesReady and (ResultCode = 0);
     Log(Format('Update task enrollment: %d', [ResultCode]));
+    SearchRefreshReady := ExecAsOriginalUser(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + GetPayloadDir('') + '\refresh-hosts.ps1"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    SearchRefreshReady := SearchRefreshReady and (ResultCode = 0);
+    Log(Format('Search host refresh: %d', [ResultCode]));
     InstallCommitted := True;
   end;
 end;
@@ -262,12 +269,12 @@ begin
       '【选择输入法】' + #13#10 +
       ProfileMessage + #13#10 +
       UpdateMessage + #13#10 +
-      '当前仅支持桌面宿主；现代应用兼容性尚未完成。' + #13#10 + #13#10 +
+      'Windows 搜索等宿主已刷新；其他正在运行的应用会在下次打开时加载新版。' + #13#10 + #13#10 +
       '【当前版本的能力边界】' + #13#10 +
       'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +
       '语言栏「中 / A」可点击切换中英，右键「设置」可切换全拼 / 小鹤双拼。' + #13#10 +
       '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–8 或鼠标选词，- / = 翻页，Esc 取消，回车输入原拼音。' + #13#10 +
-      '应用兼容性仍在验证中。升级后请重新打开使用输入法的应用；如提示重启，请先保存工作。';
+      '应用兼容性仍在验证中。';
   end;
 end;
 

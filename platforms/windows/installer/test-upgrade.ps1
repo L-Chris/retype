@@ -50,6 +50,9 @@ try {
   . "$PSScriptRoot\update-common.ps1"
   $first = Get-RetypeInstallation
   Test-RetypeInstallation $first
+  if (-not (Test-Path -LiteralPath (Join-Path $first.Directory 'refresh-hosts.ps1'))) { throw 'Host refresh helper is missing.' }
+  $refresh = Get-Content "$env:LOCALAPPDATA\retype\updates\refresh.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($refresh.ActiveVersion -ne $first.Version) { throw 'Host refresh did not run for the installed version.' }
   if ($first.Directory -notlike "$root\versions\*") { throw 'Payload was not installed in a version directory.' }
   if ((Get-FileHash $oldDll).Hash -ne $oldHash) { throw 'Upgrade overwrote the loaded legacy DLL.' }
   $firstDll = Join-Path $first.Directory 'retype_ime.dll'

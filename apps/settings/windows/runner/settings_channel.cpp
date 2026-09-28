@@ -1,4 +1,5 @@
 ﻿#include "settings_channel.h"
+#include "flutter_window.h"
 
 #include <flutter/flutter_engine.h>
 #include <flutter/standard_method_codec.h>
@@ -81,7 +82,7 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         const auto& method = call.method_name();
         if (method == "closeWindow") {
-          PostMessageW(window, WM_CLOSE, 0, 0);
+          PostMessageW(window, kHideSettingsMessage, 0, 0);
           result->Success();
           return;
         }

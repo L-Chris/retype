@@ -55,6 +55,20 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Briefly reuse the engine for repeated settings visits, then release it.
+  // WM_CLOSE still destroys the process for installers and system shutdown.
+  constexpr UINT_PTR kIdleTimer = 42;
+  if (message == kHideSettingsMessage) {
+    ShowWindow(hwnd, SW_HIDE);
+    SetTimer(hwnd, kIdleTimer, 60000, nullptr);
+    return 0;
+  }
+  if (message == WM_SHOWWINDOW && wparam) KillTimer(hwnd, kIdleTimer);
+  if (message == WM_TIMER && wparam == kIdleTimer) {
+    KillTimer(hwnd, kIdleTimer);
+    if (!IsWindowVisible(hwnd)) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    return 0;
+  }
   if (message == kShowUpdatesMessage && settings_channel_) {
     settings_channel_->InvokeMethod("showUpdates", nullptr);
     return 0;

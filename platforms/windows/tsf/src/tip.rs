@@ -281,9 +281,15 @@ fn wants_key(key: Key, mods: Modifiers, chinese: bool, composing: bool) -> bool 
                 | Key::PageDown
         );
     }
-    matches!(key, Key::Char(c) if c.is_ascii_lowercase()) && !mods.contains(Modifiers::SHIFT)
+    matches!(key, Key::Char(c) if
+        (c.is_ascii_lowercase() && !mods.contains(Modifiers::SHIFT)) ||
+        retype_engine::kernel::chinese_punctuation(c).is_some())
 }
-#[implement(ITfTextInputProcessorEx, ITfDisplayAttributeProvider)]
+#[implement(
+    ITfTextInputProcessorEx,
+    ITfDisplayAttributeProvider,
+    ITfFunctionProvider
+)]
 pub struct RetypeTip {
     pub state: Arc<TipState>,
 }
@@ -306,6 +312,20 @@ impl ITfTextInputProcessor_Impl for RetypeTip_Impl {
 impl ITfTextInputProcessorEx_Impl for RetypeTip_Impl {
     fn ActivateEx(&self, mgr: Ref<'_, ITfThreadMgr>, tid: u32, flags: u32) -> Result<()> {
         guarded(|| self.state.activate(mgr, tid, flags))
+    }
+}
+
+impl ITfFunctionProvider_Impl for RetypeTip_Impl {
+    fn GetType(&self) -> Result<GUID> {
+        Ok(crate::ids::CLSID_RETYPE_TIP)
+    }
+
+    fn GetDescription(&self) -> Result<windows_core::BSTR> {
+        Ok(windows_core::BSTR::from("retype search candidates"))
+    }
+
+    fn GetFunction(&self, kind: *const GUID, iid: *const GUID) -> Result<windows_core::IUnknown> {
+        crate::search::function(&self.state, kind, iid)
     }
 }
 impl ITfDisplayAttributeProvider_Impl for RetypeTip_Impl {
@@ -537,6 +557,10 @@ mod tests {
         assert!(!wants_key(Key::Char('a'), Modifiers::SHIFT, true, false));
         assert!(wants_key(Key::Char('='), Modifiers::NONE, true, true));
         assert!(wants_key(Key::Char('-'), Modifiers::NONE, true, true));
+        assert!(wants_key(Key::Char(','), Modifiers::NONE, true, false));
+        assert!(wants_key(Key::Char('?'), Modifiers::SHIFT, true, false));
+        assert!(!wants_key(Key::Char(','), Modifiers::NONE, false, false));
+        assert!(!wants_key(Key::Char(','), Modifiers::CTRL, true, false));
     }
 
     #[test]

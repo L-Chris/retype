@@ -87,6 +87,22 @@ if ($Verify) {
   }
   return
 }
+if (-not $Uninstall) {
+  # TIPs in AppContainer hosts (including Windows Search) must read the same
+  # input preferences as desktop apps. Share this settings key read-only;
+  # preserve its existing ACL and do not grant access to sibling/subkeys.
+  $preferences = 'HKCU:\Software\retype'
+  if (-not (Test-Path $preferences)) { New-Item -Path $preferences -Force | Out-Null }
+  $acl = Get-Acl -Path $preferences
+  $packages = [Security.Principal.SecurityIdentifier]::new('S-1-15-2-1')
+  $read = [Security.AccessControl.RegistryAccessRule]::new($packages,
+    [Security.AccessControl.RegistryRights]::ReadKey,
+    [Security.AccessControl.InheritanceFlags]::None,
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow)
+  $acl.SetAccessRule($read)
+  Set-Acl -Path $preferences -AclObject $acl
+}
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
 if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {
   throw 'InstallLayoutOrTip failed. The keyboard was not successfully configured.'

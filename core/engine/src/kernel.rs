@@ -19,6 +19,33 @@ use retype_types::{
 };
 use std::sync::Arc;
 
+/// Chinese punctuation mapping, also used by platform key routing.
+pub fn chinese_punctuation(c: char) -> Option<&'static str> {
+    Some(match c {
+        ',' => "，",
+        '.' => "。",
+        '?' => "？",
+        '!' => "！",
+        ':' => "：",
+        ';' => "；",
+        '(' => "（",
+        ')' => "）",
+        '[' => "【",
+        ']' => "】",
+        '<' => "《",
+        '>' => "》",
+        '\\' => "、",
+        '^' => "……",
+        '_' => "——",
+        '$' => "￥",
+        '`' => "·",
+        '~' => "～",
+        '"' => "“",
+        '\'' => "‘",
+        _ => return None,
+    })
+}
+
 /// 内核配置。
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
@@ -82,6 +109,9 @@ pub struct Kernel {
     syllables: Vec<String>,
     selected: usize,
     page_start: usize,
+    page_starts: Vec<usize>,
+    double_quote_open: bool,
+    single_quote_open: bool,
     status: StatusFlags,
     rerank_inflight: Option<Generation>,
 
@@ -137,6 +167,9 @@ impl Kernel {
             syllables: Vec::new(),
             selected: 0,
             page_start: 0,
+            page_starts: Vec::new(),
+            double_quote_open: false,
+            single_quote_open: false,
             status,
             rerank_inflight: None,
             voice: VoicePhase::Idle,
@@ -204,6 +237,7 @@ impl Kernel {
                 selected: 0,
                 page_size: self.cfg.decode.page_size,
                 page_start: 0,
+                page_starts: Vec::new(),
                 status: self.status,
             };
         }
@@ -214,8 +248,9 @@ impl Kernel {
             syllables: self.syllables.clone(),
             candidates: self.candidates.clone(),
             selected: self.selected,
-            page_size: self.cfg.decode.page_size,
+            page_size: self.current_page_size(),
             page_start: self.page_start,
+            page_starts: self.page_starts.clone(),
             status: self.status,
         }
     }
@@ -297,12 +332,8 @@ impl Kernel {
                 self.bump_gen();
                 self.redecode(source, actions);
             }
-            Key::Char('\'') => {
+            Key::Char('\'') if !self.buffer.is_empty() => {
                 // 显式音节分隔符：xi'an vs xian
-                if self.buffer.is_empty() {
-                    actions.push(KernelAction::PassThrough);
-                    return;
-                }
                 if self.buffer.ends_with('\'') {
                     return;
                 }
@@ -313,7 +344,7 @@ impl Kernel {
             Key::Char(d @ '0'..='9') => {
                 if self.has_composition() && d != '0' {
                     let idx = self.page_start + (d as usize - '1' as usize);
-                    if (d as usize - '1' as usize) < self.cfg.decode.page_size.max(1) {
+                    if (d as usize - '1' as usize) < self.current_page_size() {
                         self.choose(idx, actions);
                     }
                 } else {
@@ -352,12 +383,38 @@ impl Kernel {
             Key::PageDown => self.page(1, actions),
             Key::Char('-') => self.page(-1, actions),
             Key::Char('=') => self.page(1, actions),
-            // 标点/符号：先把组字内容按首选上屏，再把标点交回宿主
-            Key::Char(_) => {
+            // 中文标点与首选一起上屏；未映射的符号交回宿主。
+            Key::Char(c) => {
+                let punctuation = match c {
+                    '"' => {
+                        self.double_quote_open = !self.double_quote_open;
+                        Some(if self.double_quote_open { "“" } else { "”" })
+                    }
+                    '\'' => {
+                        self.single_quote_open = !self.single_quote_open;
+                        Some(if self.single_quote_open { "‘" } else { "’" })
+                    }
+                    _ => chinese_punctuation(c),
+                };
                 if self.has_composition() {
                     self.commit_best(actions);
+                    if let Some(mark) = punctuation {
+                        for action in actions.iter_mut().rev() {
+                            if let KernelAction::Commit(CommitRequest::ReplaceComposition {
+                                text,
+                            }) = action
+                            {
+                                text.push_str(mark);
+                                return;
+                            }
+                        }
+                    }
                 }
-                actions.push(KernelAction::PassThrough);
+                if let Some(mark) = punctuation {
+                    actions.push(KernelAction::Commit(CommitRequest::Text(mark.into())));
+                } else {
+                    actions.push(KernelAction::PassThrough);
+                }
             }
             _ => {
                 if self.has_composition() {
@@ -392,6 +449,8 @@ impl Kernel {
     }
 
     fn on_toggle_chinese(&mut self, actions: &mut Vec<KernelAction>) {
+        self.double_quote_open = false;
+        self.single_quote_open = false;
         if self.has_composition() {
             self.commit_raw_letters(actions);
         }
@@ -405,6 +464,8 @@ impl Kernel {
     }
 
     fn on_focus(&mut self, app: AppInfo, field: FieldInfo, actions: &mut Vec<KernelAction>) {
+        self.double_quote_open = false;
+        self.single_quote_open = false;
         // 焦点变了就**丢弃**组字串，绝不上屏。
         // test.md 第六节列的头号事故就是「文字插入到错误窗口」。
         self.reset_composition();
@@ -435,6 +496,7 @@ impl Kernel {
 
     /// 首刷：本地解码 + 渲染 + 派发二刷。
     fn redecode(&mut self, source: InputSource, actions: &mut Vec<KernelAction>) {
+        self.page_starts.clear();
         if self.buffer.is_empty() {
             self.candidates.clear();
             self.syllables.clear();
@@ -609,6 +671,7 @@ impl Kernel {
         self.buffer.clear();
         self.parts.clear();
         self.candidates.clear();
+        self.page_starts.clear();
         self.syllables.clear();
         self.selected = 0;
         self.page_start = 0;
@@ -618,6 +681,43 @@ impl Kernel {
 
     // ────────────────────────── 候选窗导航 ──────────────────────────
 
+    /// Apply measured widths without dropping or reordering candidates.
+    pub fn layout_candidates(&mut self, widths: &[i32], available: i32, gap: i32) {
+        if widths.len() != self.candidates.len() {
+            return;
+        }
+        self.page_starts.clear();
+        let mut used = 0;
+        let mut count = 0;
+        for (index, &width) in widths.iter().enumerate() {
+            if count == 0
+                || count >= self.cfg.decode.page_size.max(1)
+                || used + gap + width > available
+            {
+                self.page_starts.push(index);
+                used = width;
+                count = 1;
+            } else {
+                used += gap + width;
+                count += 1;
+            }
+        }
+        self.set_selected(self.selected);
+    }
+
+    fn current_page_size(&self) -> usize {
+        if self.page_starts.is_empty() {
+            return self.cfg.decode.page_size.max(1);
+        }
+        self.page_starts
+            .iter()
+            .copied()
+            .find(|&start| start > self.page_start)
+            .unwrap_or(self.candidates.len())
+            .saturating_sub(self.page_start)
+            .max(1)
+    }
+
     fn set_selected(&mut self, i: usize) {
         let n = self.candidates.len();
         if n == 0 {
@@ -626,6 +726,15 @@ impl Kernel {
             return;
         }
         self.selected = i.min(n - 1);
+        if !self.page_starts.is_empty() {
+            self.page_start = *self
+                .page_starts
+                .iter()
+                .rev()
+                .find(|&&start| start <= self.selected)
+                .unwrap_or(&0);
+            return;
+        }
         let size = self.cfg.decode.page_size.max(1);
         if self.selected < self.page_start {
             self.page_start = self.selected;
@@ -648,6 +757,18 @@ impl Kernel {
     fn page(&mut self, delta: i32, actions: &mut Vec<KernelAction>) {
         if self.candidates.is_empty() {
             actions.push(KernelAction::PassThrough);
+            return;
+        }
+        if !self.page_starts.is_empty() {
+            let current = self
+                .page_starts
+                .partition_point(|&start| start <= self.page_start)
+                .saturating_sub(1);
+            let next =
+                (current as i32 + delta).clamp(0, self.page_starts.len() as i32 - 1) as usize;
+            self.page_start = self.page_starts[next];
+            self.selected = self.page_start;
+            actions.push(KernelAction::Render(self.render_state()));
             return;
         }
         let size = self.cfg.decode.page_size.max(1) as i32;

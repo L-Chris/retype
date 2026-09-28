@@ -77,6 +77,33 @@ pub fn create(owner: Option<HWND>) -> Result<HWND> {
         )
     }
 }
+pub fn measure(render: &RenderState, window: Option<HWND>) -> (Vec<i32>, i32, i32) {
+    // SAFETY: Temporary GDI objects are restored and released on this thread.
+    unsafe {
+        let dpi = window.map(|w| GetDpiForWindow(w)).unwrap_or(96).max(96) as i32;
+        let dc = GetDC(window);
+        let face = font(15, dpi, 400);
+        let previous = SelectObject(dc, face.into());
+        let widths = render
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let mut size = SIZE::default();
+                let _ = GetTextExtentPoint32W(
+                    dc,
+                    &candidate.text.encode_utf16().collect::<Vec<_>>(),
+                    &mut size,
+                );
+                (size.cx + px(29, dpi)).max(px(43, dpi))
+            })
+            .collect();
+        SelectObject(dc, previous);
+        let _ = DeleteObject(face.into());
+        ReleaseDC(window, dc);
+        (widths, 480 - px(10, dpi), px(2, dpi))
+    }
+}
+
 pub fn update(
     window: HWND,
     tip: &Arc<TipState>,
@@ -92,7 +119,7 @@ pub fn update(
         let previous = SelectObject(dc, face.into());
         let pad = px(5, dpi);
         let gap = px(2, dpi);
-        let row = px(30, dpi);
+        let mut row = px(30, dpi);
         let viewport = max_width.clamp(100, 480);
         let visible = render.visible();
         let mut desired = Vec::with_capacity(visible.len());
@@ -103,16 +130,23 @@ pub fn update(
                 &candidate.text.encode_utf16().collect::<Vec<_>>(),
                 &mut size,
             );
-            desired.push((size.cx + px(29, dpi)).clamp(px(43, dpi), px(180, dpi)));
+            desired.push((size.cx + px(29, dpi)).max(px(43, dpi)));
         }
-        let available = (viewport - pad * 2 - gap * (desired.len() as i32 - 1).max(0)).max(1);
-        let share = available / (desired.len() as i32).max(1);
-        let mut widths: Vec<i32> = desired.iter().map(|width| (*width).min(share)).collect();
-        let mut spare = available - widths.iter().sum::<i32>();
-        for (width, wanted) in widths.iter_mut().zip(desired) {
-            let extra = (wanted - *width).min(spare);
-            *width += extra;
-            spare -= extra;
+        let available = viewport - pad * 2;
+        let widths: Vec<i32> = desired.iter().map(|&width| width.min(available)).collect();
+        // A single unusually long candidate wraps; ordinary phrases stay on one line.
+        for (candidate, &width) in visible.iter().zip(&widths) {
+            let mut rect = RECT {
+                right: (width - px(24, dpi)).max(1),
+                ..Default::default()
+            };
+            DrawTextW(
+                dc,
+                &mut candidate.text.encode_utf16().collect::<Vec<_>>(),
+                &mut rect,
+                DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+            );
+            row = row.max(rect.bottom + px(10, dpi));
         }
         let mut x = pad;
         let mut cells = Vec::new();
@@ -198,7 +232,7 @@ unsafe fn text(dc: HDC, value: &str, mut rect: RECT, color: u32, flags: DRAW_TEX
             dc,
             &mut value.encode_utf16().collect::<Vec<_>>(),
             &mut rect,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | flags,
+            DT_NOPREFIX | flags,
         );
     }
 }
@@ -239,13 +273,14 @@ unsafe fn paint(window: HWND, frame: &Frame) {
                     ..*cell
                 },
                 if selected { 0x00ffffff } else { 0x009a938e },
-                DT_LEFT,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
             );
             SelectObject(dc, main.into());
             text(
                 dc,
                 &candidate.text,
                 RECT {
+                    top: cell.top + p(5),
                     left: cell.left + p(19),
                     right: cell.right - p(5),
                     ..*cell
