@@ -78,6 +78,11 @@ fn write_string(key: &Key, name: PCWSTR, value: &[u16]) -> Result<()> {
 pub fn register() -> Result<()> {
     let _apartment = ComApartment::new()?;
     let path = module_path()?;
+    // Keep NUL terminators in backing storage even though the API takes explicit
+    // lengths. Some TSF registration paths read the buffers as PCWSTR and can
+    // otherwise persist adjacent heap data in the profile description.
+    let description: Vec<u16> = DISPLAY_NAME.encode_utf16().chain([0]).collect();
+    let icon_path: Vec<u16> = path.iter().copied().chain([0]).collect();
     let key_path: Vec<u16> = format!("{}\\InprocServer32\0", class_key())
         .encode_utf16()
         .collect();
@@ -112,16 +117,16 @@ pub fn register() -> Result<()> {
             &CLSID_RETYPE_TIP,
             LANGID_ZH_CN,
             &GUID_PROFILE_RETYPE,
-            &DISPLAY_NAME.encode_utf16().collect::<Vec<_>>(),
-            &path,
+            &description[..description.len() - 1],
+            &icon_path[..icon_path.len() - 1],
             0,
         )?;
         for category in CATEGORIES {
             categories.RegisterCategory(&CLSID_RETYPE_TIP, category, &CLSID_RETYPE_TIP)?;
         }
-        // User enablement belongs to InstallLayoutOrTip in user-profile.ps1.
-        // EnableLanguageProfile alone creates a half-enabled profile which the
-        // Settings keyboard list cannot manage correctly.
+        // user-profile.ps1 both enrolls the keyboard with InstallLayoutOrTip and
+        // enables it for the original desktop user with EnableLanguageProfile.
+        // Neither operation alone guarantees a listed, switchable keyboard.
         profiles.EnableLanguageProfileByDefault(
             &CLSID_RETYPE_TIP,
             LANGID_ZH_CN,
@@ -171,14 +176,31 @@ mod tests {
         unsafe {
             let manager: ITfInputProcessorProfileMgr =
                 CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
-            manager.ActivateProfile(
-                TF_PROFILETYPE_INPUTPROCESSOR,
-                LANGID_ZH_CN,
-                &CLSID_RETYPE_TIP,
-                &GUID_PROFILE_RETYPE,
-                HKL::default(),
-                TF_IPPMF_FORPROCESS,
-            )?;
+            let profiles: ITfInputProcessorProfiles =
+                CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
+            assert!(
+                profiles
+                    .IsEnabledLanguageProfile(
+                        &CLSID_RETYPE_TIP,
+                        LANGID_ZH_CN,
+                        &GUID_PROFILE_RETYPE
+                    )?
+                    .as_bool(),
+                "installed retype profile must be enabled before activation"
+            );
+            let _tip: ITfTextInputProcessorEx =
+                CoCreateInstance(&CLSID_RETYPE_TIP, None, CLSCTX_INPROC_SERVER)
+                    .inspect_err(|error| eprintln!("loading installed TIP failed: {error}"))?;
+            manager
+                .ActivateProfile(
+                    TF_PROFILETYPE_INPUTPROCESSOR,
+                    LANGID_ZH_CN,
+                    &CLSID_RETYPE_TIP,
+                    &GUID_PROFILE_RETYPE,
+                    HKL::default(),
+                    TF_IPPMF_FORPROCESS,
+                )
+                .inspect_err(|error| eprintln!("activating installed TIP failed: {error}"))?;
             let mut active = TF_INPUTPROCESSORPROFILE::default();
             let result = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active);
             let cleanup = manager.DeactivateProfile(
@@ -206,6 +228,16 @@ mod tests {
         unsafe {
             let profiles: ITfInputProcessorProfiles =
                 CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
+            let description = profiles.GetLanguageProfileDescription(
+                &CLSID_RETYPE_TIP,
+                LANGID_ZH_CN,
+                &GUID_PROFILE_RETYPE,
+            )?;
+            assert_eq!(
+                description.to_string(),
+                DISPLAY_NAME,
+                "registered profile name must not contain trailing heap data"
+            );
             assert!(profiles
                 .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, LANGID_ZH_CN, &GUID_PROFILE_RETYPE)?
                 .as_bool());
