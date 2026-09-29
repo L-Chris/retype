@@ -20,6 +20,15 @@ struct Frame {
     width: i32,
     height: i32,
 }
+
+/// One set of physical pixel measurements for pagination and popup drawing.
+pub struct Layout {
+    pub widths: Vec<i32>,
+    pub available: i32,
+    pub gap: i32,
+    dpi: i32,
+    viewport: i32,
+}
 fn px(value: i32, dpi: i32) -> i32 {
     (value * dpi + 48) / 96
 }
@@ -77,10 +86,26 @@ pub fn create(owner: Option<HWND>) -> Result<HWND> {
         )
     }
 }
-pub fn measure(render: &RenderState, window: Option<HWND>) -> (Vec<i32>, i32, i32) {
+pub fn measure(render: &RenderState, window: Option<HWND>, anchor: Option<RECT>) -> Layout {
     // SAFETY: Temporary GDI objects are restored and released on this thread.
     unsafe {
         let dpi = window.map(|w| GetDpiForWindow(w)).unwrap_or(96).max(96) as i32;
+        let max_width = anchor
+            .and_then(|rect| {
+                let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                GetMonitorInfoW(monitor, &mut info)
+                    .as_bool()
+                    .then_some(info.rcWork.right - info.rcWork.left - 16)
+            })
+            .unwrap_or(480);
+        let viewport = max_width.clamp(100, 480);
+        let pad = px(4, dpi);
+        let available = viewport - 2 * pad;
+        let gap = px(2, dpi);
         let dc = GetDC(window);
         let face = font(15, dpi, 400);
         let previous = SelectObject(dc, face.into());
@@ -94,13 +119,19 @@ pub fn measure(render: &RenderState, window: Option<HWND>) -> (Vec<i32>, i32, i3
                     &candidate.text.encode_utf16().collect::<Vec<_>>(),
                     &mut size,
                 );
-                (size.cx + px(29, dpi)).max(px(43, dpi))
+                (size.cx + px(22, dpi)).max(px(36, dpi)).min(available)
             })
             .collect();
         SelectObject(dc, previous);
         let _ = DeleteObject(face.into());
         ReleaseDC(window, dc);
-        (widths, 480 - px(10, dpi), px(2, dpi))
+        Layout {
+            widths,
+            available,
+            gap,
+            dpi,
+            viewport,
+        }
     }
 }
 
@@ -109,35 +140,26 @@ pub fn update(
     tip: &Arc<TipState>,
     context: &ITfContext,
     render: &RenderState,
-    max_width: i32,
+    layout: &Layout,
 ) -> (i32, i32) {
     // SAFETY: Our own HWND, only touched by its apartment; GDI resources restored before deletion.
     unsafe {
-        let dpi = GetDpiForWindow(window).max(96) as i32;
+        let dpi = layout.dpi;
         let dc = GetDC(Some(window));
         let face = font(15, dpi, 400);
         let previous = SelectObject(dc, face.into());
-        let pad = px(5, dpi);
-        let gap = px(2, dpi);
+        let pad = px(4, dpi);
+        let gap = layout.gap;
         let mut row = px(30, dpi);
-        let viewport = max_width.clamp(100, 480);
         let visible = render.visible();
-        let mut desired = Vec::with_capacity(visible.len());
-        for candidate in visible {
-            let mut size = SIZE::default();
-            let _ = GetTextExtentPoint32W(
-                dc,
-                &candidate.text.encode_utf16().collect::<Vec<_>>(),
-                &mut size,
-            );
-            desired.push((size.cx + px(29, dpi)).max(px(43, dpi)));
-        }
-        let available = viewport - pad * 2;
-        let widths: Vec<i32> = desired.iter().map(|&width| width.min(available)).collect();
+        let widths = layout
+            .widths
+            .get(render.page_start..render.page_start + visible.len())
+            .unwrap_or(&[]);
         // A single unusually long candidate wraps; ordinary phrases stay on one line.
-        for (candidate, &width) in visible.iter().zip(&widths) {
+        for (candidate, &width) in visible.iter().zip(widths) {
             let mut rect = RECT {
-                right: (width - px(24, dpi)).max(1),
+                right: (width - px(18, dpi)).max(1),
                 ..Default::default()
             };
             DrawTextW(
@@ -150,7 +172,7 @@ pub fn update(
         }
         let mut x = pad;
         let mut cells = Vec::new();
-        for width in widths {
+        for &width in widths {
             cells.push(RECT {
                 left: x,
                 top: pad,
@@ -163,7 +185,8 @@ pub fn update(
             px(60, dpi)
         } else {
             x - gap + pad
-        };
+        }
+        .min(layout.viewport);
         let height = row + pad * 2;
         SelectObject(dc, previous);
         let _ = DeleteObject(face.into());
@@ -268,8 +291,8 @@ unsafe fn paint(window: HWND, frame: &Frame) {
                 dc,
                 &(i + 1).to_string(),
                 RECT {
-                    left: cell.left + p(6),
-                    right: cell.left + p(19),
+                    left: cell.left + p(4),
+                    right: cell.left + p(16),
                     ..*cell
                 },
                 if selected { 0x00ffffff } else { 0x009a938e },
@@ -281,8 +304,8 @@ unsafe fn paint(window: HWND, frame: &Frame) {
                 &candidate.text,
                 RECT {
                     top: cell.top + p(5),
-                    left: cell.left + p(19),
-                    right: cell.right - p(5),
+                    left: cell.left + p(17),
+                    right: cell.right - p(4),
                     ..*cell
                 },
                 if selected { 0x00ffffff } else { 0x00443d34 },
@@ -356,4 +379,24 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
         DefWindowProcW(window, msg, wp, lp)
     }))
     .unwrap_or(LRESULT(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use retype_types::{Candidate, CandidateSource};
+
+    #[test]
+    fn eight_short_phrases_fit_within_the_480_pixel_limit() {
+        let render = RenderState {
+            candidates: (0..8)
+                .map(|_| Candidate::new("你好", CandidateSource::Local))
+                .collect(),
+            ..Default::default()
+        };
+        let layout = measure(&render, None, None);
+        let required = layout.widths.iter().sum::<i32>() + layout.gap * 7;
+        assert!(required <= layout.available);
+        assert_eq!(layout.viewport, 480);
+    }
 }

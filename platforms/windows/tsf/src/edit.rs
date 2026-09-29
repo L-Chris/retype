@@ -1,9 +1,10 @@
 //! Composition transactions. Never write a host document outside DoEditSession.
+use crate::stats::{self, Language};
 use crate::tip::{guarded, lock, TipState};
 
 use retype_types::{CommitRequest, InputEvent, InputSource, KernelAction, Key, Modifiers};
 use std::mem::ManuallyDrop;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::System::Variant::VARIANT;
@@ -25,6 +26,7 @@ pub(crate) struct Composition {
 #[derive(Clone, Copy)]
 pub(crate) enum Work {
     Key(Key, Modifiers),
+    Direct(char),
     Toggle,
     SetChinese(bool),
     Choose(usize, u64),
@@ -33,6 +35,9 @@ pub(crate) enum Work {
 }
 
 pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -> Result<()> {
+    let pending_counted = !matches!(work, Work::Direct(_));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicBool::new(false));
     let session: ITfEditSession = Edit {
         state: Arc::clone(state),
         context: context.clone(),
@@ -43,24 +48,37 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
         } else {
             None
         },
+        cancelled: Arc::clone(&cancelled),
+        completed: Arc::clone(&completed),
+        pending_counted,
     }
     .into();
-    state.pending.fetch_add(1, Ordering::SeqCst);
+    if pending_counted {
+        state.pending.fetch_add(1, Ordering::SeqCst);
+    }
     // SAFETY: TSF holds the COM edit session if deferred. Kernel input is not consumed
     // until a write lock is granted. ASYNCDONTCARE allows immediate or deferred execution.
     unsafe {
-        context
-            .RequestEditSession(
-                state.tid.load(Ordering::SeqCst),
-                &session,
+        let status = context.RequestEditSession(
+            state.tid.load(Ordering::SeqCst),
+            &session,
+            if matches!(work, Work::Direct(_)) {
+                TF_ES_SYNC
+            } else {
                 TF_ES_ASYNCDONTCARE
-                    | if matches!(work, Work::Refresh) {
-                        TF_ES_READ
-                    } else {
-                        TF_ES_READWRITE
-                    },
-            )?
-            .ok()
+            } | if matches!(work, Work::Refresh) {
+                TF_ES_READ
+            } else {
+                TF_ES_READWRITE
+            },
+        )?;
+        if matches!(work, Work::Direct(_)) && !completed.load(Ordering::SeqCst) {
+            // Some hosts return an asynchronous success even for TF_ES_SYNC.
+            // Cancel that deferred session and let the host receive the key.
+            cancelled.store(true, Ordering::SeqCst);
+            return Err(E_FAIL.into());
+        }
+        status.ok()
     }
 }
 #[implement(ITfEditSession)]
@@ -70,15 +88,23 @@ struct Edit {
     work: Work,
     epoch: u32,
     finishing: Option<ITfComposition>,
+    cancelled: Arc<AtomicBool>,
+    completed: Arc<AtomicBool>,
+    pending_counted: bool,
 }
 impl Drop for Edit {
     fn drop(&mut self) {
-        self.state.pending.fetch_sub(1, Ordering::SeqCst);
+        if self.pending_counted {
+            self.state.pending.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 impl ITfEditSession_Impl for Edit_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
         guarded(|| {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return Ok(());
+            }
             if !matches!(self.work, Work::Finish(_))
                 && (!self.state.is_activated()
                     || self.epoch != self.state.epoch.load(Ordering::SeqCst))
@@ -91,6 +117,9 @@ impl ITfEditSession_Impl for Edit_Impl {
             self.state.writing.store(true, Ordering::SeqCst);
             let result = guarded(|| self.run(ec));
             self.state.writing.store(false, Ordering::SeqCst);
+            if result.is_ok() && matches!(self.work, Work::Direct(_)) {
+                self.completed.store(true, Ordering::SeqCst);
+            }
             if result.is_err() {
                 // Fail closed: leave existing document text intact, release composition ownership.
                 let current = lock(&self.state.composition).clone();
@@ -117,6 +146,15 @@ impl Edit_Impl {
             }) {
                 end(state, ec, cancel)?;
                 state.reset_kernel();
+            }
+            return Ok(());
+        }
+        if let Work::Direct(ch) = self.work {
+            let text = ch.to_string();
+            replace(state, &self.context, ec, &text, false)?;
+            if countable(&self.context) {
+                stats::activity(&state.stats_clock, Language::English);
+                stats::commit(&text);
             }
             return Ok(());
         }
@@ -148,19 +186,21 @@ impl Edit_Impl {
                 }
                 InputEvent::ToggleChinese
             }
-            Work::Finish(_) | Work::Refresh => return Ok(()),
+            Work::Direct(_) | Work::Finish(_) | Work::Refresh => return Ok(()),
         };
         let actions = session.submit(event);
         if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
         }
         let mut pass = false;
+        let mut committed = Vec::new();
         for action in actions {
             match action {
                 KernelAction::Commit(
                     CommitRequest::Text(text) | CommitRequest::ReplaceComposition { text },
                 ) => {
                     replace(state, &self.context, ec, &text, false)?;
+                    committed.push(text);
                 }
                 KernelAction::Render(render) => {
                     if render.composition.is_empty() {
@@ -187,26 +227,22 @@ impl Edit_Impl {
                 end(state, ec, false)?;
                 state.reset_kernel();
                 replace(state, &self.context, ec, &literal, false)?;
+                committed.push(literal);
             }
         }
-        self.refresh(ec)
+        self.refresh(ec)?;
+        if countable(&self.context) && !matches!(self.work, Work::Key(Key::Enter, _)) {
+            for text in committed {
+                stats::commit(&text);
+            }
+        }
+        Ok(())
     }
     fn refresh(&self, ec: u32) -> Result<()> {
         let state = &self.state;
         let Some(session) = state.session() else {
             return Ok(());
         };
-        let initial = session.backend.with_kernel(|k| k.render_state());
-        // Use the same measured widths for navigation and drawing.
-        let owner = unsafe {
-            self.context
-                .GetActiveView()
-                .and_then(|view| view.GetWnd())
-                .ok()
-        };
-        let (widths, available, gap) = crate::popup::measure(&initial, owner);
-        session.backend.layout_candidates(&widths, available, gap);
-        let render = session.backend.with_kernel(|k| k.render_state());
         let c = lock(&state.composition).clone();
         if let Some(c) = c {
             if c.context != self.context {
@@ -224,12 +260,25 @@ impl Edit_Impl {
                     .is_ok()
                     && !clipped.as_bool())
                 .then_some(rect);
+                let initial = session.backend.with_kernel(|k| k.render_state());
+                let owner = self
+                    .context
+                    .GetActiveView()
+                    .and_then(|view| view.GetWnd())
+                    .ok()
+                    .filter(|window| !window.is_invalid());
+                // Pagination and drawing share these physical pixel measurements.
+                let layout = crate::popup::measure(&initial, owner, anchor);
+                session
+                    .backend
+                    .layout_candidates(&layout.widths, layout.available, layout.gap);
+                let render = session.backend.with_kernel(|k| k.render_state());
                 let manager = lock(&state.thread_mgr).clone();
                 let window = lock(&state.window).take();
                 if let Some(mut window) = window {
                     if let Some(manager) = manager {
                         if let Err(error) =
-                            window.update(state, &manager, &self.context, &render, anchor)
+                            window.update(state, &manager, &self.context, &render, anchor, &layout)
                         {
                             tracing::warn!("TSF candidate UI update failed: {error}");
                         }
@@ -240,6 +289,12 @@ impl Edit_Impl {
         }
         Ok(())
     }
+}
+
+fn countable(ctx: &ITfContext) -> bool {
+    // A host that cannot promise there is no hidden text is not counted.
+    // SAFETY: This reads context metadata under its current TSF edit session.
+    unsafe { ctx.GetStatus() }.is_ok_and(|status| status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0)
 }
 
 fn replace(

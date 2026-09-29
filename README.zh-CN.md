@@ -13,6 +13,7 @@
 - 内置万象 Base 词库，使用逐词注音和词组权重。
 - 紧凑横排候选窗，支持键盘和鼠标选词。
 - 点击语言栏图标切换中文和英文。
+- 设置中可查看中文、英文分别统计的输入量、速度和最近 7 天趋势；不会保存输入内容。
 - 设置的「关于」页支持每日检查、跳过版本、校验下载，以及用户确认后安装。
 
 M1 桌面预览已通过独立 RichEdit 输入测试。常用应用及现代 Windows 应用环境的兼容性仍在验收，详见 [验证记录](docs/m1-validation.md)。
@@ -21,7 +22,7 @@ M1 桌面预览已通过独立 RichEdit 输入测试。常用应用及现代 Win
 
 从 [最新发布页面](https://github.com/L-Chris/retype/releases/latest)下载安装包，内含 64 位和 32 位输入组件。如果旧安装器留下待重启操作，请先完成重启再升级。
 
-按 `Win+Space` 选择 **retype**。全拼输入 `nihao`，或用小鹤双拼输入 `nihc`，再按空格上屏“你好”。单按 Shift，或点击品牌图标左侧的模式图标，可切换中英文；组字时按 `-`、`=` 翻候选页，按 `1`–`8` 选择当前页候选。右键模式图标选择“设置”，即可切换拼音方案或检查更新。更新后重新打开正在使用输入法的应用，即可加载新版组件。
+按 `Win+Space` 选择 **retype**。全拼输入 `nihao`，或用小鹤双拼输入 `nihc`，再按空格上屏“你好”。单按 Shift，或点击品牌图标左侧的模式图标，可切换中英文；组字时按 `-`、`=` 翻候选页，按 `1`–`8` 选择当前页候选。右键模式图标选择“设置”，即可切换拼音方案、查看输入统计或检查更新。更新后重新打开正在使用输入法的应用，即可加载新版组件。
 
 ## 从源码构建
 
@@ -33,7 +34,7 @@ cargo test --workspace
 .\platforms\windows\installer\build.ps1 -Installer -SkipDict -NoTest
 ```
 
-终端调试方法与构建踩坑见 [开发笔记](docs/development-notes.md)。Rust 内核、TSF 适配层、词库和更新流程分别见 [架构文档](ARCHITECTURE.md)、[Windows TSF](docs/windows-tsf.md)、[词库](docs/dict.md) 和 [自动更新](docs/auto-update.md)。
+终端调试方法与构建踩坑见 [开发笔记](docs/development-notes.md)。Rust 内核、TSF 适配层、词库、输入统计和更新流程分别见 [架构文档](ARCHITECTURE.md)、[Windows TSF](docs/windows-tsf.md)、[词库](docs/dict.md)、[输入统计](docs/typing-statistics.md) 和 [自动更新](docs/auto-update.md)。
 
 ## 里程碑
 

@@ -13,6 +13,7 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 - A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
+- Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.
 - Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
 
 The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility across common applications and modern Windows app environments is still being evaluated; see the [validation record](docs/m1-validation.md).
@@ -21,7 +22,7 @@ The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility
 
 Download the Windows installer from the [latest release](https://github.com/L-Chris/retype/releases/latest). It includes both 64-bit and 32-bit input components. If an earlier installer has a pending restart, complete that restart before upgrading.
 
-Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme or check for updates. Reopen applications that were already running after an update so they load the new input component.
+Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme, view typing statistics, or check for updates. Reopen applications that were already running after an update so they load the new input component.
 
 ## Build from source
 
@@ -33,7 +34,7 @@ cargo test --workspace
 .\platforms\windows\installer\build.ps1 -Installer -SkipDict -NoTest
 ```
 
-The [developer notes](docs/development-notes.md) cover the terminal input tool and build pitfalls. The Rust engine, TSF adapter, dictionary pipeline, and update design are documented in [ARCHITECTURE.md](ARCHITECTURE.md), [Windows TSF](docs/windows-tsf.md), [dictionary](docs/dict.md), and [automatic updates](docs/auto-update.md).
+The [developer notes](docs/development-notes.md) cover the terminal input tool and build pitfalls. The Rust engine, TSF adapter, dictionary pipeline, typing statistics, and update design are documented in [ARCHITECTURE.md](ARCHITECTURE.md), [Windows TSF](docs/windows-tsf.md), [dictionary](docs/dict.md), [typing statistics](docs/typing-statistics.md), and [automatic updates](docs/auto-update.md).
 
 ## Milestones
 

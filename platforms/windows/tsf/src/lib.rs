@@ -27,6 +27,7 @@ mod preferences;
 mod registration;
 mod search;
 pub mod session;
+mod stats;
 pub mod tip;
 
 use class_factory::ClassFactory;

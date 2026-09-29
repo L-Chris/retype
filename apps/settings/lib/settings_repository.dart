@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+import 'statistics_store.dart';
+
 enum PinyinScheme { full, xiaohe }
 
 class SettingsSnapshot {
@@ -33,6 +35,9 @@ abstract class SettingsRepository {
   Future<SettingsSnapshot> load();
   Future<void> setScheme(PinyinScheme scheme);
   Future<void> setAutoCheck(bool value);
+  Future<StatisticsSnapshot> loadStatistics();
+  Future<void> setStatisticsEnabled(bool value);
+  Future<void> clearStatistics();
   Future<UpdateOffer> checkUpdates(String currentVersion);
   Future<String> downloadUpdate(String expectedVersion);
   Future<int> installUpdate(String path);
@@ -49,6 +54,7 @@ abstract class SettingsRepository {
 class WindowsSettingsRepository implements SettingsRepository {
   const WindowsSettingsRepository();
   static const _channel = MethodChannel('retype/settings');
+  static StatisticsStore? _statisticsStoreInstance;
 
   Future<String> _installationDirectory() async {
     final values = await _channel.invokeMapMethod<String, Object?>(
@@ -128,6 +134,32 @@ class WindowsSettingsRepository implements SettingsRepository {
   @override
   Future<void> setAutoCheck(bool value) =>
       _channel.invokeMethod('setAutoCheck', value);
+  StatisticsStore _statisticsStore() {
+    final root = Platform.environment['LOCALAPPDATA'];
+    if (root == null || root.isEmpty) {
+      throw StateError('无法找到本地统计目录');
+    }
+    return _statisticsStoreInstance ??= StatisticsStore(
+      Directory('$root\\retype\\statistics'),
+    );
+  }
+
+  @override
+  Future<StatisticsSnapshot> loadStatistics() async {
+    final values = await _channel.invokeMapMethod<String, Object?>(
+      'getSettings',
+    );
+    return _statisticsStore().load(
+      enabled: values?['statisticsEnabled'] != false,
+    );
+  }
+
+  @override
+  Future<void> setStatisticsEnabled(bool value) =>
+      _channel.invokeMethod('setStatisticsEnabled', value);
+
+  @override
+  Future<void> clearStatistics() => _statisticsStore().clear();
   @override
   Future<UpdateOffer> checkUpdates(String currentVersion) async {
     final result = await _runUpdater([

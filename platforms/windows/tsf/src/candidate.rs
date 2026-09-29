@@ -43,6 +43,7 @@ impl CandidateWindow {
         ctx: &ITfContext,
         state: &RenderState,
         anchor: Option<RECT>,
+        layout: &crate::popup::Layout,
     ) -> Result<()> {
         *self.data.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
         if state.composition.is_empty() || state.candidates.is_empty() {
@@ -141,13 +142,7 @@ impl CandidateWindow {
                 };
                 let has_monitor =
                     windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut info).as_bool();
-                let max_width = if has_monitor {
-                    info.rcWork.right - info.rcWork.left - 16
-                } else {
-                    960
-                };
-                let (width, height) =
-                    crate::popup::update(window, tip, ctx, state, max_width.max(100));
+                let (width, height) = crate::popup::update(window, tip, ctx, state, layout);
                 let (mut x, mut y) = (anchor.left, anchor.bottom + 4);
                 if has_monitor {
                     x = x

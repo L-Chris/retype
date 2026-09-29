@@ -124,9 +124,15 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
             }
         }
         candidates.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
+            // Compare dictionary evidence per syllable. Whole-phrase log
+            // probabilities otherwise lose to a high-frequency single word
+            // merely because they cover more of the typed input.
+            let rank =
+                |candidate: &Candidate| candidate.score / candidate.syllable_len.max(1) as f32;
+            rank(b)
+                .partial_cmp(&rank(a))
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.consumed.cmp(&a.consumed))
                 .then_with(|| a.text.cmp(&b.text))
         });
         let mut seen = HashSet::new();

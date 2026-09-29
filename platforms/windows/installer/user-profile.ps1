@@ -102,6 +102,21 @@ if (-not $Uninstall) {
     [Security.AccessControl.AccessControlType]::Allow)
   $acl.SetAccessRule($read)
   Set-Acl -Path $preferences -AclObject $acl
+
+  # The TIP runs inside desktop and AppContainer hosts. Give the dedicated
+  # count-only directory (not the whole retype data tree) write access, and
+  # publish its real user path since AppContainer LOCALAPPDATA is redirected.
+  $statistics = Join-Path $env:LOCALAPPDATA 'retype\statistics'
+  New-Item -ItemType Directory -Path $statistics -Force | Out-Null
+  $statsAcl = Get-Acl -LiteralPath $statistics
+  $statsWrite = [Security.AccessControl.FileSystemAccessRule]::new($packages,
+    [Security.AccessControl.FileSystemRights]'Read, Write',
+    [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow)
+  $statsAcl.SetAccessRule($statsWrite)
+  Set-Acl -LiteralPath $statistics -AclObject $statsAcl
+  Set-ItemProperty -Path $preferences -Name 'StatisticsPath' -Value $statistics
 }
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
 if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {

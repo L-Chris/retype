@@ -21,6 +21,7 @@ struct Data {
     sink: Option<ITextStoreACPSink>,
     reject: bool,
     defer: bool,
+    hidden: bool,
     no_text_extent: bool,
     deferred_flags: Option<u32>,
 }
@@ -62,7 +63,11 @@ impl ITextStoreACP_Impl for Store_Impl {
     fn GetStatus(&self) -> windows_core::Result<TS_STATUS> {
         Ok(TS_STATUS {
             dwDynamicFlags: 0,
-            dwStaticFlags: TS_SS_NOHIDDENTEXT,
+            dwStaticFlags: if lock(&self.data).hidden {
+                0
+            } else {
+                TS_SS_NOHIDDENTEXT
+            },
         })
     }
     fn QueryInsert(
@@ -549,6 +554,33 @@ fn run_host() -> Result<()> {
         assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        let text_before = lock(&data).text.len();
+        let letter = WPARAM('Z' as usize);
+        assert!(keys.OnTestKeyDown(&context, letter, lp)?.as_bool());
+        assert!(keys.OnKeyDown(&context, letter, lp)?.as_bool());
+        assert_eq!(lock(&data).text.len(), text_before + 1);
+        // Printable English goes through a synchronous edit so it can only be
+        // counted after actual insertion, while rejected hosts retain their key.
+        request(&state, &context, Work::Direct('A'))?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('A'));
+        lock(&data).reject = true;
+        assert!(request(&state, &context, Work::Direct('B')).is_err());
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('A'));
+        lock(&data).reject = false;
+        lock(&data).defer = true;
+        assert!(request(&state, &context, Work::Direct('C')).is_err());
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('A'));
+        let flags = lock(&data)
+            .deferred_flags
+            .take()
+            .expect("deferred English lock");
+        lock(&data).defer = false;
+        let sink = lock(&data).sink.clone().expect("advised sink");
+        sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags))?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('A'));
+        assert_eq!(state.pending.load(Ordering::SeqCst), 0);
+        lock(&data).hidden = true;
+        assert!(!keys.OnTestKeyDown(&context, letter, lp)?.as_bool());
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;

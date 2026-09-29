@@ -1,5 +1,5 @@
 //! Windows TSF lifecycle and keyboard routing. Text changes run under TSF edit locks.
-use crate::{candidate::CandidateWindow, display, edit, keymap, session::Session};
+use crate::{candidate::CandidateWindow, display, edit, keymap, session::Session, stats};
 
 use retype_types::{InputEvent, InputSource, Key, Modifiers};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -61,6 +61,7 @@ pub struct TipState {
     language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
     shift_tap: Mutex<ShiftTap>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
+    pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }
 impl TipState {
     #[allow(clippy::arc_with_non_send_sync)]
@@ -80,6 +81,7 @@ impl TipState {
             language_bar: Mutex::new(None),
             shift_tap: Mutex::new(ShiftTap::default()),
             mode_bridge: Mutex::new(None),
+            stats_clock: Mutex::new(stats::ActivityClock::default()),
         })
     }
     pub fn activate(
@@ -150,6 +152,7 @@ impl TipState {
     pub fn deactivate(self: &Arc<Self>) -> Result<()> {
         self.activated.store(false, Ordering::SeqCst);
         *lock(&self.shift_tap) = ShiftTap::default();
+        lock(&self.stats_clock).reset();
         let bridge = lock(&self.mode_bridge).take();
         drop(bridge);
         self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -362,6 +365,7 @@ impl ITfThreadMgrEventSink_Impl for FocusSink_Impl {
     ) -> Result<()> {
         guarded(|| {
             if let Some(state) = self.state.upgrade() {
+                lock(&state.stats_clock).reset();
                 let current = lock(&state.composition).clone();
                 if let Some(current) = current {
                     // SAFETY: Read document identity only; writes are requested separately.
@@ -402,6 +406,7 @@ impl ITfThreadFocusSink_Impl for FocusSink_Impl {
         guarded(|| {
             if let Some(state) = self.state.upgrade() {
                 *lock(&state.shift_tap) = ShiftTap::default();
+                lock(&state.stats_clock).reset();
                 state.epoch.fetch_add(1, Ordering::SeqCst);
                 state.finish(false);
             }
@@ -425,10 +430,10 @@ impl KeyEventSink_Impl {
             return Ok(false.into());
         };
         // SAFETY: Reading context status does not acquire a document write lock.
-        if unsafe { ctx.GetStatus() }
-            .map(|s| s.dwDynamicFlags & TS_SD_READONLY != 0)
-            .unwrap_or(true)
-        {
+        let Ok(status) = (unsafe { ctx.GetStatus() }) else {
+            return Ok(false.into());
+        };
+        if status.dwDynamicFlags & TS_SD_READONLY != 0 {
             return Ok(false.into());
         }
         let Some(key) =
@@ -442,8 +447,23 @@ impl KeyEventSink_Impl {
             mods = mods.union(Modifiers::SHIFT);
         }
         let wanted = state.wants(key, mods);
+        let direct = !wanted
+            && status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0
+            && state.session().is_some_and(|session| !session.shadow)
+            && mods.is_plain()
+            && matches!(key, Key::Char(ch) if ch.is_ascii_alphabetic());
         if test {
-            return Ok(wanted.into());
+            return Ok((wanted || direct).into());
+        }
+        if direct {
+            let Key::Char(ch) = key else {
+                return Ok(false.into());
+            };
+            // English text is counted only if the synchronous TSF write succeeded.
+            // If a host refuses a synchronous edit, let it handle the key normally.
+            return Ok(edit::request(&state, ctx, edit::Work::Direct(ch))
+                .is_ok()
+                .into());
         }
         if !wanted {
             // End existing composition before shortcuts, navigation or English passthrough.
@@ -451,7 +471,12 @@ impl KeyEventSink_Impl {
             return Ok(false.into());
         }
         match edit::request(&state, ctx, edit::Work::Key(key, mods)) {
-            Ok(()) => Ok(true.into()),
+            Ok(()) => {
+                if status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0 {
+                    stats::activity(&state.stats_clock, stats::Language::Chinese);
+                }
+                Ok(true.into())
+            }
             Err(e) => {
                 tracing::warn!("TSF edit request rejected: {e}");
                 Ok(false.into())

@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'settings_repository.dart';
+import 'statistics_store.dart';
 
 void main(List<String> arguments) =>
     runApp(RetypeApp(openUpdates: arguments.contains('--updates')));
@@ -25,12 +26,17 @@ class RetypeApp extends StatefulWidget {
 
 class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
   static const _channel = MethodChannel('retype/settings');
+  final _navigatorKey = GlobalKey<NavigatorState>();
   late final SettingsRepository repository =
       widget.repository ?? const WindowsSettingsRepository();
   SettingsSnapshot? settings;
+  StatisticsSnapshot? statistics;
   String? error;
   bool saving = false;
-  late int page = widget.openUpdates ? 1 : 0;
+  bool loadingStatistics = false;
+  int statisticsRequest = 0;
+  Timer? statisticsTimer;
+  late int page = widget.openUpdates ? 2 : 0;
   bool initialUpdateCheckDone = false;
   bool checkingUpdate = false;
   bool installingUpdate = false;
@@ -43,7 +49,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
     if (widget.repository == null) {
       _channel.setMethodCallHandler((call) async {
         if (call.method == 'showUpdates' && mounted) {
-          setState(() => page = 1);
+          _selectPage(2);
           await _checkUpdate();
         }
       });
@@ -54,6 +60,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    statisticsTimer?.cancel();
     if (widget.repository == null) _channel.setMethodCallHandler(null);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -61,7 +68,89 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && !saving) _load();
+    if (state == AppLifecycleState.resumed && !saving) {
+      _load();
+      if (page == 1) {
+        _refreshStatistics();
+        _startStatisticsTimer();
+      }
+    } else if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      statisticsTimer?.cancel();
+      statisticsTimer = null;
+    }
+  }
+
+  void _startStatisticsTimer() {
+    statisticsTimer?.cancel();
+    statisticsTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _refreshStatistics(),
+    );
+  }
+
+  void _selectPage(int index) {
+    if (page != index) setState(() => page = index);
+    statisticsTimer?.cancel();
+    statisticsTimer = null;
+    if (index == 1) {
+      _refreshStatistics();
+      _startStatisticsTimer();
+    }
+  }
+
+  Future<void> _refreshStatistics({bool force = false}) async {
+    if ((loadingStatistics && !force) || !mounted) return;
+    final request = ++statisticsRequest;
+    loadingStatistics = true;
+    try {
+      final value = await repository.loadStatistics();
+      if (mounted && request == statisticsRequest) {
+        setState(() => statistics = value);
+      }
+    } catch (e) {
+      if (mounted && request == statisticsRequest) {
+        setState(() => error = '读取统计失败：$e');
+      }
+    } finally {
+      if (request == statisticsRequest) loadingStatistics = false;
+    }
+  }
+
+  Future<void> _setStatisticsEnabled(bool value) async {
+    try {
+      await repository.setStatisticsEnabled(value);
+      await _refreshStatistics(force: true);
+    } catch (e) {
+      if (mounted) setState(() => error = '保存统计设置失败：$e');
+    }
+  }
+
+  Future<void> _clearStatistics() async {
+    final confirmed = await showDialog<bool>(
+      context: _navigatorKey.currentContext!,
+      builder: (context) => AlertDialog(
+        title: const Text('清空统计数据？'),
+        content: const Text('今日和历史的输入数量及速度记录会清空。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await repository.clearStatistics();
+      await _refreshStatistics(force: true);
+    } catch (e) {
+      if (mounted) setState(() => error = '清空统计失败：$e');
+    }
   }
 
   Future<void> _load() async {
@@ -221,6 +310,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
+    navigatorKey: _navigatorKey,
     title: 'retype 设置',
     debugShowCheckedModeBanner: false,
     locale: const Locale('zh', 'CN'),
@@ -270,6 +360,8 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
                             )
                           : page == 0
                           ? _inputPage(settings!)
+                          : page == 1
+                          ? _statisticsPage()
                           : _aboutPage(settings!),
                     ),
                   ],
@@ -336,7 +428,9 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
           ),
           _navItem(0, Icons.keyboard_outlined, '输入'),
           const SizedBox(height: 8),
-          _navItem(1, Icons.info_outline_rounded, '关于'),
+          _navItem(1, Icons.bar_chart_rounded, '统计'),
+          const SizedBox(height: 8),
+          _navItem(2, Icons.info_outline_rounded, '关于'),
           const Spacer(),
           const Padding(
             padding: EdgeInsets.fromLTRB(26, 0, 0, 24),
@@ -359,7 +453,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () => setState(() => page = index),
+        onTap: () => _selectPage(index),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 14),
           child: Row(
@@ -471,6 +565,265 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
       ),
     ),
   );
+
+  Widget _statisticsPage() => SingleChildScrollView(
+    padding: const EdgeInsets.symmetric(horizontal: 46, vertical: 46),
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 650),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '统计',
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              '记录使用 retype 上屏的中英文字符，不保存输入内容。',
+              style: TextStyle(color: _muted),
+            ),
+            const SizedBox(height: 30),
+            if (statistics == null)
+              const Center(child: CircularProgressIndicator())
+            else ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: _statisticsCountCard(
+                      '今日输入',
+                      statistics!.todayTotal,
+                      statistics!.todayChinese,
+                      statistics!.todayEnglish,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _statisticsCountCard(
+                      '累计输入',
+                      statistics!.total,
+                      statistics!.totalChinese,
+                      statistics!.totalEnglish,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              _card(
+                Padding(
+                  padding: const EdgeInsets.all(22),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '当前速度',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      const Text(
+                        '最近 5 分钟的有效输入时间',
+                        style: TextStyle(fontSize: 12, color: _muted),
+                      ),
+                      const SizedBox(height: 18),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _speedValue(
+                              '中文',
+                              statistics!.chinesePerMinute,
+                            ),
+                          ),
+                          Container(width: 1, height: 46, color: _border),
+                          Expanded(
+                            child: _speedValue(
+                              '英文',
+                              statistics!.englishPerMinute,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      const Text(
+                        '输入至少 10 个字符、累计 10 秒后显示速度。',
+                        style: TextStyle(fontSize: 12, color: _muted),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              _card(
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '最近 7 天',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      const Text(
+                        '每天上屏的中文与英文字符',
+                        style: TextStyle(fontSize: 12, color: _muted),
+                      ),
+                      const SizedBox(height: 18),
+                      _weekChart(statistics!.week),
+                      const SizedBox(height: 12),
+                      const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.circle, size: 10, color: _accent),
+                          SizedBox(width: 5),
+                          Text('中文', style: TextStyle(fontSize: 12)),
+                          SizedBox(width: 20),
+                          Icon(
+                            Icons.circle,
+                            size: 10,
+                            color: Color(0xFF73B9D2),
+                          ),
+                          SizedBox(width: 5),
+                          Text('英文', style: TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              _card(
+                Column(
+                  children: [
+                    SwitchListTile.adaptive(
+                      value: statistics!.enabled,
+                      onChanged: _setStatisticsEnabled,
+                      title: const Text('记录输入统计'),
+                      subtitle: const Text('只保存数量和活跃时间；密码及受保护输入不统计。'),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                      ),
+                    ),
+                    const Divider(height: 1, color: _border),
+                    _actionRow(
+                      Icons.delete_outline,
+                      '清空统计数据',
+                      _clearStatistics,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                '从启用统计后开始累计；数字、空格、标点和粘贴内容不计入。',
+                style: TextStyle(fontSize: 12, color: _muted),
+              ),
+            ],
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _statisticsCountCard(
+    String title,
+    int total,
+    int chinese,
+    int english,
+  ) => _card(
+    Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontSize: 14, color: _muted)),
+          const SizedBox(height: 10),
+          Text(
+            '$total',
+            style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '中文 $chinese  ·  英文 $english',
+            style: const TextStyle(fontSize: 12, color: _muted),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _speedValue(String language, int? speed) => Column(
+    children: [
+      Text(language, style: const TextStyle(fontSize: 13, color: _muted)),
+      const SizedBox(height: 6),
+      Text(
+        speed == null ? '—' : '$speed',
+        style: const TextStyle(fontSize: 25, fontWeight: FontWeight.w700),
+      ),
+      Text(
+        language == '中文' ? '字/分钟' : '字符/分钟',
+        style: const TextStyle(fontSize: 12, color: _muted),
+      ),
+    ],
+  );
+
+  Widget _weekChart(List<DailyStatistics> week) {
+    final largest = week.fold<int>(
+      0,
+      (max, day) => day.total > max ? day.total : max,
+    );
+    return Row(
+      children: [
+        for (final day in week)
+          Expanded(
+            child: Tooltip(
+              message:
+                  '${day.date.month}/${day.date.day}：中文 ${day.chinese}，英文 ${day.english}',
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 78,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        if (day.english > 0)
+                          Container(
+                            width: 22,
+                            height: 70 * day.english / largest,
+                            color: const Color(0xFF73B9D2),
+                          ),
+                        if (day.chinese > 0)
+                          Container(
+                            width: 22,
+                            height: 70 * day.chinese / largest,
+                            decoration: const BoxDecoration(
+                              color: _accent,
+                              borderRadius: BorderRadius.vertical(
+                                bottom: Radius.circular(4),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${day.date.month}/${day.date.day}',
+                    style: const TextStyle(fontSize: 11, color: _muted),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
 
   Widget _aboutPage(SettingsSnapshot state) => SingleChildScrollView(
     padding: const EdgeInsets.symmetric(horizontal: 46, vertical: 38),

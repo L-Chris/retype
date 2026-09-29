@@ -1,0 +1,9 @@
+# Typing statistics
+
+Settings > Statistics shows counts for text committed through retype. Chinese counts include Han characters (including extension blocks); English counts include ASCII letters. Each committed character contributes once. Digits, spaces, punctuation, raw Pinyin entered with Enter, clipboard paste, and text from another input method are excluded. Deleting previously committed text does not subtract from the count.
+
+Chinese candidates are counted only after the TSF commit succeeds. Printable English letters in retype's English mode use a synchronous TSF edit. If a host refuses that edit, the original key is passed to the host and cannot be counted accurately. Statistics are also disabled for contexts that do not explicitly report that they contain no hidden text. This keeps password and protected input out of the counter, but some applications may therefore show lower totals than the number of keys pressed.
+
+Each speed is calculated separately from characters committed in the last five minutes divided by active input time for that language. Gaps longer than 15 seconds are excluded. A speed appears after at least ten characters and ten seconds of activity, and disappears after 30 seconds without a commit. The seven-day chart uses the current local time zone; earlier days remain stored locally until cleared.
+
+The TSF adapter queues numeric deltas, and a background worker writes timestamp, Chinese count, English count, and active milliseconds to `%LOCALAPPDATA%\retype\statistics`. No text, key names, or application names are written or sent over the network. Settings can pause collection or clear the history. The installer grants AppContainer hosts access only to this count directory, so Windows Search and desktop apps can contribute to the same local history.

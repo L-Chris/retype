@@ -226,6 +226,32 @@ mod tests {
     }
 
     #[test]
+    fn flypy_odd_length_prefers_all_typed_keys_over_a_high_frequency_prefix() {
+        let mut lex = TestLex::default();
+        lex.add("我", "wo", -6.0);
+        lex.add("握", "wo", -8.0);
+        lex.add("我是", "wo shi", -8.5);
+        lex.add("我是啊", "wo shi a", -10.5);
+        let opts = DecodeOptions::default();
+
+        let three = shuangpin::decode("wou", &lex, &opts);
+        assert_eq!(three.candidates[0].text, "我是");
+        assert_eq!(three.candidates[0].consumed, 3);
+        assert!(three
+            .candidates
+            .iter()
+            .any(|c| c.text == "我" && c.consumed == 2));
+
+        let five = shuangpin::decode("wouia", &lex, &opts);
+        assert_eq!(five.candidates[0].text, "我是啊");
+        assert_eq!(five.candidates[0].consumed, 5);
+        assert!(five
+            .candidates
+            .iter()
+            .any(|c| c.text == "我是" && c.consumed == 4));
+    }
+
+    #[test]
     fn unmatched_suffix_stays_out_of_clean_prefix_candidates() {
         let mut lex = TestLex::default();
         lex.add("我", "wo", -1.0);

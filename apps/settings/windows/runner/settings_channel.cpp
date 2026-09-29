@@ -106,6 +106,10 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
           values[flutter::EncodableValue("autoCheck")] =
               has_auto_check ? flutter::EncodableValue(auto_check != 0)
                              : flutter::EncodableValue();
+          DWORD statistics_enabled = 1;
+          ReadDword(L"StatisticsEnabled", &statistics_enabled);
+          values[flutter::EncodableValue("statisticsEnabled")] =
+              flutter::EncodableValue(statistics_enabled != 0);
           auto version = ReadInstalledString(L"Version");
           values[flutter::EncodableValue("version")] =
               flutter::EncodableValue(Utf8(version.empty() ? L"开发版本" : version));
@@ -180,6 +184,17 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
             result->Error("invalid_argument", "Invalid update preference");
           } else if (!WriteDword(L"AutoCheck", *value ? 1 : 0)) {
             result->Error("registry", "Could not save update preference");
+          } else {
+            result->Success();
+          }
+          return;
+        }
+        if (method == "setStatisticsEnabled") {
+          const auto* value = std::get_if<bool>(call.arguments());
+          if (!value) {
+            result->Error("invalid_argument", "Invalid statistics preference");
+          } else if (!WriteDword(L"StatisticsEnabled", *value ? 1 : 0)) {
+            result->Error("registry", "Could not save statistics preference");
           } else {
             result->Success();
           }
