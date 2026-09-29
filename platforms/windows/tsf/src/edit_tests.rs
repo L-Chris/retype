@@ -441,11 +441,36 @@ fn run_host() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let (dict, _) = retype_dict::from_pairs([
+            ("脚", "jiao", 100.0),
+            ("脚注", "jiao zhu", 1000.0),
             ("你好", "ni hao", 10000.0),
             ("你", "ni", 100.0),
             ("好", "hao", 100.0),
         ]);
         session.dict.install(Arc::new(dict));
+        // Optional packs are themselves layered, including when none are enabled.
+        session
+            .packs
+            .install(Arc::new(retype_dict::LayeredDict::new()));
+        session.user.boost(
+            &retype_dict::annotate::parse_pinyin("jiao zhu").unwrap(),
+            "脚注",
+            1.0,
+        );
+        session.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Flypy,
+        ));
+        *lock(&state.session) = Some(Arc::clone(&session));
+        for (index, ch) in "jnvu".chars().enumerate() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+            assert_eq!(
+                String::from_utf16_lossy(&lock(&data).text),
+                &"jnvu"[..index + 1],
+                "every Flypy keystroke must reach the host document"
+            );
+        }
+        assert!(lock(&seen_candidates).iter().any(|word| word == "脚注"));
+        request(&state, &context, Work::Key(Key::Escape, Modifiers::NONE))?;
         session.submit(InputEvent::SetPinyinScheme(
             retype_types::PinyinScheme::Full,
         ));

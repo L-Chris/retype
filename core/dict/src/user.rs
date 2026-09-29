@@ -205,6 +205,7 @@ impl LayeredDict {
 
 impl Lexicon for LayeredDict {
     fn lookup(&self, syllables: &[SyllableId], out: &mut Vec<LexEntry>) {
+        let appended_start = out.len();
         for layer in &self.layers {
             let start = out.len();
             layer.dict.lookup(syllables, out);
@@ -213,7 +214,7 @@ impl Lexicon for LayeredDict {
             }
         }
         // 同一个词可能同时出现在系统层和用户层，保留分数更高的那条
-        dedup_keeping_best(out);
+        dedup_keeping_best(out, appended_start);
     }
 
     fn has_prefix(&self, syllables: &[SyllableId]) -> bool {
@@ -221,6 +222,7 @@ impl Lexicon for LayeredDict {
     }
 
     fn lookup_initials(&self, initials: &[u8], out: &mut Vec<LexEntry>) {
+        let appended_start = out.len();
         for layer in &self.layers {
             let start = out.len();
             layer.dict.lookup_initials(initials, out);
@@ -228,7 +230,7 @@ impl Lexicon for LayeredDict {
                 e.logp += layer.boost;
             }
         }
-        dedup_keeping_best(out);
+        dedup_keeping_best(out, appended_start);
     }
 
     fn len(&self) -> usize {
@@ -236,12 +238,12 @@ impl Lexicon for LayeredDict {
     }
 }
 
-fn dedup_keeping_best(out: &mut Vec<LexEntry>) {
-    if out.len() < 2 {
-        return;
-    }
-    for i in (0..out.len()).rev() {
-        let best = (0..i).find(|&j| out[j].text == out[i].text);
+fn dedup_keeping_best(out: &mut Vec<LexEntry>, start: usize) {
+    // Lexicon queries append: entries supplied by the caller belong to another
+    // query/layer. A nested LayeredDict must never remove or reweight them,
+    // otherwise its parent can lose entries and slice past the shortened buffer.
+    for i in (start..out.len()).rev() {
+        let best = (start..i).find(|&j| out[j].text == out[i].text);
         if let Some(j) = best {
             if out[j].logp < out[i].logp {
                 out[j].logp = out[i].logp;
@@ -317,6 +319,70 @@ mod tests {
         let layered = LayeredDict::with_system_and_user(sys, user, 0.0);
         assert!(layered.has_prefix(&ids("ni hao")));
         assert!(!layered.has_prefix(&ids("zhuang")));
+    }
+
+    #[derive(Debug)]
+    struct FixedLexicon;
+
+    impl Lexicon for FixedLexicon {
+        fn lookup(&self, _: &[SyllableId], out: &mut Vec<LexEntry>) {
+            out.push(LexEntry::new("脚注", -10.0));
+        }
+
+        fn lookup_initials(&self, _: &[u8], out: &mut Vec<LexEntry>) {
+            self.lookup(&[], out);
+        }
+
+        fn len(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn nested_layers_append_without_changing_previous_results() {
+        // Before the optional nested layer, system and user results still contain
+        // duplicates. Even an empty nested layer must leave those entries alone.
+        for populated in [false, true] {
+            let mut nested = LayeredDict::new();
+            if populated {
+                for boost in [1.0, 3.0] {
+                    nested.push(Layer {
+                        name: "pack",
+                        dict: Arc::new(FixedLexicon),
+                        boost,
+                    });
+                }
+            }
+            let mut outer = LayeredDict::new();
+            for boost in [0.0, 2.0] {
+                outer.push(Layer {
+                    name: "base",
+                    dict: Arc::new(FixedLexicon),
+                    boost,
+                });
+            }
+            outer.push(Layer {
+                name: "optional",
+                dict: Arc::new(nested),
+                boost: 4.0,
+            });
+            for initials in [false, true] {
+                let mut out = vec![
+                    LexEntry::new("脚注", -1.0).with_flags(1),
+                    LexEntry::new("脚注", -2.0).with_flags(2),
+                ];
+                if initials {
+                    outer.lookup_initials(b"jz", &mut out);
+                } else {
+                    outer.lookup(&ids("jiao zhu"), &mut out);
+                }
+                assert_eq!(out.len(), 3);
+                assert_eq!((out[0].logp, out[0].flags), (-1.0, 1));
+                assert_eq!((out[1].logp, out[1].flags), (-2.0, 2));
+                assert_eq!(&*out[2].text, "脚注");
+                assert_eq!(out[2].logp, if populated { -3.0 } else { -8.0 });
+            }
+        }
     }
 
     #[test]
