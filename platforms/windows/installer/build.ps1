@@ -36,7 +36,7 @@ Set-Location $repoRoot
 function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 
 Step "1/5 构建 TIP DLL 与调试台（release）"
-cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli
+cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
 if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
 rustup target add i686-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw "安装 x86 Rust target 失败" }
@@ -83,6 +83,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist 'x86') | Out-Null
 Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.dll') (Join-Path $dist 'x86') -Force
 Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
+Copy-Item (Join-Path $repoRoot 'target\release\retype-dict-build.exe') $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force
 Copy-Item (Join-Path $repoRoot 'NOTICE.txt') $dist -Force

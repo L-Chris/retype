@@ -22,6 +22,7 @@ mod edit;
 pub mod ids;
 pub mod keymap;
 mod langbar;
+mod packs;
 mod popup;
 mod preferences;
 mod registration;

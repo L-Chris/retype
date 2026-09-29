@@ -6,6 +6,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'settings_repository.dart';
 import 'statistics_store.dart';
+import 'dictionary_store.dart';
 
 void main(List<String> arguments) =>
     runApp(RetypeApp(openUpdates: arguments.contains('--updates')));
@@ -31,12 +32,17 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
       widget.repository ?? const WindowsSettingsRepository();
   SettingsSnapshot? settings;
   StatisticsSnapshot? statistics;
+  SpeedPeriod speedPeriod = SpeedPeriod.day;
+  List<DictionaryPackState>? dictionaryStates;
+  String? busyPack;
+  double packProgress = 0;
+  PackDownloadControl? packControl;
   String? error;
   bool saving = false;
   bool loadingStatistics = false;
   int statisticsRequest = 0;
   Timer? statisticsTimer;
-  late int page = widget.openUpdates ? 2 : 0;
+  late int page = widget.openUpdates ? 3 : 0;
   bool initialUpdateCheckDone = false;
   bool checkingUpdate = false;
   bool installingUpdate = false;
@@ -49,7 +55,7 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
     if (widget.repository == null) {
       _channel.setMethodCallHandler((call) async {
         if (call.method == 'showUpdates' && mounted) {
-          _selectPage(2);
+          _selectPage(3);
           await _checkUpdate();
         }
       });
@@ -71,6 +77,8 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed && !saving) {
       _load();
       if (page == 1) {
+        _refreshDictionaryPacks();
+      } else if (page == 2) {
         _refreshStatistics();
         _startStatisticsTimer();
       }
@@ -94,8 +102,64 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
     statisticsTimer?.cancel();
     statisticsTimer = null;
     if (index == 1) {
+      _refreshDictionaryPacks();
+    } else if (index == 2) {
       _refreshStatistics();
       _startStatisticsTimer();
+    }
+  }
+
+  Future<void> _refreshDictionaryPacks() async {
+    try {
+      final states = await repository.loadDictionaryPacks();
+      if (mounted) setState(() => dictionaryStates = states);
+    } catch (e) {
+      if (mounted) setState(() => error = '读取词库失败：$e');
+    }
+  }
+
+  Future<void> _setDictionaryPack(DictionaryPack pack, bool enabled) async {
+    if (busyPack != null) return;
+    setState(() {
+      busyPack = pack.id;
+      packProgress = 0;
+      packControl = enabled ? PackDownloadControl() : null;
+      error = null;
+    });
+    try {
+      await repository.setDictionaryPack(
+        pack,
+        enabled,
+        control: packControl,
+        progress: (progress) {
+          if (mounted) setState(() => packProgress = progress);
+        },
+      );
+      await _refreshDictionaryPacks();
+    } catch (e) {
+      if (mounted && packControl?.cancelled != true) {
+        setState(() => error = '词库操作失败：$e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          busyPack = null;
+          packControl = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _deleteDictionaryPack(DictionaryPack pack) async {
+    if (busyPack != null) return;
+    setState(() => busyPack = pack.id);
+    try {
+      await repository.deleteDictionaryPack(pack);
+      await _refreshDictionaryPacks();
+    } catch (e) {
+      if (mounted) setState(() => error = '删除词库失败：$e');
+    } finally {
+      if (mounted) setState(() => busyPack = null);
     }
   }
 
@@ -361,6 +425,8 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
                           : page == 0
                           ? _inputPage(settings!)
                           : page == 1
+                          ? _dictionaryPage()
+                          : page == 2
                           ? _statisticsPage()
                           : _aboutPage(settings!),
                     ),
@@ -428,9 +494,11 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
           ),
           _navItem(0, Icons.keyboard_outlined, '输入'),
           const SizedBox(height: 8),
-          _navItem(1, Icons.bar_chart_rounded, '统计'),
+          _navItem(1, Icons.menu_book_outlined, '词库'),
           const SizedBox(height: 8),
-          _navItem(2, Icons.info_outline_rounded, '关于'),
+          _navItem(2, Icons.bar_chart_rounded, '统计'),
+          const SizedBox(height: 8),
+          _navItem(3, Icons.info_outline_rounded, '关于'),
           const Spacer(),
           const Padding(
             padding: EdgeInsets.fromLTRB(26, 0, 0, 24),
@@ -566,6 +634,141 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
     ),
   );
 
+  Widget _dictionaryPage() => SingleChildScrollView(
+    padding: const EdgeInsets.symmetric(horizontal: 46, vertical: 46),
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 650),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '词库',
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+              '按需下载你需要的词库，下载完成后即可使用。',
+              style: TextStyle(color: _muted),
+            ),
+            const SizedBox(height: 28),
+            _card(
+              const ListTile(
+                leading: Icon(Icons.check_circle, color: _accent),
+                title: Text(
+                  '基础词库',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: Text('随 retype 安装，始终启用'),
+                trailing: Text('内置', style: TextStyle(color: _muted)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (dictionaryStates == null)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else
+              _card(
+                Column(
+                  children: [
+                    for (var i = 0; i < dictionaryStates!.length; i++) ...[
+                      if (i > 0)
+                        const Divider(
+                          height: 1,
+                          indent: 20,
+                          endIndent: 20,
+                          color: _border,
+                        ),
+                      _dictionaryRow(dictionaryStates![i]),
+                    ],
+                  ],
+                ),
+              ),
+            const SizedBox(height: 18),
+            const Text(
+              '来源：万象拼音 v18.0.14 · CC BY 4.0。首次开启需要联网；关闭后文件仍保留，可随时重新开启。',
+              style: TextStyle(fontSize: 12, color: _muted),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  Widget _dictionaryRow(DictionaryPackState state) {
+    final pack = state.pack;
+    final busy = busyPack == pack.id;
+    final size = (pack.bytes / 1024 / 1024).toStringAsFixed(1);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 13, 12, 13),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  pack.title,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  pack.description,
+                  style: const TextStyle(fontSize: 12, color: _muted),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  busy && !state.installed
+                      ? '正在下载与转换 ${(packProgress * 100).round()}%'
+                      : state.enabled
+                      ? '已启用'
+                      : state.installed
+                      ? '已下载 · 未启用'
+                      : '需下载约 $size MB',
+                  style: const TextStyle(fontSize: 12, color: _muted),
+                ),
+                if (busy && !state.installed)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: LinearProgressIndicator(
+                      value: packProgress < 1 ? packProgress : null,
+                    ),
+                  ),
+                if (busy && !state.installed)
+                  TextButton(
+                    onPressed: packControl?.cancel,
+                    child: const Text('取消下载'),
+                  ),
+              ],
+            ),
+          ),
+          if (state.installed && !state.enabled)
+            IconButton(
+              tooltip: '删除${pack.title}词库',
+              icon: const Icon(Icons.delete_outline, size: 19),
+              onPressed: busyPack == null
+                  ? () => _deleteDictionaryPack(pack)
+                  : null,
+            ),
+          Switch.adaptive(
+            value: state.enabled,
+            onChanged: busyPack == null
+                ? (value) => _setDictionaryPack(pack, value)
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _statisticsPage() => SingleChildScrollView(
     padding: const EdgeInsets.symmetric(horizontal: 46, vertical: 46),
     child: Align(
@@ -655,6 +858,8 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
                   ),
                 ),
               ),
+              const SizedBox(height: 20),
+              _averageSpeedCard(statistics!),
               const SizedBox(height: 20),
               _card(
                 Padding(
@@ -771,6 +976,204 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
         style: const TextStyle(fontSize: 12, color: _muted),
       ),
     ],
+  );
+
+  Widget _averageSpeedCard(StatisticsSnapshot snapshot) {
+    final history = snapshot.speedHistory[speedPeriod]!;
+    final current = history.last;
+    final previous = history[history.length - 2];
+    return _card(
+      Padding(
+        padding: const EdgeInsets.all(22),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '平均速度',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              '本期截至当前；与上一完整周期比较',
+              style: TextStyle(fontSize: 12, color: _muted),
+            ),
+            const SizedBox(height: 16),
+            SegmentedButton<SpeedPeriod>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: SpeedPeriod.day, label: Text('日')),
+                ButtonSegment(value: SpeedPeriod.week, label: Text('周')),
+                ButtonSegment(value: SpeedPeriod.month, label: Text('月')),
+                ButtonSegment(value: SpeedPeriod.year, label: Text('年')),
+              ],
+              selected: {speedPeriod},
+              onSelectionChanged: (selection) =>
+                  setState(() => speedPeriod = selection.first),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: _averageLanguage(
+                    '中文',
+                    '字/分钟',
+                    current.chinesePerMinute,
+                    previous.chinesePerMinute,
+                    current.chinese,
+                    current.chineseActiveMs,
+                  ),
+                ),
+                Container(width: 1, height: 84, color: _border),
+                Expanded(
+                  child: _averageLanguage(
+                    '英文',
+                    '字符/分钟',
+                    current.englishPerMinute,
+                    previous.englishPerMinute,
+                    current.english,
+                    current.englishActiveMs,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            _speedChart(history),
+            const SizedBox(height: 12),
+            const Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.circle, size: 10, color: _accent),
+                SizedBox(width: 5),
+                Text('中文', style: TextStyle(fontSize: 12)),
+                SizedBox(width: 20),
+                Icon(Icons.circle, size: 10, color: Color(0xFF73B9D2)),
+                SizedBox(width: 5),
+                Text('英文', style: TextStyle(fontSize: 12)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              '均速 = 上屏字符总数 ÷ 有效输入时间；样本不足时不显示速度。',
+              style: TextStyle(fontSize: 12, color: _muted),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _averageLanguage(
+    String language,
+    String unit,
+    int? speed,
+    int? previous,
+    int count,
+    int activeMs,
+  ) {
+    final change = speed != null && previous != null && previous > 0
+        ? ((speed - previous) * 100 / previous).round()
+        : null;
+    return Column(
+      children: [
+        Text(language, style: const TextStyle(fontSize: 13, color: _muted)),
+        const SizedBox(height: 5),
+        Text(
+          speed?.toString() ?? '—',
+          style: const TextStyle(fontSize: 27, fontWeight: FontWeight.w700),
+        ),
+        Text(unit, style: const TextStyle(fontSize: 12, color: _muted)),
+        const SizedBox(height: 5),
+        Text(
+          speed == null
+              ? '样本不足'
+              : change == null
+              ? '上期无可比数据'
+              : '较上期 ${change >= 0 ? '+' : ''}$change%',
+          style: TextStyle(
+            fontSize: 12,
+            color: change == null ? _muted : (change >= 0 ? _accent : _muted),
+          ),
+        ),
+        Text(
+          '$count ${language == '中文' ? '字' : '字符'} · 有效 ${_activeDuration(activeMs)}',
+          style: const TextStyle(fontSize: 11, color: _muted),
+        ),
+      ],
+    );
+  }
+
+  String _activeDuration(int ms) {
+    if (ms < 60000) return '${(ms / 1000).round()}秒';
+    if (ms < 3600000) return '${(ms / 60000).toStringAsFixed(1)}分钟';
+    return '${(ms / 3600000).toStringAsFixed(1)}小时';
+  }
+
+  String _periodLabel(DateTime start) => switch (speedPeriod) {
+    SpeedPeriod.day => '${start.month}/${start.day}',
+    SpeedPeriod.week => '${start.month}/${start.day}',
+    SpeedPeriod.month => '${start.month}月',
+    SpeedPeriod.year => '${start.year}',
+  };
+
+  Widget _speedChart(List<PeriodStatistics> history) {
+    final largest = history.fold<int>(0, (value, period) {
+      final chinese = period.chinesePerMinute ?? 0;
+      final english = period.englishPerMinute ?? 0;
+      return [value, chinese, english].reduce((a, b) => a > b ? a : b);
+    });
+    if (largest == 0) {
+      return const SizedBox(
+        height: 100,
+        child: Center(
+          child: Text('暂无足够的历史数据', style: TextStyle(color: _muted)),
+        ),
+      );
+    }
+    return Row(
+      children: [
+        for (final period in history)
+          Expanded(
+            child: Tooltip(
+              message:
+                  '${_periodLabel(period.start)}：中文 ${period.chinesePerMinute ?? '—'} 字/分钟，英文 ${period.englishPerMinute ?? '—'} 字符/分钟',
+              child: Column(
+                children: [
+                  SizedBox(
+                    height: 84,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        _speedBar(period.chinesePerMinute, largest, _accent),
+                        const SizedBox(width: 3),
+                        _speedBar(
+                          period.englishPerMinute,
+                          largest,
+                          const Color(0xFF73B9D2),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _periodLabel(period.start),
+                    style: const TextStyle(fontSize: 10, color: _muted),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _speedBar(int? speed, int largest, Color color) => Container(
+    width: 9,
+    height: speed == null ? 2 : (80 * speed / largest).clamp(3, 80).toDouble(),
+    decoration: BoxDecoration(
+      color: speed == null ? _border : color,
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+    ),
   );
 
   Widget _weekChart(List<DailyStatistics> week) {

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 import 'statistics_store.dart';
+import 'dictionary_store.dart';
 
 enum PinyinScheme { full, xiaohe }
 
@@ -38,6 +39,14 @@ abstract class SettingsRepository {
   Future<StatisticsSnapshot> loadStatistics();
   Future<void> setStatisticsEnabled(bool value);
   Future<void> clearStatistics();
+  Future<List<DictionaryPackState>> loadDictionaryPacks();
+  Future<void> setDictionaryPack(
+    DictionaryPack pack,
+    bool enabled, {
+    void Function(double)? progress,
+    PackDownloadControl? control,
+  });
+  Future<void> deleteDictionaryPack(DictionaryPack pack);
   Future<UpdateOffer> checkUpdates(String currentVersion);
   Future<String> downloadUpdate(String expectedVersion);
   Future<int> installUpdate(String path);
@@ -55,6 +64,70 @@ class WindowsSettingsRepository implements SettingsRepository {
   const WindowsSettingsRepository();
   static const _channel = MethodChannel('retype/settings');
   static StatisticsStore? _statisticsStoreInstance;
+
+  DictionaryStore _dictionaryStore(String installDirectory) {
+    final local = Platform.environment['LOCALAPPDATA'];
+    if (local == null || local.isEmpty) throw StateError('无法找到本地词库目录');
+    return DictionaryStore(
+      Directory('$local\\retype\\dict-packs'),
+      '$installDirectory\\retype-dict-build.exe',
+    );
+  }
+
+  Future<Map<String, Object?>> _settingsValues() async =>
+      await _channel.invokeMapMethod<String, Object?>('getSettings') ??
+      (throw StateError('无法读取设置'));
+
+  @override
+  Future<List<DictionaryPackState>> loadDictionaryPacks() async {
+    final values = await _settingsValues();
+    final directory = values['directory'] as String? ?? '';
+    final mask = values['enabledDictionaryPacks'] as int? ?? 0;
+    final store = _dictionaryStore(directory);
+    final states = <DictionaryPackState>[];
+    for (var i = 0; i < dictionaryPacks.length; i++) {
+      final pack = dictionaryPacks[i];
+      final installed = await store.isInstalled(pack);
+      states.add(
+        DictionaryPackState(
+          pack: pack,
+          installed: installed,
+          enabled: installed && (mask & (1 << i)) != 0,
+        ),
+      );
+    }
+    return states;
+  }
+
+  @override
+  Future<void> setDictionaryPack(
+    DictionaryPack pack,
+    bool enabled, {
+    void Function(double)? progress,
+    PackDownloadControl? control,
+  }) async {
+    final index = dictionaryPacks.indexOf(pack);
+    if (index < 0) throw ArgumentError.value(pack.id, 'pack');
+    final directory = await _installationDirectory();
+    if (enabled) {
+      final store = _dictionaryStore(directory);
+      if (!await store.isInstalled(pack)) {
+        await store.install(pack, progress: progress, control: control);
+      }
+    }
+    if (control?.cancelled == true) throw StateError('下载已取消');
+    await _channel.invokeMethod('setDictionaryPack', {
+      'index': index,
+      'enabled': enabled,
+    });
+  }
+
+  @override
+  Future<void> deleteDictionaryPack(DictionaryPack pack) async {
+    await setDictionaryPack(pack, false);
+    final directory = await _installationDirectory();
+    await _dictionaryStore(directory).delete(pack);
+  }
 
   Future<String> _installationDirectory() async {
     final values = await _channel.invokeMapMethod<String, Object?>(

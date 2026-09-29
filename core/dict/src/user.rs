@@ -222,8 +222,13 @@ impl Lexicon for LayeredDict {
 
     fn lookup_initials(&self, initials: &[u8], out: &mut Vec<LexEntry>) {
         for layer in &self.layers {
+            let start = out.len();
             layer.dict.lookup_initials(initials, out);
+            for e in &mut out[start..] {
+                e.logp += layer.boost;
+            }
         }
+        dedup_keeping_best(out);
     }
 
     fn len(&self) -> usize {

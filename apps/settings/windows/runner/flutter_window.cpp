@@ -1,5 +1,6 @@
 #include "flutter_window.h"
 
+#include <algorithm>
 #include <optional>
 #include <windowsx.h>
 
@@ -63,7 +64,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     SetTimer(hwnd, kIdleTimer, 60000, nullptr);
     return 0;
   }
-  if (message == WM_SHOWWINDOW && wparam) KillTimer(hwnd, kIdleTimer);
+  if (message == WM_SHOWWINDOW && wparam) {
+    KillTimer(hwnd, kIdleTimer);
+    CenterOnCursorMonitor();
+  }
   if (message == WM_TIMER && wparam == kIdleTimer) {
     KillTimer(hwnd, kIdleTimer);
     if (!IsWindowVisible(hwnd)) PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -113,6 +117,14 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       const UINT dpi = GetDpiForWindow(hwnd);
       bounds->ptMinTrackSize.x = MulDiv(760, dpi, 96);
       bounds->ptMinTrackSize.y = MulDiv(520, dpi, 96);
+      MONITORINFO info{sizeof(info)};
+      HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      if (GetMonitorInfoW(monitor, &info)) {
+        bounds->ptMinTrackSize.x =
+            std::min(bounds->ptMinTrackSize.x, info.rcWork.right - info.rcWork.left);
+        bounds->ptMinTrackSize.y =
+            std::min(bounds->ptMinTrackSize.y, info.rcWork.bottom - info.rcWork.top);
+      }
       return 0;
     }
     case WM_FONTCHANGE:

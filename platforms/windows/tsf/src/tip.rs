@@ -218,6 +218,7 @@ impl TipState {
             return;
         }
         if let Some(session) = self.session() {
+            session.sync_packs();
             let scheme = crate::preferences::scheme();
             if session.backend.with_kernel(|k| k.config().pinyin_scheme) != scheme {
                 session.submit(InputEvent::SetPinyinScheme(scheme));

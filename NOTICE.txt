@@ -11,11 +11,21 @@
   `lianxiang.dict.yaml`、`duoyin.dict.yaml`
 - 用途: `retype-dict.tsv` / `retype-dict.bin` 的词条、逐词读音与权重。
   构建时去掉声调，保留拼音与权重，并过滤当前解码器
-  尚不能使用的六字以上词条及非汉字词条。
+  尚不能使用的九字以上词条及非汉字词条。
 - 许可: Creative Commons Attribution 4.0 International (CC BY 4.0)。
   上游词库及本项目的转换产物均保留该数据许可；完整文本见
   `LICENSE-wanxiang`（源码中为 `data/dict/raw/wanxiang-base/LICENSE`）。
   retype 与上游项目无关联，上游作者未为本项目背书。
+
+### 万象拼音可选分类词库
+- 项目: https://github.com/amzxyz/rime-wanxiang
+- 上游版本: v18.0.14
+- 可选文件: `dicts/mingren.dict.yaml`、`renming.dict.yaml`、
+  `yiren.dict.yaml`、`diming.dict.yaml`、`yixue.dict.yaml`、
+  `yaopin.dict.yaml`、`huaxue.dict.yaml`
+- 用途: 用户在设置中选择后下载、校验并本机转换；这些数据不包含在安装包内。
+- 许可: Creative Commons Attribution 4.0 International (CC BY 4.0)，
+  完整文本见 `LICENSE-wanxiang`。
 
 ### pinyin 字音数据
 - 项目: https://github.com/mozillazg/rust-pinyin (MIT)

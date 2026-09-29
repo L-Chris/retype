@@ -32,6 +32,9 @@ pub struct Layout {
 fn px(value: i32, dpi: i32) -> i32 {
     (value * dpi + 48) / 96
 }
+fn viewport_width(work_area_width: i32, dpi: i32) -> i32 {
+    work_area_width.clamp(px(100, dpi), px(480, dpi))
+}
 unsafe fn font(size: i32, dpi: i32, weight: i32) -> HFONT {
     unsafe {
         CreateFontW(
@@ -99,10 +102,10 @@ pub fn measure(render: &RenderState, window: Option<HWND>, anchor: Option<RECT>)
                 };
                 GetMonitorInfoW(monitor, &mut info)
                     .as_bool()
-                    .then_some(info.rcWork.right - info.rcWork.left - 16)
+                    .then_some(info.rcWork.right - info.rcWork.left - px(16, dpi))
             })
-            .unwrap_or(480);
-        let viewport = max_width.clamp(100, 480);
+            .unwrap_or_else(|| px(480, dpi));
+        let viewport = viewport_width(max_width, dpi);
         let pad = px(4, dpi);
         let available = viewport - 2 * pad;
         let gap = px(2, dpi);
@@ -398,5 +401,12 @@ mod tests {
         let required = layout.widths.iter().sum::<i32>() + layout.gap * 7;
         assert!(required <= layout.available);
         assert_eq!(layout.viewport, 480);
+    }
+
+    #[test]
+    fn viewport_limit_scales_with_dpi_but_stays_within_the_monitor() {
+        assert_eq!(viewport_width(1920, 96), 480);
+        assert_eq!(viewport_width(1920, 144), 720);
+        assert_eq!(viewport_width(600, 144), 600);
     }
 }

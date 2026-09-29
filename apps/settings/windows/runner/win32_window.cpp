@@ -3,6 +3,8 @@
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
+#include <algorithm>
+
 #include "resource.h"
 
 namespace {
@@ -35,6 +37,20 @@ using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 // scale factor
 int Scale(int source, double scale_factor) {
   return static_cast<int>(source * scale_factor);
+}
+
+HMONITOR CursorMonitor(RECT* work) {
+  POINT cursor{};
+  GetCursorPos(&cursor);
+  HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{sizeof(info)};
+  if (GetMonitorInfoW(monitor, &info)) {
+    *work = info.rcWork;
+  } else {
+    *work = {0, 0, GetSystemMetrics(SM_CXSCREEN),
+             GetSystemMetrics(SM_CYSCREEN)};
+  }
+  return monitor;
 }
 
 // Dynamically loads the |EnableNonClientDpiScaling| from the User32 module.
@@ -120,24 +136,26 @@ Win32Window::~Win32Window() {
   Destroy();
 }
 
-bool Win32Window::Create(const std::wstring& title,
-                         const Point& origin,
-                         const Size& size) {
+bool Win32Window::Create(const std::wstring& title, const Size& size) {
   Destroy();
 
   const wchar_t* window_class =
       WindowClassRegistrar::GetInstance()->GetWindowClass();
 
-  const POINT target_point = {static_cast<LONG>(origin.x),
-                              static_cast<LONG>(origin.y)};
-  HMONITOR monitor = MonitorFromPoint(target_point, MONITOR_DEFAULTTONEAREST);
+  RECT work{};
+  HMONITOR monitor = CursorMonitor(&work);
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
+  const int work_width = work.right - work.left;
+  const int work_height = work.bottom - work.top;
+  const int width = std::min(Scale(size.width, scale_factor), work_width);
+  const int height = std::min(Scale(size.height, scale_factor), work_height);
+  const int x = work.left + (work_width - width) / 2;
+  const int y = work.top + (work_height - height) / 2;
 
   HWND window = CreateWindow(
       window_class, title.c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
+      x, y, width, height,
       nullptr, nullptr, GetModuleHandle(nullptr), this);
 
   if (!window) {
@@ -150,6 +168,24 @@ bool Win32Window::Create(const std::wstring& title,
   DwmSetWindowAttribute(window, 33, &round_corners, sizeof(round_corners));
 
   return OnCreate();
+}
+
+void Win32Window::CenterOnCursorMonitor() {
+  if (!window_handle_) return;
+  RECT work{};
+  CursorMonitor(&work);
+  RECT bounds{};
+  if (!GetWindowRect(window_handle_, &bounds)) return;
+  const int work_width = work.right - work.left;
+  const int work_height = work.bottom - work.top;
+  const int width =
+      std::min(static_cast<int>(bounds.right - bounds.left), work_width);
+  const int height =
+      std::min(static_cast<int>(bounds.bottom - bounds.top), work_height);
+  SetWindowPos(window_handle_, nullptr,
+               work.left + (work_width - width) / 2,
+               work.top + (work_height - height) / 2,
+               width, height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 bool Win32Window::Show() {

@@ -266,7 +266,11 @@ impl Edit_Impl {
                     .GetActiveView()
                     .and_then(|view| view.GetWnd())
                     .ok()
-                    .filter(|window| !window.is_invalid());
+                    .filter(|window| !window.is_invalid())
+                    .or_else(|| {
+                        let focused = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+                        (!focused.is_invalid()).then_some(focused)
+                    });
                 // Pagination and drawing share these physical pixel measurements.
                 let layout = crate::popup::measure(&initial, owner, anchor);
                 session

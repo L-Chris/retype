@@ -34,7 +34,7 @@ impl Default for Args {
                 .collect(),
             output: PathBuf::from("data/dict/retype-dict.tsv"),
             min_weight: 1.0,
-            max_word_len: 5,
+            max_word_len: 8,
             verify: true,
         }
     }
@@ -53,7 +53,7 @@ retype-dict-build —— 构建已注音词库
   --out            输出已注音词库，格式：`词<TAB>拼音<TAB>权重`
                    默认 data/dict/retype-dict.tsv（已在 .gitignore 中）
   --min-weight     权重下限，低于此值的词丢弃（默认 1）
-  --max-word-len   词长上限（字符数，默认 5，与解码器上限一致）
+  --max-word-len   词长上限（字符数，默认 8，与解码器上限一致）
   --no-verify      跳过构建后的回读校验
 "
     .to_string()

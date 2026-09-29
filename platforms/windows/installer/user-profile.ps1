@@ -117,6 +117,20 @@ if (-not $Uninstall) {
   $statsAcl.SetAccessRule($statsWrite)
   Set-Acl -LiteralPath $statistics -AclObject $statsAcl
   Set-ItemProperty -Path $preferences -Name 'StatisticsPath' -Value $statistics
+
+  # Category dictionaries live outside versioned installs. Search/AppContainer
+  # hosts must read the real profile path, but never write downloaded files.
+  $dictionaryRoot = Join-Path $env:LOCALAPPDATA 'retype\dict-packs'
+  New-Item -ItemType Directory -Path $dictionaryRoot -Force | Out-Null
+  $packAcl = Get-Acl -LiteralPath $dictionaryRoot
+  $packRead = [Security.AccessControl.FileSystemAccessRule]::new($packages,
+    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+    [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow)
+  $packAcl.SetAccessRule($packRead)
+  Set-Acl -LiteralPath $dictionaryRoot -AclObject $packAcl
+  Set-ItemProperty -Path $preferences -Name 'DictionaryRoot' -Value $dictionaryRoot
 }
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
 if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {

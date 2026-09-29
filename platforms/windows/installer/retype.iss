@@ -125,6 +125,8 @@ Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{code:GetPaylo
 Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+; Converts optional dictionaries downloaded later in Settings. No optional data is bundled.
+Source: "{#BaseDir}\retype-dict-build.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 万象 Base 已注音词库
 Source: "{#DictFile}"; DestDir: "{code:GetPayloadDir}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
 Source: "data\dict\retype-dict.bin"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion

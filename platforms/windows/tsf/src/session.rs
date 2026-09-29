@@ -15,6 +15,7 @@ use retype_engine::{
 use retype_pinyin::Lexicon;
 use retype_types::{InputEvent, KernelAction, LearningStore};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -117,6 +118,8 @@ fn env_flag(name: &str) -> bool {
 pub struct Session {
     pub backend: Arc<LocalBackend>,
     pub dict: Arc<AsyncDict>,
+    pub packs: Arc<AsyncDict>,
+    pack_generation: AtomicU32,
     pub user: Arc<UserDict>,
     /// 影子模式：喂内核但不吃按键
     pub shadow: bool,
@@ -141,6 +144,7 @@ impl Session {
 
     pub fn start_with(dict_path: PathBuf) -> Arc<Self> {
         let dict = AsyncDict::empty();
+        let packs = AsyncDict::empty();
         // 词库不存在/损坏 → 单字模式兜底（§7）
         let _ = spawn_loader(&dict_path, Arc::clone(&dict), FallbackPolicy::SingleChar);
 
@@ -148,11 +152,14 @@ impl Session {
         let sys: Arc<dyn Lexicon> = Arc::clone(&dict) as Arc<dyn Lexicon>;
         let learner: Arc<dyn LearningStore> =
             Arc::new(Learner::with_system(Arc::clone(&user), Arc::clone(&sys)));
-        let layered: Arc<dyn Lexicon> = Arc::new(LayeredDict::with_system_and_user(
-            sys,
-            Arc::clone(&user),
-            DEFAULT_USER_BOOST,
-        ));
+        let mut layers =
+            LayeredDict::with_system_and_user(sys, Arc::clone(&user), DEFAULT_USER_BOOST);
+        layers.push(retype_dict::Layer {
+            name: "optional",
+            dict: Arc::clone(&packs) as Arc<dyn Lexicon>,
+            boost: 0.0,
+        });
+        let layered: Arc<dyn Lexicon> = Arc::new(layers);
 
         // M0/M1：不配云端。二刷要等 M3 接了真实供应商才有意义，
         // 在那之前每次按键都发一个必然失败的请求只会白白消耗宿主进程的资源。
@@ -173,13 +180,51 @@ impl Session {
         );
         let backend = LocalBackend::with_options(kernel, cloud, BackendOptions::default());
 
-        Arc::new(Self {
+        let session = Arc::new(Self {
             backend,
             dict,
+            packs,
+            pack_generation: AtomicU32::new(u32::MAX),
             user,
             shadow: env_flag(ENV_SHADOW),
             dict_path,
-        })
+        });
+        session.sync_packs();
+        session
+    }
+
+    /// Refresh on focus only; loading and parsing always run on a worker thread.
+    pub fn sync_packs(self: &Arc<Self>) {
+        let generation = crate::preferences::pack_generation();
+        if self.pack_generation.swap(generation, Ordering::SeqCst) == generation {
+            return;
+        }
+        let Some(root) = crate::preferences::pack_root() else {
+            self.packs.uninstall();
+            return;
+        };
+        let enabled = crate::preferences::enabled_packs();
+        let session = Arc::clone(self);
+        let _ = std::thread::Builder::new()
+            .name("retype-pack-load".into())
+            .spawn(move || {
+                // Base loading starts first, and supplies the shared score denominator.
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !session.dict.is_loaded() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if !session.dict.is_loaded() {
+                    tracing::warn!(
+                        "base dictionary did not finish loading; optional packs skipped"
+                    );
+                    return;
+                }
+                let merged =
+                    crate::packs::load_enabled(&root, enabled, session.dict.total_frequency());
+                if session.pack_generation.load(Ordering::SeqCst) == generation {
+                    session.packs.install(Arc::new(merged));
+                }
+            });
     }
 
     pub fn submit(&self, ev: InputEvent) -> Vec<KernelAction> {

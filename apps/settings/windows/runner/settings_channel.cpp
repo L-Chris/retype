@@ -115,7 +115,39 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
               flutter::EncodableValue(Utf8(version.empty() ? L"开发版本" : version));
           values[flutter::EncodableValue("directory")] =
               flutter::EncodableValue(Utf8(ReadInstalledString(L"ActiveDir")));
+          DWORD enabled_packs = 0;
+          ReadDword(L"EnabledDictionaryPacks", &enabled_packs);
+          values[flutter::EncodableValue("enabledDictionaryPacks")] =
+              flutter::EncodableValue(static_cast<int32_t>(enabled_packs & 0x7f));
           result->Success(flutter::EncodableValue(values));
+          return;
+        }
+        if (method == "setDictionaryPack") {
+          const auto* values = std::get_if<flutter::EncodableMap>(call.arguments());
+          if (!values) {
+            result->Error("invalid_argument", "Dictionary pack request is missing");
+            return;
+          }
+          const auto id = values->find(flutter::EncodableValue("index"));
+          const auto enabled = values->find(flutter::EncodableValue("enabled"));
+          const auto* index = id == values->end() ? nullptr : std::get_if<int32_t>(&id->second);
+          const auto* value = enabled == values->end() ? nullptr : std::get_if<bool>(&enabled->second);
+          if (!index || *index < 0 || *index >= 7 || !value) {
+            result->Error("invalid_argument", "Invalid dictionary pack");
+            return;
+          }
+          DWORD mask = 0;
+          DWORD generation = 0;
+          ReadDword(L"EnabledDictionaryPacks", &mask);
+          ReadDword(L"DictionaryGeneration", &generation);
+          const DWORD bit = 1u << *index;
+          mask = *value ? mask | bit : mask & ~bit;
+          if (!WriteDword(L"EnabledDictionaryPacks", mask) ||
+              !WriteDword(L"DictionaryGeneration", generation + 1)) {
+            result->Error("registry", "Could not save dictionary preference");
+          } else {
+            result->Success(flutter::EncodableValue(static_cast<int32_t>(mask)));
+          }
           return;
         }
         if (method == "installUpdate") {

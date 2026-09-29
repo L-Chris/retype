@@ -25,6 +25,7 @@ pub struct Entry {
 pub struct MemoryDict {
     entries: Vec<Entry>,
     trie: Trie,
+    total_frequency: f64,
 }
 
 impl MemoryDict {
@@ -34,6 +35,11 @@ impl MemoryDict {
 
     pub fn entries(&self) -> &[Entry] {
         &self.entries
+    }
+
+    /// Raw frequency sum, used to compare separately loaded category dictionaries.
+    pub fn total_frequency(&self) -> f64 {
+        self.total_frequency
     }
 
     /// trie 节点数，用于评估内存占用。
@@ -166,7 +172,11 @@ impl DictBuilder {
                 flags: r.flags,
             });
         }
-        MemoryDict { entries, trie }
+        MemoryDict {
+            entries,
+            trie,
+            total_frequency: total,
+        }
     }
 }
 

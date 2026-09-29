@@ -46,9 +46,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   FlutterWindow window(project);
   Win32Window::Size size(960, 640);
-  Win32Window::Point origin((GetSystemMetrics(SM_CXSCREEN) - size.width) / 2,
-                           (GetSystemMetrics(SM_CYSCREEN) - size.height) / 2);
-  if (!window.Create(kTitle, origin, size)) {
+  if (!window.Create(kTitle, size)) {
     ::CoUninitialize();
     CloseHandle(single_instance);
     return EXIT_FAILURE;

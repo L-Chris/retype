@@ -17,6 +17,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Default)]
 pub struct AsyncDict {
     inner: RwLock<Option<Arc<dyn Lexicon>>>,
+    total_frequency: RwLock<f64>,
 }
 
 // `Arc<dyn Lexicon>` 没有 Debug，手写一个带加载状态的版本
@@ -37,6 +38,7 @@ impl AsyncDict {
     pub fn with(dict: Arc<dyn Lexicon>) -> Arc<Self> {
         Arc::new(Self {
             inner: RwLock::new(Some(dict)),
+            total_frequency: RwLock::new(1.0),
         })
     }
 
@@ -49,6 +51,17 @@ impl AsyncDict {
         if let Ok(mut g) = self.inner.write() {
             *g = Some(dict);
         }
+    }
+
+    pub fn install_memory(&self, dict: crate::MemoryDict) {
+        if let Ok(mut total) = self.total_frequency.write() {
+            *total = dict.total_frequency();
+        }
+        self.install(Arc::new(dict));
+    }
+
+    pub fn total_frequency(&self) -> f64 {
+        self.total_frequency.read().map_or(1.0, |value| *value)
     }
 
     pub fn uninstall(&self) {
@@ -131,13 +144,13 @@ pub fn spawn_loader<P: AsRef<Path>>(
                         stats.lines,
                         started.elapsed()
                     );
-                    target.install(Arc::new(dict));
+                    target.install_memory(dict);
                 }
                 Err(e) => {
                     tracing::error!("词库加载失败，降级: {e}");
                     match fallback {
                         FallbackPolicy::SingleChar => {
-                            target.install(Arc::new(crate::memory::single_char_fallback()));
+                            target.install_memory(crate::memory::single_char_fallback());
                         }
                         FallbackPolicy::Empty => {}
                     }

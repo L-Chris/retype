@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:retype/main.dart';
 import 'package:retype/settings_repository.dart';
 import 'package:retype/statistics_store.dart';
+import 'package:retype/dictionary_store.dart';
 
 class FakeSettingsRepository implements SettingsRepository {
   PinyinScheme scheme = PinyinScheme.full;
@@ -15,6 +16,39 @@ class FakeSettingsRepository implements SettingsRepository {
   bool closed = false;
   bool statisticsEnabled = true;
   bool statisticsCleared = false;
+  final Set<String> installedPacks = {};
+  final Set<String> enabledPacks = {};
+
+  @override
+  Future<List<DictionaryPackState>> loadDictionaryPacks() async => [
+    for (final pack in dictionaryPacks)
+      DictionaryPackState(
+        pack: pack,
+        installed: installedPacks.contains(pack.id),
+        enabled: enabledPacks.contains(pack.id),
+      ),
+  ];
+  @override
+  Future<void> setDictionaryPack(
+    DictionaryPack pack,
+    bool enabled, {
+    void Function(double)? progress,
+    PackDownloadControl? control,
+  }) async {
+    if (enabled) {
+      installedPacks.add(pack.id);
+      enabledPacks.add(pack.id);
+      progress?.call(1);
+    } else {
+      enabledPacks.remove(pack.id);
+    }
+  }
+
+  @override
+  Future<void> deleteDictionaryPack(DictionaryPack pack) async {
+    enabledPacks.remove(pack.id);
+    installedPacks.remove(pack.id);
+  }
 
   @override
   Future<SettingsSnapshot> load() async =>
@@ -36,6 +70,19 @@ class FakeSettingsRepository implements SettingsRepository {
       7,
       (index) => DailyStatistics(DateTime(2026, 9, index + 20), 0, 0),
     ),
+    speedHistory: {
+      for (final period in SpeedPeriod.values)
+        period: [
+          PeriodStatistics(DateTime(2026, 9, 27), 20, 20, 20000, 20000),
+          PeriodStatistics(
+            DateTime(2026, 9, 28),
+            30 + period.index * 10,
+            30,
+            20000,
+            20000,
+          ),
+        ],
+    },
   );
   @override
   Future<void> setStatisticsEnabled(bool value) async =>
@@ -86,6 +133,30 @@ class FakeSettingsRepository implements SettingsRepository {
 }
 
 void main() {
+  testWidgets('optional pack downloads on first enable and can be removed', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final repository = FakeSettingsRepository();
+    await tester.pumpWidget(RetypeApp(repository: repository));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('词库'));
+    await tester.pumpAndSettle();
+    expect(find.text('基础词库'), findsOneWidget);
+    expect(find.text('名人'), findsOneWidget);
+    await tester.tap(find.byType(Switch).first);
+    await tester.pumpAndSettle();
+    expect(repository.enabledPacks, contains('mingren'));
+    await tester.tap(find.byType(Switch).first);
+    await tester.pumpAndSettle();
+    expect(repository.installedPacks, contains('mingren'));
+    await tester.tap(find.byTooltip('删除名人词库'));
+    await tester.pumpAndSettle();
+    expect(repository.installedPacks, isEmpty);
+  });
   testWidgets('switches scheme and exposes About update controls', (
     tester,
   ) async {
@@ -140,6 +211,19 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('中文 12  ·  英文 7'), findsOneWidget);
     expect(find.text('中文 30  ·  英文 20'), findsOneWidget);
+    await tester.ensureVisible(find.text('平均速度'));
+    expect(find.text('较上期 +50%'), findsNWidgets(2));
+    await tester.tap(find.text('月'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<SegmentedButton<SpeedPeriod>>(
+            find.byType(SegmentedButton<SpeedPeriod>),
+          )
+          .selected,
+      {SpeedPeriod.month},
+    );
+    expect(find.text('150'), findsOneWidget);
     await tester.ensureVisible(find.byType(SwitchListTile));
     await tester.tap(find.byType(SwitchListTile));
     await tester.pumpAndSettle();

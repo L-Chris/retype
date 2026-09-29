@@ -24,6 +24,60 @@ pub fn scheme() -> PinyinScheme {
         PinyinScheme::Full
     }
 }
+
+fn read_dword(name: windows_core::PCWSTR) -> u32 {
+    let mut value = 0u32;
+    let mut size = 4;
+    // SAFETY: The output buffer is a DWORD and failures leave the default zero.
+    unsafe {
+        let _ = RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\retype"),
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut value as *mut u32).cast()),
+            Some(&mut size),
+        );
+    }
+    value
+}
+
+pub fn pack_generation() -> u32 {
+    read_dword(w!("DictionaryGeneration"))
+}
+
+pub fn enabled_packs() -> u32 {
+    read_dword(w!("EnabledDictionaryPacks"))
+}
+
+pub fn pack_root() -> Option<std::path::PathBuf> {
+    let mut buffer = [0u16; 32768];
+    let mut bytes = (buffer.len() * 2) as u32;
+    // SAFETY: Fixed UTF-16 output buffer, read-only HKCU value.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\retype"),
+            w!("DictionaryRoot"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+    let length = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    if length == 0 {
+        None
+    } else {
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(
+            &buffer[..length],
+        )))
+    }
+}
 /// Open the installed settings app without loading Flutter into the TSF host.
 pub fn open_settings() -> Result<()> {
     let mut buffer = [0u16; 32768];

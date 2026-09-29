@@ -48,7 +48,7 @@ impl Default for DecodeOptions {
             page_size: 9,
             word_bonus: 3.5,
             raw_penalty: 20.0,
-            max_word_syllables: 5,
+            max_word_syllables: 8,
             include_prefixes: true,
         }
     }
