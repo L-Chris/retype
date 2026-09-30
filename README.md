@@ -2,6 +2,8 @@
 
 # retype
 
+This project was developed by Qwen3.8 Max.
+
 A Chinese input method built around a shared Rust input engine. Windows desktop input is available as an early preview; Android support is planned.
 
 [简体中文](README.zh-CN.md) · [Latest release](https://github.com/L-Chris/retype/releases/latest) · [Roadmap](docs/roadmap.md)

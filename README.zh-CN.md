@@ -2,6 +2,8 @@
 
 # retype
 
+本项目由 Qwen3.8 Max 开发。
+
 基于共享 Rust 输入内核的中文输入法。Windows 桌面输入已有预览版，Android 输入法仍在规划中。
 
 [English](README.md) · [最新版本](https://github.com/L-Chris/retype/releases/latest) · [路线图](docs/roadmap.md)
