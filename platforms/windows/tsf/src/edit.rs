@@ -2,7 +2,9 @@
 use crate::stats::{self, Language};
 use crate::tip::{guarded, lock, TipState};
 
-use retype_types::{CommitRequest, InputEvent, InputSource, KernelAction, Key, Modifiers};
+use retype_types::{
+    CommitRequest, InputEvent, InputSource, KernelAction, Key, Modifiers, SideEffect,
+};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -188,12 +190,13 @@ impl Edit_Impl {
             }
             Work::Direct(_) | Work::Finish(_) | Work::Refresh => return Ok(()),
         };
-        let actions = session.submit(event);
+        let actions = session.submit_in_context(event, countable(&self.context));
         if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
         }
         let mut pass = false;
         let mut committed = Vec::new();
+        let mut learning = Vec::new();
         for action in actions {
             match action {
                 KernelAction::Commit(
@@ -211,6 +214,7 @@ impl Edit_Impl {
                     }
                 }
                 KernelAction::PassThrough => pass = true,
+                KernelAction::Side(SideEffect::Learn(event)) => learning.push(event),
                 KernelAction::Side(_) => {}
             }
         }
@@ -228,6 +232,13 @@ impl Edit_Impl {
                 state.reset_kernel();
                 replace(state, &self.context, ec, &literal, false)?;
                 committed.push(literal);
+            }
+        }
+        // Only successful host writes count as selections. Failed/cancelled edit sessions
+        // and hidden input contexts must not persist a user's uncommitted text.
+        if !committed.is_empty() && !learning.is_empty() && learnable(&self.context, ec) {
+            for event in learning {
+                session.backend.record_learning(event);
             }
         }
         self.refresh(ec)?;
@@ -299,6 +310,75 @@ fn countable(ctx: &ITfContext) -> bool {
     // A host that cannot promise there is no hidden text is not counted.
     // SAFETY: This reads context metadata under its current TSF edit session.
     unsafe { ctx.GetStatus() }.is_ok_and(|status| status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0)
+}
+
+fn learnable(ctx: &ITfContext, ec: u32) -> bool {
+    if !countable(ctx) {
+        return false;
+    }
+    // Query scopes only at commit, keeping this extra COM work out of candidate decoding.
+    // SAFETY: ec is the host's current granted edit cookie; owned COM values are scoped here.
+    unsafe {
+        let property = match ctx.GetAppProperty(&GUID_PROP_INPUTSCOPE) {
+            Ok(property) => property,
+            Err(error) => return absent_scope(error.code()),
+        };
+        let mut selection = [TF_SELECTION::default()];
+        let mut count = 0;
+        let selected = ctx.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut count);
+        let range = ManuallyDrop::take(&mut selection[0].range);
+        if selected.is_err() || count == 0 {
+            return false;
+        }
+        let Some(range) = range else {
+            return false;
+        };
+        let value = match property.GetValue(ec, &range) {
+            Ok(value) => value,
+            Err(error) => return absent_scope(error.code()),
+        };
+        safe_input_scope(&value)
+    }
+}
+
+fn safe_input_scope(value: &VARIANT) -> bool {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::Variant::VT_EMPTY;
+    // SAFETY: reading the VARIANT's discriminator; an absent scope is a normal text field.
+    if unsafe { value.Anonymous.Anonymous.vt } == VT_EMPTY {
+        return true;
+    }
+    let Ok(unknown) = windows_core::IUnknown::try_from(value) else {
+        return false;
+    };
+    let Ok(scope) = unknown.cast::<ITfInputScope>() else {
+        return false;
+    };
+    let mut scopes = std::ptr::null_mut();
+    let mut count = 0;
+    // SAFETY: COM allocates this array and provides its length. Always free it, including
+    // failure paths, and reject unexpectedly large counts before constructing a slice.
+    unsafe {
+        let result = scope.GetInputScopes(&mut scopes, &mut count);
+        let allowed = result.is_ok()
+            && count <= 64
+            && (count == 0 || !scopes.is_null())
+            && (count == 0
+                || !std::slice::from_raw_parts(scopes, count as usize)
+                    .iter()
+                    .any(|scope| matches!(*scope, IS_PASSWORD | IS_PRIVATE | IS_NUMERIC_PIN)));
+        CoTaskMemFree(Some(scopes.cast()));
+        allowed
+    }
+}
+
+fn absent_scope(status: windows_core::HRESULT) -> bool {
+    // Legacy ITextStoreACP hosts without an InputScope attribute report E_FAIL or
+    // E_NOTIMPL for this optional app property. NOHIDDENTEXT was already required.
+    matches!(
+        status,
+        windows::Win32::Foundation::E_FAIL | windows::Win32::Foundation::E_NOTIMPL
+    )
 }
 
 fn replace(

@@ -83,7 +83,7 @@
 
 - [ ] `ContextSnapshot` 采集（TSF `ITfContext` 取光标前后文 + 前台进程信息）
 - [ ] 隐私闸门：密码框/黑名单进程 → `PrivacyLevel::None`
-- [ ] 用户词库（SQLite）+ `LearningEvent` 异步批量落盘
+- [x] 用户词库（SQLite）+ `LearningEvent` 异步批量落盘；跨应用共享与重试去重见 [用户学习](user-learning.md)
 - [ ] 纠错对采集：上屏后短时间内的手动修改 → `Corrected`
 - [ ] 上下文参与本地打分（不依赖网络，纯本地也能变聪明）
 - [ ] 候选窗自绘（Win32 + Direct2D，独立 UI 线程，跟随光标，暗色模式）

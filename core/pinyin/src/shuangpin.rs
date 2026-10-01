@@ -112,10 +112,10 @@ fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
 pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOutput {
     let normalized = crate::normalize(input);
     let lattice = build_lattice_with(&normalized, lex, opts, options);
-    let mut output = decode_lattice(&normalized, lattice, opts);
+    let mut output = decode_lattice(&normalized, lattice, opts, lex);
     if can_preview_tail(normalized.as_bytes()) {
         let preview = build_lattice_with(&normalized, lex, opts, preview_options);
-        let mut candidates: Vec<_> = decode_lattice(&normalized, preview, opts)
+        let mut candidates: Vec<_> = decode_lattice(&normalized, preview, opts, lex)
             .candidates
             .into_iter()
             .filter(|c| c.source != CandidateSource::Raw)
@@ -126,7 +126,7 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
             let prefix = &normalized[..normalized.len() - 1];
             let lattice = build_lattice_with(prefix, lex, opts, options);
             candidates.extend(
-                decode_lattice(prefix, lattice, opts)
+                decode_lattice(prefix, lattice, opts, lex)
                     .candidates
                     .into_iter()
                     .filter(|c| c.source != CandidateSource::Raw),

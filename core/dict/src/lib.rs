@@ -3,6 +3,7 @@
 //! 分层见 ARCHITECTURE.md §5；数据管线与二进制格式见 docs/dict.md。
 #![forbid(unsafe_code)]
 
+pub mod adaptive;
 pub mod annotate;
 pub mod async_dict;
 pub mod binary;

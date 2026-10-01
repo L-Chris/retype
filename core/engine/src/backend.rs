@@ -323,6 +323,39 @@ fn spawn_learn_worker(weak: Weak<LocalBackend>, rx: Receiver<LearningEvent>) {
 
 impl KernelBackend for LocalBackend {
     fn submit(&self, ev: InputEvent) -> Vec<KernelAction> {
+        self.submit_with_learning(ev, true)
+    }
+
+    fn poll_action(&self) -> Option<KernelAction> {
+        self.rx.try_recv().ok()
+    }
+
+    fn render(&self) -> RenderState {
+        lock_or_recover(&self.kernel).render_state()
+    }
+}
+
+impl LocalBackend {
+    /// The platform can suppress learning for password, hidden or unknown input contexts.
+    pub fn submit_with_learning(&self, ev: InputEvent, allow_learning: bool) -> Vec<KernelAction> {
+        let acts = self.submit_deferred_learning(ev, allow_learning);
+        let mut out = Vec::with_capacity(acts.len());
+        for action in acts {
+            if let KernelAction::Side(SideEffect::Learn(event)) = action {
+                self.record_learning(event);
+            } else {
+                out.push(action);
+            }
+        }
+        out
+    }
+
+    /// TSF holds these events until the host document transaction has succeeded.
+    pub fn submit_deferred_learning(
+        &self,
+        ev: InputEvent,
+        allow_learning: bool,
+    ) -> Vec<KernelAction> {
         // 锁只在这一次纯计算期间持有，绝不跨调用（P1）
         let acts = { lock_or_recover(&self.kernel).handle(ev) };
         let mut out = Vec::with_capacity(acts.len());
@@ -333,7 +366,9 @@ impl KernelBackend for LocalBackend {
                     let _ = self.jobs.send(job);
                 }
                 KernelAction::Side(SideEffect::Learn(lev)) => {
-                    let _ = self.learns.send(lev);
+                    if allow_learning {
+                        out.push(KernelAction::Side(SideEffect::Learn(lev)));
+                    }
                 }
                 other => out.push(other),
             }
@@ -341,11 +376,7 @@ impl KernelBackend for LocalBackend {
         out
     }
 
-    fn poll_action(&self) -> Option<KernelAction> {
-        self.rx.try_recv().ok()
-    }
-
-    fn render(&self) -> RenderState {
-        lock_or_recover(&self.kernel).render_state()
+    pub fn record_learning(&self, event: LearningEvent) {
+        let _ = self.learns.send(event);
     }
 }

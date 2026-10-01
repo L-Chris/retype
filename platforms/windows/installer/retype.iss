@@ -123,6 +123,8 @@ Source: "{#X86Dir}\retype_ime.dll"; DestDir: "{code:GetPayloadDir}\x86"; Flags: 
 Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 更新器：自动更新的执行者（TIP DLL 自己绝不做网络 IO）
 Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+; Single per-user learning writer, independent of any application's TIP DLL.
+Source: "{#BaseDir}\retype-learning-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; Converts optional dictionaries downloaded later in Settings. No optional data is bundled.

@@ -14,30 +14,11 @@ use retype_types::{LearningEvent, LearningStore};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// 选词位置 → 加权量。
-///
-/// 选得越靠后，说明默认排序错得越离谱，信号越强。第 0 位也给一点点正反馈，
-/// 否则「一直选首选」的用户永远不会积累任何个人偏好。
-///
-/// 数值尺度对齐 `USER_BASE_LOGP`（-8.0）：需要**反复**选择才能把一个词顶到首位，
-/// 一次误点不足以让某个词永久钉在第一名。
-fn chosen_boost(index: usize) -> f32 {
-    match index {
-        0 => 0.2,
-        1 => 0.6,
-        2 => 0.9,
-        i => 1.2 + (i as f32 * 0.2).min(1.5),
-    }
-}
-
 /// 纠错对固化所需的重复次数：一次改动可能是手误，反复出现才是偏好。
 pub const CORRECTION_CONFIRM_THRESHOLD: u32 = 2;
 
 /// 语音上屏时，单个片段能被收进用户词库的最大字数。
 pub const VOICE_WORD_MAX_CHARS: usize = 4;
-
-/// 语音词进入用户词库时的初始加权，低于选词学习（语音识别本身可能出错）。
-pub const VOICE_COMMIT_BOOST: f32 = 1.0;
 
 /// 按非汉字字符（标点、空格、字母）切成片段。
 fn split_han_clauses(text: &str) -> Vec<&str> {
@@ -90,7 +71,7 @@ fn segment_by_lexicon(clause: &str, lex: &dyn Lexicon) -> Vec<String> {
     out
 }
 
-/// 内存学习器。M2 换成 SQLite 持久化实现（同一个 `LearningStore` trait）。
+/// 内存学习算法。平台存储适配层保存与恢复其结果，不让内核依赖数据库。
 pub struct Learner {
     user: Arc<UserDict>,
     /// 系统词库，用于从语音长句里捞出真词（见 `segment_by_lexicon`）
@@ -141,6 +122,17 @@ impl Learner {
             .get(&key)
             .copied()
             .unwrap_or(0)
+    }
+
+    pub fn restore_corrections(&self, entries: Vec<(String, String, u32)>) {
+        let mut map = match self.corrections.write() {
+            Ok(map) => map,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *map = entries
+            .into_iter()
+            .map(|(from, to, count)| ((from, to), count))
+            .collect();
     }
 
     /// 出现次数最多的纠错对，供云端 final pass 做后处理（M4）。
@@ -195,22 +187,22 @@ impl Learner {
         for seg in split_han_clauses(text) {
             let n = seg.chars().count();
             if (2..=VOICE_WORD_MAX_CHARS).contains(&n) && annotate::all_han(seg) {
-                self.add_word(seg, VOICE_COMMIT_BOOST);
+                self.add_word(seg);
                 continue;
             }
             // 长句：用系统词库做正向最大匹配，只捞出真实存在的词
             if let Some(sys) = &self.system {
                 for w in segment_by_lexicon(seg, sys.as_ref()) {
-                    self.add_word(&w, VOICE_COMMIT_BOOST);
+                    self.add_word(&w);
                 }
             }
         }
     }
 
-    fn add_word(&self, word: &str, boost: f32) {
+    fn add_word(&self, word: &str) {
         if annotate::all_han(word) {
             if let Some(ids) = annotate::annotate(word) {
-                self.user.add(word, &ids, boost);
+                self.observe(&ids, word);
             }
         }
     }
@@ -223,15 +215,75 @@ impl Learner {
                 Err(p) => p.into_inner(),
             };
             let c = g.entry(key.clone()).or_insert(0);
-            *c += 1;
+            *c = c.saturating_add(1);
             *c
         };
         // 反复出现才固化成用户词，避免把手误学进去
         if count >= CORRECTION_CONFIRM_THRESHOLD && annotate::all_han(to) {
             if let Some(ids) = annotate::annotate(to) {
-                self.user.add(to, &ids, 1.5);
+                self.observe(&ids, to);
             }
         }
+    }
+
+    fn observe(&self, key: &[SyllableId], text: &str) {
+        self.user.observe(key, text, self.prior_for_word(key, text));
+    }
+
+    /// Exact dictionary scores first; otherwise reproduce the existing segmented path.
+    /// Subtract one word bonus so registering a compound adds no new segmentation bonus.
+    fn prior_for_word(&self, key: &[SyllableId], text: &str) -> Option<f32> {
+        let system = self.system.as_ref()?;
+        let mut entries = Vec::new();
+        system.lookup(key, &mut entries);
+        if let Some(score) = entries
+            .iter()
+            .filter(|entry| &*entry.text == text)
+            .map(|entry| entry.logp)
+            .filter(|score| score.is_finite())
+            .max_by(f32::total_cmp)
+        {
+            return Some(score);
+        }
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() != key.len() || key.is_empty() {
+            return None;
+        }
+        let bonus = retype_pinyin::DecodeOptions::default().word_bonus;
+        let mut best = vec![f32::NEG_INFINITY; key.len() + 1];
+        best[0] = 0.0;
+        for start in 0..key.len() {
+            if !best[start].is_finite() {
+                continue;
+            }
+            for end in start + 1..=key.len() {
+                entries.clear();
+                system.lookup(&key[start..end], &mut entries);
+                let expected: String = chars[start..end].iter().collect();
+                for entry in entries
+                    .iter()
+                    .filter(|entry| entry.text.as_ref() == expected.as_str())
+                {
+                    best[end] = best[end].max(best[start] + entry.logp + bonus);
+                }
+            }
+        }
+        best[key.len()]
+            .is_finite()
+            .then_some(best[key.len()] - bonus)
+    }
+
+    /// A base dictionary may arrive asynchronously after restoring a persisted snapshot.
+    pub fn refresh_priors(&self) -> bool {
+        let mut changed = false;
+        for usage in self.user.unresolved_priors() {
+            if let Some(prior) = self.prior_for_word(&usage.syllables, &usage.text) {
+                self.user
+                    .resolve_prior(&usage.syllables, &usage.text, prior);
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -239,19 +291,16 @@ impl LearningStore for Learner {
     fn record(&self, event: LearningEvent) {
         match &event {
             LearningEvent::CandidateChosen {
-                text,
-                syllables,
-                index,
-                ..
+                text, syllables, ..
             } => {
                 if !syllables.is_empty() {
-                    self.user.boost(syllables, text, chosen_boost(*index));
+                    self.observe(syllables, text);
                 }
             }
             LearningEvent::Corrected { from, to, .. } => self.record_correction(from, to),
             LearningEvent::Coinage { text, syllables } => {
                 if !syllables.is_empty() {
-                    self.user.add(text, syllables, 1.5);
+                    self.observe(syllables, text);
                 }
             }
             LearningEvent::VoiceCommit { text } => self.record_voice_commit(text),
@@ -281,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_lower_candidate_boosts_it() {
+    fn first_choice_is_smoothed_against_dictionary_frequency() {
         let (u, l) = setup();
         l.record(LearningEvent::CandidateChosen {
             source: InputSource::Keyboard,
@@ -292,14 +341,16 @@ mod tests {
         let mut out = Vec::new();
         u.lookup(&ids("ni hao"), &mut out);
         assert_eq!(out.len(), 1);
-        // 起点是 USER_BASE_LOGP(-8.0)，一次选择只应把它抬起来一点，
-        // 不足以立刻压过系统词库里的常见词
-        assert!(
-            out[0].logp > -7.0,
-            "第 4 位被选中应给出可观测的加权，实际 {}",
-            out[0].logp
+        assert_eq!(u.usage_snapshot().records[0].count, 1);
+        let (base, _) = crate::from_pairs([("你好", "ni hao", 4000.), ("拟好", "ni hao", 6000.)]);
+        let lex = crate::LayeredDict::with_system_and_user(Arc::new(base), Arc::clone(&u), 0.);
+        let candidates = retype_pinyin::Decoder::new()
+            .decode("nihao", &lex)
+            .candidates;
+        assert_eq!(
+            candidates[0].text, "拟好",
+            "one choice must not override a clear base preference"
         );
-        assert!(out[0].logp < -3.0, "但一次选择绝不能让它直接登顶");
     }
 
     #[test]
@@ -315,11 +366,15 @@ mod tests {
         }
         let mut out = Vec::new();
         u.lookup(&ids("ni hao"), &mut out);
-        // -8.0 起步，12 × 0.6 = 7.2 → 约 -0.8，已经达到「高频系统词」的量级
-        assert!(
-            out[0].logp >= -1.0,
-            "反复选择后应能压过系统词，实际 {}",
-            out[0].logp
+        assert_eq!(u.usage_snapshot().records[0].count, 12);
+        let (base, _) = crate::from_pairs([("你好", "ni hao", 4000.), ("拟好", "ni hao", 6000.)]);
+        let lex = crate::LayeredDict::with_system_and_user(Arc::new(base), Arc::clone(&u), 0.);
+        assert_eq!(
+            retype_pinyin::Decoder::new()
+                .decode("nihao", &lex)
+                .candidates[0]
+                .text,
+            "你好"
         );
     }
 

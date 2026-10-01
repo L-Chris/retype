@@ -1081,6 +1081,100 @@ mod tests {
     // ── 异步后端 ────────────────────────────────────────────────
 
     #[test]
+    fn partial_choices_learn_only_when_committed_and_punctuation_accepts_the_default() {
+        let (mut kernel, _, _) = make_kernel(false, MockConfig::default());
+        type_kernel(&mut kernel, "nihaoma");
+        let index = kernel
+            .render_state()
+            .candidates
+            .iter()
+            .position(|candidate| candidate.text == "你好")
+            .expect("prefix candidate");
+        let selected = kernel.handle(InputEvent::CandidateChosen { index });
+        assert!(!selected
+            .iter()
+            .any(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_)))));
+        let committed = kernel.handle(key_ev(Key::Space));
+        let learned: Vec<_> = committed
+            .iter()
+            .filter_map(|action| match action {
+                KernelAction::Side(SideEffect::Learn(LearningEvent::CandidateChosen {
+                    text,
+                    ..
+                })) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(learned, ["你好", "吗"]);
+        type_kernel(&mut kernel, "nihaoma");
+        let index = kernel
+            .render_state()
+            .candidates
+            .iter()
+            .position(|candidate| candidate.text == "你好")
+            .expect("prefix candidate");
+        kernel.handle(InputEvent::CandidateChosen { index });
+        let cancelled = kernel.handle(key_ev(Key::Escape));
+        assert!(!cancelled
+            .iter()
+            .any(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_)))));
+        type_kernel(&mut kernel, "nihao");
+        let punctuation = kernel.handle(key_ev(Key::Char('.')));
+        assert_eq!(
+            punctuation
+                .iter()
+                .filter(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_))))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deferred_learning_requires_successful_platform_commit_and_respects_privacy() {
+        let (kernel, user, cloud) = make_kernel(false, MockConfig::default());
+        let backend = LocalBackend::new(kernel, cloud);
+        for ch in "nihao".chars() {
+            backend.submit(key_ev(Key::Char(ch)));
+        }
+        let actions =
+            backend.submit_deferred_learning(InputEvent::CandidateChosen { index: 0 }, true);
+        let event = actions
+            .into_iter()
+            .find_map(|action| match action {
+                KernelAction::Side(SideEffect::Learn(event)) => Some(event),
+                _ => None,
+            })
+            .expect("learning should be deferred until the host commit succeeds");
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            user.entry_count(),
+            0,
+            "an unconfirmed host write must not learn"
+        );
+        backend.record_learning(event);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while user.entry_count() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(user.entry_count(), 1);
+        user.clear();
+        for ch in "nihao".chars() {
+            backend.submit(key_ev(Key::Char(ch)));
+        }
+        let actions =
+            backend.submit_deferred_learning(InputEvent::CandidateChosen { index: 0 }, false);
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_)))));
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            user.entry_count(),
+            0,
+            "hidden input contexts must not learn"
+        );
+    }
+
+    #[test]
     fn local_backend_returns_immediately_and_delivers_rerank_later() {
         let (k, _, cloud) = make_kernel(
             true,

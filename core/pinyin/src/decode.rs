@@ -422,10 +422,15 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
         return DecodeOutput::default();
     }
     let lattice = build_lattice(input, lex, opts);
-    decode_lattice(input, lattice, opts)
+    decode_lattice(input, lattice, opts, lex)
 }
 
-pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions) -> DecodeOutput {
+pub(crate) fn decode_lattice(
+    input: &str,
+    lattice: Lattice,
+    opts: &DecodeOptions,
+    lex: &dyn Lexicon,
+) -> DecodeOutput {
     let paths = kbest(&lattice, opts.k.max(1));
     let bytes = input.as_bytes();
 
@@ -523,6 +528,24 @@ pub(crate) fn decode_lattice(input: &str, lattice: Lattice, opts: &DecodeOptions
         }
     }
 
+    if lex.personalize_candidates(&mut candidates) {
+        // Keep complete/prefix consumption semantics; within each coverage bucket use
+        // the adjusted path score. Without evidence the existing ordering is untouched.
+        candidates.sort_by(|a, b| {
+            b.consumed
+                .cmp(&a.consumed)
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        if let Some(first) = candidates.first() {
+            first_syllables = first
+                .syllables
+                .iter()
+                .filter_map(|id| syllables::name_of(*id).map(str::to_owned))
+                .collect();
+            matched = first.syllable_len;
+        }
+    }
     DecodeOutput {
         candidates,
         syllables: first_syllables,

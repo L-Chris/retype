@@ -38,6 +38,8 @@ function Step($msg) { Write-Host "`n=== $msg ===" -ForegroundColor Cyan }
 Step "1/5 构建 TIP DLL 与调试台（release）"
 cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
 if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
+cargo build --release -p retype-learning --features broker
+if ($LASTEXITCODE -ne 0) { throw "学习后台构建失败" }
 rustup target add i686-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw "安装 x86 Rust target 失败" }
 cargo build --release --target i686-pc-windows-msvc -p retype-tsf
@@ -59,7 +61,7 @@ if (-not $SkipDict -or -not (Test-Path $dictTsv) -or -not (Test-Path (Join-Path 
 
 if (-not $NoTest) {
   Step "3/5 自检（内核 + 真实 TSF 文本存储，不修改系统注册）"
-  cargo test --workspace --release
+  cargo test --workspace --release --features retype-learning/broker
   if ($LASTEXITCODE -ne 0) { throw "测试失败" }
   cargo test --release --target i686-pc-windows-msvc -p retype-tsf
   if ($LASTEXITCODE -ne 0) { throw "x86 TSF 测试失败" }
@@ -83,6 +85,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist 'x86') | Out-Null
 Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.dll') (Join-Path $dist 'x86') -Force
 Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
+Copy-Item (Join-Path $repoRoot 'target\release\retype-learning-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-dict-build.exe') $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force

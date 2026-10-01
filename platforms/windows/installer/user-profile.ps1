@@ -16,7 +16,14 @@ function Get-UserTips {
 }
 
 $before = @(Get-UserTips)
-if ($Uninstall -and $before -notcontains $tip) { return }
+if ($Uninstall) {
+  Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'retype Learning' -ErrorAction SilentlyContinue
+  $learningHost = Join-Path $PSScriptRoot 'retype-learning-host.exe'
+  if (Test-Path -LiteralPath $learningHost) {
+    Start-Process -FilePath $learningHost -ArgumentList '--stop' -WindowStyle Hidden -Wait | Out-Null
+  }
+  if ($before -notcontains $tip) { return }
+}
 if (-not $Uninstall) {
   $profile = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\0x00000804\{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
   if (-not (Test-Path -LiteralPath $profile)) { throw 'Install retype before adding its keyboard.' }
@@ -131,6 +138,32 @@ if (-not $Uninstall) {
   $packAcl.SetAccessRule($packRead)
   Set-Acl -LiteralPath $dictionaryRoot -AclObject $packAcl
   Set-ItemProperty -Path $preferences -Name 'DictionaryRoot' -Value $dictionaryRoot
+
+  # The broker alone owns word-bearing learning files. AppContainers get pipe access,
+  # never permission to open this directory. The native broker also enforces this ACL.
+  $learning = Join-Path $env:LOCALAPPDATA 'retype\learning'
+  New-Item -ItemType Directory -Path $learning -Force | Out-Null
+  $learningAcl = Get-Acl -LiteralPath $learning
+  $learningAcl.SetAccessRuleProtection($true, $false)
+  foreach ($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User,
+      [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid,
+      [Security.AccessControl.FileSystemRights]::FullControl,
+      [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow)
+    $learningAcl.SetAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $learning -AclObject $learningAcl
+  $learningHost = Join-Path $PSScriptRoot 'retype-learning-host.exe'
+  if (Test-Path -LiteralPath $learningHost) {
+    # Direct native executable at user logon; no PowerShell in the typing path.
+    if (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run')) {
+      New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | Out-Null
+    }
+    Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'retype Learning' -Value ('"' + $learningHost + '" --serve')
+    Start-Process -FilePath $learningHost -ArgumentList '--serve' -WindowStyle Hidden | Out-Null
+  }
 }
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
 if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {

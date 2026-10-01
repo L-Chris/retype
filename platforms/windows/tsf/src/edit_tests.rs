@@ -20,10 +20,56 @@ struct Data {
     end: i32,
     sink: Option<ITextStoreACPSink>,
     reject: bool,
+    reject_write: bool,
     defer: bool,
     hidden: bool,
     no_text_extent: bool,
     deferred_flags: Option<u32>,
+}
+
+#[implement(ITfInputScope)]
+struct DeclaredScope(InputScope);
+impl ITfInputScope_Impl for DeclaredScope_Impl {
+    fn GetInputScopes(&self, scopes: *mut *mut InputScope, count: *mut u32) -> Result<()> {
+        if scopes.is_null() || count.is_null() {
+            return Err(E_POINTER.into());
+        }
+        // SAFETY: COM out parameters are checked, and the caller frees this CoTaskMem array.
+        unsafe {
+            let value = CoTaskMemAlloc(std::mem::size_of::<InputScope>()).cast::<InputScope>();
+            if value.is_null() {
+                return Err(E_OUTOFMEMORY.into());
+            }
+            *value = self.0;
+            *scopes = value;
+            *count = 1;
+        }
+        Ok(())
+    }
+    fn GetPhrase(&self, _: *mut *mut windows_core::BSTR, _: *mut u32) -> Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetRegularExpression(&self) -> Result<windows_core::BSTR> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetSRGS(&self) -> Result<windows_core::BSTR> {
+        Err(E_NOTIMPL.into())
+    }
+    fn GetXML(&self) -> Result<windows_core::BSTR> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+#[test]
+fn declared_password_private_and_pin_scopes_never_learn() -> Result<()> {
+    for scope in [IS_DEFAULT, IS_PASSWORD, IS_PRIVATE, IS_NUMERIC_PIN] {
+        let object: ITfInputScope = DeclaredScope(scope).into();
+        let value = VARIANT::from(object.cast::<windows_core::IUnknown>()?);
+        assert_eq!(safe_input_scope(&value), scope == IS_DEFAULT);
+    }
+    assert!(safe_input_scope(&VARIANT::default()));
+    assert!(!safe_input_scope(&VARIANT::from(1i32)));
+    Ok(())
 }
 #[implement(ITextStoreACP)]
 struct Store {
@@ -171,6 +217,9 @@ impl ITextStoreACP_Impl for Store_Impl {
         cch: u32,
     ) -> windows_core::Result<TS_TEXTCHANGE> {
         let mut d = lock(&self.data);
+        if d.reject_write {
+            return Err(E_ACCESSDENIED.into());
+        }
         let text = if cch == 0 {
             &[]
         } else {
@@ -606,6 +655,36 @@ fn run_host() -> Result<()> {
         assert_eq!(state.pending.load(Ordering::SeqCst), 0);
         lock(&data).hidden = true;
         assert!(!keys.OnTestKeyDown(&context, letter, lp)?.as_bool());
+        request(&state, &context, Work::SetChinese(true))?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let learned_before = session.user.snapshot();
+        assert!(
+            learned_before.iter().any(|entry| entry.1 == "你好"),
+            "normal TSF text fields must learn successful commits"
+        );
+        for ch in "nihao".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            session.user.snapshot(),
+            learned_before,
+            "hidden TSF contexts must not learn"
+        );
+        lock(&data).hidden = false;
+        for ch in "nihao".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        lock(&data).reject_write = true;
+        let _ = request(&state, &context, Work::Key(Key::Space, Modifiers::NONE));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            session.user.snapshot(),
+            learned_before,
+            "failed host writes must not learn"
+        );
+        lock(&data).reject_write = false;
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;

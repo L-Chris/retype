@@ -90,6 +90,8 @@ pub enum VoicePhase {
 struct Part {
     text: String,
     pinyin: String,
+    syllables: Vec<retype_types::SyllableId>,
+    index: usize,
 }
 
 pub struct Kernel {
@@ -598,24 +600,18 @@ impl Kernel {
         let cut_bytes = cut.min(self.buffer.len());
         let pinyin = self.buffer[..cut_bytes].to_string();
 
-        actions.push(KernelAction::Side(SideEffect::Learn(
-            LearningEvent::CandidateChosen {
-                source: InputSource::Keyboard,
-                text: c.text.clone(),
-                syllables: c.syllables.clone(),
-                index,
-            },
-        )));
-
         self.buffer.drain(..cut_bytes);
         self.parts.push(Part {
             text: c.text.clone(),
             pinyin,
+            syllables: c.syllables.clone(),
+            index,
         });
         self.bump_gen();
 
         if self.buffer.is_empty() {
             let text = self.committed_text();
+            self.emit_part_learning(actions);
             self.reset_composition();
             actions.push(KernelAction::Commit(CommitRequest::ReplaceComposition {
                 text,
@@ -628,6 +624,21 @@ impl Kernel {
 
     /// 上屏首选（整句），用于「组字中直接打标点」的场景。
     fn commit_best(&mut self, actions: &mut Vec<KernelAction>) {
+        self.emit_part_learning(actions);
+        if let Some(candidate) = self
+            .candidates
+            .first()
+            .filter(|candidate| !candidate.syllables.is_empty())
+        {
+            actions.push(KernelAction::Side(SideEffect::Learn(
+                LearningEvent::CandidateChosen {
+                    source: InputSource::Keyboard,
+                    text: candidate.text.clone(),
+                    syllables: candidate.syllables.clone(),
+                    index: 0,
+                },
+            )));
+        }
         let text = match self.candidates.first() {
             Some(c) => {
                 let remainder = if c.consumed == 0 {
@@ -650,6 +661,7 @@ impl Kernel {
     /// 上屏原始字母（回车的逃生通道）。
     fn commit_raw_letters(&mut self, actions: &mut Vec<KernelAction>) {
         let text = self.composition_text();
+        self.emit_part_learning(actions);
         self.reset_composition();
         self.bump_gen();
         if text.is_empty() {
@@ -659,6 +671,19 @@ impl Kernel {
             text,
         }));
         actions.push(KernelAction::Render(self.render_state()));
+    }
+
+    fn emit_part_learning(&self, actions: &mut Vec<KernelAction>) {
+        for part in self.parts.iter().filter(|part| !part.syllables.is_empty()) {
+            actions.push(KernelAction::Side(SideEffect::Learn(
+                LearningEvent::CandidateChosen {
+                    source: InputSource::Keyboard,
+                    text: part.text.clone(),
+                    syllables: part.syllables.clone(),
+                    index: part.index,
+                },
+            )));
+        }
     }
 
     fn cancel_composition(&mut self, actions: &mut Vec<KernelAction>) {

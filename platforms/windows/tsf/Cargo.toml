@@ -19,6 +19,7 @@ retype-dict = { workspace = true }
 retype-context = { workspace = true }
 retype-cloud = { workspace = true }
 retype-engine = { workspace = true }
+retype-learning = { path = "../learning" }
 retype-candidate-ui = { path = "../candidate-ui", features = ["egui"] }
 windows-core = { workspace = true }
 tracing = { workspace = true }

@@ -7,7 +7,7 @@
 //! 但键盘始终是活的。
 
 use retype_dict::{
-    spawn_loader, AsyncDict, FallbackPolicy, LayeredDict, Learner, UserDict, DEFAULT_USER_BOOST,
+    spawn_loader, AsyncDict, FallbackPolicy, LayeredDict, UserDict, DEFAULT_USER_BOOST,
 };
 use retype_engine::{
     offline_cloud, BackendOptions, Kernel, KernelBackend, KernelConfig, LocalBackend,
@@ -17,6 +17,8 @@ use retype_types::{InputEvent, KernelAction, LearningStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// 词库文件位置的环境变量覆盖（开发/诊断时最常用）。
@@ -148,17 +150,20 @@ impl Session {
         // 词库不存在/损坏 → 单字模式兜底（§7）
         let _ = spawn_loader(&dict_path, Arc::clone(&dict), FallbackPolicy::SingleChar);
 
-        let user = Arc::new(UserDict::new());
-        let sys: Arc<dyn Lexicon> = Arc::clone(&dict) as Arc<dyn Lexicon>;
-        let learner: Arc<dyn LearningStore> =
-            Arc::new(Learner::with_system(Arc::clone(&user), Arc::clone(&sys)));
-        let mut layers =
-            LayeredDict::with_system_and_user(sys, Arc::clone(&user), DEFAULT_USER_BOOST);
-        layers.push(retype_dict::Layer {
+        let mut base = LayeredDict::new();
+        base.push(retype_dict::Layer {
+            name: "system",
+            dict: Arc::clone(&dict) as Arc<dyn Lexicon>,
+            boost: 0.0,
+        });
+        base.push(retype_dict::Layer {
             name: "optional",
             dict: Arc::clone(&packs) as Arc<dyn Lexicon>,
             boost: 0.0,
         });
+        let sys: Arc<dyn Lexicon> = Arc::new(base);
+        let (user, learner) = shared_learning(Arc::clone(&sys));
+        let layers = LayeredDict::with_system_and_user(sys, Arc::clone(&user), DEFAULT_USER_BOOST);
         let layered: Arc<dyn Lexicon> = Arc::new(layers);
 
         // M0/M1：不配云端。二刷要等 M3 接了真实供应商才有意义，
@@ -228,7 +233,18 @@ impl Session {
     }
 
     pub fn submit(&self, ev: InputEvent) -> Vec<KernelAction> {
-        let mut acts = self.backend.submit(ev);
+        self.drain_actions(self.backend.submit(ev))
+    }
+
+    pub(crate) fn submit_in_context(
+        &self,
+        ev: InputEvent,
+        allow_learning: bool,
+    ) -> Vec<KernelAction> {
+        self.drain_actions(self.backend.submit_deferred_learning(ev, allow_learning))
+    }
+
+    fn drain_actions(&self, mut acts: Vec<KernelAction>) -> Vec<KernelAction> {
         // 顺带收干异步队列：M1 会把这一步交给候选窗 UI 线程的消息循环
         while let Some(a) = self.backend.poll_action() {
             acts.push(a);
@@ -239,6 +255,38 @@ impl Session {
     /// 词库是否已就绪。用于决定是否显示「降级」状态。
     pub fn dict_ready(&self) -> bool {
         self.dict.is_loaded()
+    }
+}
+
+fn shared_learning(system: Arc<dyn Lexicon>) -> (Arc<UserDict>, Arc<dyn LearningStore>) {
+    // Unit tests must never start a production broker or change the developer's learned words.
+    #[cfg(test)]
+    {
+        let user = Arc::new(UserDict::new());
+        let learner = Arc::new(retype_dict::Learner::with_system(Arc::clone(&user), system));
+        (user, learner)
+    }
+    #[cfg(not(test))]
+    {
+        static CLIENT: OnceLock<Arc<retype_learning::client::Client>> = OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            let host = dll_dir().map(|directory| {
+                let base = if directory.file_name().is_some_and(|name| name == "x86") {
+                    directory
+                        .parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or(directory)
+                } else {
+                    directory
+                };
+                base.join("retype-learning-host.exe")
+            });
+            retype_learning::client::Client::start(system, host)
+        });
+        (
+            Arc::clone(&client.user),
+            Arc::clone(client) as Arc<dyn LearningStore>,
+        )
     }
 }
 

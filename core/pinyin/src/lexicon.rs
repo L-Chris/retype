@@ -4,7 +4,7 @@
 //! 在 `retype-dict`。这样拼音引擎可以脱离词库实现单独测试，
 //! 也让 Android 端能换一套存储而不动解码逻辑。
 
-use retype_types::SyllableId;
+use retype_types::{Candidate, SyllableId};
 use std::sync::Arc;
 
 /// 词条 flags（与 docs/dict.md 的二进制格式保持一致）。
@@ -47,6 +47,10 @@ impl LexEntry {
 
 /// 词库抽象。所有方法都必须是**纯内存查询**，绝不允许 IO（ARCHITECTURE.md P1）。
 pub trait Lexicon: Send + Sync {
+    /// Optional local history model. Reweight before final ordering, without IO.
+    fn personalize_candidates(&self, _candidates: &mut [Candidate]) -> bool {
+        false
+    }
     /// 精确查询：给定音节 id 序列，追加所有命中到 `out`。
     ///
     /// 实现方**只 push，不要 clear**，buffer 由调用方复用以减少分配。
