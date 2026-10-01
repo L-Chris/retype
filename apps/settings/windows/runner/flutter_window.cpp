@@ -6,6 +6,7 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "settings_channel.h"
+#include "startup_diagnostics.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -18,11 +19,13 @@ bool FlutterWindow::OnCreate() {
   }
 
   RECT frame = GetClientArea();
+  settings_startup::Log("engine.begin");
 
   // The size here must match the window dimensions to avoid unnecessary surface
   // creation / destruction in the startup path.
   flutter_controller_ = std::make_unique<flutter::FlutterViewController>(
       frame.right - frame.left, frame.bottom - frame.top, project_);
+  settings_startup::Log("engine.ready");
   // Ensure that basic setup of the controller was successful.
   if (!flutter_controller_->engine() || !flutter_controller_->view()) {
     return false;
@@ -30,9 +33,12 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   settings_channel_ = RegisterSettingsChannel(flutter_controller_->engine(), GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  settings_startup::Log("engine.channels_ready");
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
+    settings_startup::Log("frame.native_first");
     this->Show();
+    settings_startup::Log("window.shown");
   });
 
   // Flutter can complete the first frame before the "show window" callback is
@@ -56,12 +62,19 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  // Briefly reuse the engine for repeated settings visits, then release it.
+  // Reuse the engine for ten minutes after closing, then release it.
   // WM_CLOSE still destroys the process for installers and system shutdown.
   constexpr UINT_PTR kIdleTimer = 42;
+  if (message == kActivateSettingsMessage) {
+    settings_startup::opened_at = static_cast<DWORD>(wparam);
+    KillTimer(hwnd, kIdleTimer);
+    settings_startup::Log("reuse.activated");
+    return 0;
+  }
   if (message == kHideSettingsMessage) {
     ShowWindow(hwnd, SW_HIDE);
-    SetTimer(hwnd, kIdleTimer, 60000, nullptr);
+    SetTimer(hwnd, kIdleTimer, 10 * 60 * 1000, nullptr);
+    settings_startup::Log("window.hidden");
     return 0;
   }
   if (message == WM_SHOWWINDOW && wparam) {
@@ -70,7 +83,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
   if (message == WM_TIMER && wparam == kIdleTimer) {
     KillTimer(hwnd, kIdleTimer);
-    if (!IsWindowVisible(hwnd)) PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    if (!IsWindowVisible(hwnd)) {
+      settings_startup::Log("process.idle_exit");
+      PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
     return 0;
   }
   if (message == kShowUpdatesMessage && settings_channel_) {

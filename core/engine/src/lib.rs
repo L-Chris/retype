@@ -121,6 +121,51 @@ mod tests {
     }
 
     #[test]
+    fn flypy_zero_initial_prefix_selection_restores_original_keys() {
+        let (dict, _) = from_pairs([
+            ("额度", "e du", 1000.0),
+            ("额度吗", "e du ma", 5000.0),
+            ("吗", "ma", 2000.0),
+        ]);
+        let cloud = offline_cloud(Duration::from_millis(100));
+        let kernel = Kernel::new(
+            KernelConfig {
+                pinyin_scheme: retype_types::PinyinScheme::Flypy,
+                rerank_enabled: false,
+                ..Default::default()
+            },
+            Arc::new(dict),
+            Arc::new(Learner::new(Arc::new(UserDict::new()))),
+            Arc::clone(&cloud),
+        );
+        let backend = InlineBackend::new(kernel, cloud);
+        type_str(&backend, "edum");
+        assert!(backend
+            .render()
+            .candidates
+            .iter()
+            .any(|c| c.text == "额度吗" && c.consumed == 4));
+        type_str(&backend, "a");
+        let render = backend.render();
+        let index = render
+            .candidates
+            .iter()
+            .position(|c| c.text == "额度")
+            .expect("zero-initial prefix candidate");
+        assert_eq!(render.candidates[index].consumed, 3);
+        backend.submit(InputEvent::CandidateChosen { index });
+        assert_eq!(backend.render().composition, "额度ma");
+        for _ in 0..3 {
+            backend.submit(key_ev(Key::Backspace));
+        }
+        assert_eq!(backend.render().composition, "edu");
+        assert_eq!(
+            committed_of(&backend.submit(key_ev(Key::Space))).as_deref(),
+            Some("额度")
+        );
+    }
+
+    #[test]
     fn flypy_commit_and_prefix_consumption_use_original_keys() {
         let f = fixture(false);
         f.backend.submit(InputEvent::SetPinyinScheme(

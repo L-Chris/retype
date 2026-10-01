@@ -41,6 +41,8 @@
 ## 构建工具链
 
 - Rust standard library — MIT OR Apache-2.0
+- egui / eframe / winit / glutin / glow — MIT OR Apache-2.0
+- chrono — MIT OR Apache-2.0
 - windows / windows-core (Microsoft) — MIT OR Apache-2.0
 - sha2, serde_json, thiserror, tracing, crossbeam-channel, futures, ureq — 各自 MIT/Apache-2.0
 

@@ -1,4 +1,4 @@
-//! Flypy two-key syllables. The lattice operates on ORIGINAL keystroke offsets,
+//! Flypy syllables with single-key zero-initial aliases, using ORIGINAL key offsets,
 //! so prefix selection/backspace never confuse expanded pinyin with typed keys.
 //! Layout reference: https://flypy.com/ (小鹤双拼); also checked against Rime's Flypy schema.
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
 use retype_types::{Candidate, CandidateSource, SyllableId};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
 };
 
 pub fn encode(syllable: &str) -> Option<[u8; 2]> {
@@ -91,12 +91,16 @@ fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
     while input.get(pos) == Some(&b'\'') {
         pos += 1;
     }
-    let segment = input[..pos]
-        .iter()
-        .rposition(|b| *b == b'\'')
-        .map_or(0, |i| i + 1);
-    if (pos - segment) % 2 != 0 {
-        return;
+    // Reachable boundaries come from the lattice, not fixed key-pair parity.
+    // Single-key zero initials shift every subsequent two-key syllable.
+    let zero_initial = match input.get(pos) {
+        Some(b'a') => Some("a"),
+        Some(b'e') => Some("e"),
+        Some(b'o') => Some("o"),
+        _ => None,
+    };
+    if let Some(id) = zero_initial.and_then(syllables::id_of) {
+        out.push((pos - start + 1, id));
     }
     if let (Some(a), Some(b)) = (input.get(pos), input.get(pos + 1)) {
         if let Some(ids) = table().get(&[*a, *b]) {
@@ -109,12 +113,25 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
     let normalized = crate::normalize(input);
     let lattice = build_lattice_with(&normalized, lex, opts, options);
     let mut output = decode_lattice(&normalized, lattice, opts);
-    if normalized
-        .rsplit('\'')
-        .next()
-        .is_some_and(|segment| segment.len() % 2 == 1)
-    {
-        let mut candidates = incomplete_code_candidates(&normalized, lex, opts);
+    if can_preview_tail(normalized.as_bytes()) {
+        let preview = build_lattice_with(&normalized, lex, opts, preview_options);
+        let mut candidates: Vec<_> = decode_lattice(&normalized, preview, opts)
+            .candidates
+            .into_iter()
+            .filter(|c| c.source != CandidateSource::Raw)
+            .collect();
+        if opts.include_prefixes {
+            // A single-key vowel may complete a phrase directly, hiding the
+            // preceding word from its best path. Keep that prefix selectable.
+            let prefix = &normalized[..normalized.len() - 1];
+            let lattice = build_lattice_with(prefix, lex, opts, options);
+            candidates.extend(
+                decode_lattice(prefix, lattice, opts)
+                    .candidates
+                    .into_iter()
+                    .filter(|c| c.source != CandidateSource::Raw),
+            );
+        }
         let mut raw = Vec::new();
         for candidate in output.candidates {
             if candidate.source == CandidateSource::Raw {
@@ -139,97 +156,69 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
         candidates.retain(|c| seen.insert(c.text.clone()));
         candidates.extend(raw.into_iter().filter(|c| seen.insert(c.text.clone())));
         output.candidates = candidates;
+        if let Some(first) = output.candidates.first() {
+            output.syllables = first
+                .syllables
+                .iter()
+                .filter_map(|id| syllables::name_of(*id).map(str::to_owned))
+                .collect();
+            output.matched_syllables = first.syllable_len;
+            output.has_raw = first.source == CandidateSource::Raw;
+        }
     }
     output
 }
 
-/// Preview dictionary matches while the last Flypy syllable has only its first key.
-/// A three-key input such as `mwy` queries phrases for `mei` + `y*`, so `没有`
-/// can appear before the user types the fourth key.
-fn incomplete_code_candidates(
-    input: &str,
-    lex: &dyn Lexicon,
-    opts: &DecodeOptions,
-) -> Vec<Candidate> {
-    let Some(&first_key) = input.as_bytes().last() else {
-        return Vec::new();
-    };
-    if !first_key.is_ascii_lowercase() {
-        return Vec::new();
+/// Unfinished syllables use the same dictionary-pruned graph as complete codes.
+/// Only the final key can be incomplete; interior consonants remain two-key codes.
+fn preview_options(input: &[u8], pos: usize, out: &mut Vec<(usize, SyllableId)>) {
+    options(input, pos, out);
+    let mut end = pos;
+    while input.get(end) == Some(&b'\'') {
+        end += 1;
     }
-    let complete = input[..input.len() - 1].trim_end_matches('\'');
-    let prefixes: Vec<Vec<SyllableId>> = if complete.is_empty() {
-        vec![Vec::new()]
-    } else {
-        let decoded = decode(complete, lex, opts);
-        let mut seen = HashSet::new();
-        decoded
-            .candidates
-            .into_iter()
-            .filter(|c| c.source != CandidateSource::Raw && c.consumed == complete.len())
-            .map(|c| c.syllables)
-            .filter(|ids| seen.insert(ids.clone()))
-            .collect()
-    };
-    if prefixes.is_empty() {
-        return Vec::new();
+    if end + 1 != input.len() {
+        return;
     }
-
-    let mut final_ids = HashSet::new();
     for (code, ids) in table() {
-        if code[0] == first_key {
-            final_ids.extend(ids.iter().copied());
-        }
-    }
-    // Keep pronunciations and scores until the top candidates are known. Building
-    // display strings for every homophone on each keystroke is needlessly costly.
-    let mut matches: HashMap<Arc<str>, (Vec<SyllableId>, f32)> = HashMap::new();
-    let mut entries = Vec::new();
-    for prefix in prefixes {
-        for id in &final_ids {
-            let mut syllables = prefix.clone();
-            syllables.push(*id);
-            entries.clear();
-            lex.lookup(&syllables, &mut entries);
-            for entry in &entries {
-                let score = entry.logp + opts.word_bonus;
-                let slot = matches
-                    .entry(Arc::clone(&entry.text))
-                    .or_insert_with(|| (syllables.clone(), score));
-                if score > slot.1 {
-                    *slot = (syllables.clone(), score);
+        if input.get(end) == Some(&code[0]) {
+            for &id in ids {
+                let option = (input.len() - pos, id);
+                if !out.contains(&option) {
+                    out.push(option);
                 }
             }
         }
     }
-    let mut ranked: Vec<_> = matches.into_iter().collect();
-    ranked.sort_by(|(a_text, (_, a_score)), (b_text, (_, b_score))| {
-        b_score
-            .partial_cmp(a_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a_text.cmp(b_text))
-    });
-    ranked
-        .into_iter()
-        .take(64)
-        .map(|(text, (syllables, score))| Candidate {
-            source: if text.chars().count() == 1 {
-                CandidateSource::SingleChar
-            } else {
-                CandidateSource::Local
-            },
-            comment: syllables
-                .iter()
-                .filter_map(|id| syllables::name_of(*id))
-                .collect::<Vec<_>>()
-                .join("'"),
-            syllable_len: syllables.len(),
-            consumed: input.len(),
-            syllables,
-            score,
-            text: text.to_string(),
-        })
-        .collect()
+    // HashMap iteration order must not affect bounded k-best search ties.
+    out.sort_unstable();
+}
+
+/// Walk complete syllable boundaries to see whether the last key can be a new
+/// syllable. Unlike parity, this also works after single-key zero initials, and
+/// avoids constructing a preview lattice for ordinary complete two-key input.
+fn can_preview_tail(input: &[u8]) -> bool {
+    if input.is_empty() || !input[input.len() - 1].is_ascii_lowercase() {
+        return false;
+    }
+    let mut reachable = vec![false; input.len()];
+    reachable[0] = true;
+    let mut out = Vec::new();
+    for pos in 0..input.len() - 1 {
+        if !reachable[pos] {
+            continue;
+        }
+        if input[pos] == b'\'' {
+            reachable[pos + 1] = true;
+        }
+        options(input, pos, &mut out);
+        for &(len, _) in &out {
+            if pos + len < input.len() {
+                reachable[pos + len] = true;
+            }
+        }
+    }
+    reachable[input.len() - 1]
 }
 
 #[cfg(test)]
@@ -260,12 +249,12 @@ mod tests {
         }
     }
     #[test]
-    fn only_complete_pairs_at_boundaries() {
+    fn variable_length_options_respect_explicit_boundaries() {
         let mut out = Vec::new();
         options(b"nihc", 0, &mut out);
         assert_eq!(out, vec![(2, syllables::id_of("ni").unwrap_or_default())]);
-        options(b"nihc", 1, &mut out);
-        assert!(out.is_empty());
+        options(b"edu", 1, &mut out);
+        assert_eq!(out, vec![(2, syllables::id_of("du").unwrap_or_default())]);
         options(b"n", 0, &mut out);
         assert!(out.is_empty());
         options(b"ni'hc", 2, &mut out);

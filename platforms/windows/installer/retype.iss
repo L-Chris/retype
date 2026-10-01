@@ -113,8 +113,8 @@ RestartApplications=no
 Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "platforms\windows\installer\refresh-hosts.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "apps\settings\windows\runner\resources\app_icon.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
-; Flutter desktop bundle must stay together (exe, runtime DLL and data directory).
-Source: "apps\settings\build\windows\x64\runner\Release\*"; DestDir: "{code:GetPayloadDir}\settings"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Standalone Rust settings; keep the installed name compatible with older TIPs.
+Source: "{#BaseDir}\retype-settings-egui.exe"; DestDir: "{code:GetPayloadDir}\settings"; DestName: "retype.exe"; Flags: ignoreversion
 ; 路径都相对 SourceDir（= RepoRoot）
 ; TSF TIP。ignoreversion 是必须的：Rust 的 cdylib 没有 VERSIONINFO 资源，
 ; Windows 无法按文件版本判断新旧，只能无条件覆盖。

@@ -41,18 +41,14 @@ jobs:
           if ($LASTEXITCODE) { throw 'x86 failed' }
           cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- --out data/dict/retype-dict.tsv
           if ($LASTEXITCODE) { throw 'dictionary failed' }
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: "3.47.0"
       - name: Build Windows settings
         shell: pwsh
-        working-directory: apps/settings
         run: |
-          flutter pub get
-          if ($LASTEXITCODE) { throw 'Flutter dependencies failed' }
-          flutter build windows --release
-          if ($LASTEXITCODE) { throw 'Flutter Windows build failed' }
+          cargo build --release --target x86_64-pc-windows-msvc -p retype-settings-egui
+          if ($LASTEXITCODE) { throw 'Settings build failed' }
+          cargo test -p retype-settings-egui
+          if ($LASTEXITCODE) { throw 'Settings tests failed' }
+
       - name: Build installer
         shell: pwsh
         run: |

@@ -61,6 +61,9 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
       });
     }
     WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_startupMilestone('frame.dart_first'));
+    });
     _load();
   }
 
@@ -225,6 +228,9 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
           settings = value;
           error = null;
         });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) unawaited(_startupMilestone('settings.interactive'));
+        });
         if (widget.openUpdates && !initialUpdateCheckDone) {
           initialUpdateCheckDone = true;
           unawaited(_checkUpdate());
@@ -232,6 +238,17 @@ class _RetypeAppState extends State<RetypeApp> with WidgetsBindingObserver {
       }
     } catch (e) {
       if (mounted) setState(() => error = '读取设置失败：$e');
+    }
+  }
+
+  Future<void> _startupMilestone(String event) async {
+    if (widget.repository != null) return;
+    try {
+      await _channel.invokeMethod<void>('startupMilestone', event);
+    } on PlatformException {
+      // Diagnostics must never prevent opening settings.
+    } on MissingPluginException {
+      // Allows other development platforms to render the settings shell.
     }
   }
 

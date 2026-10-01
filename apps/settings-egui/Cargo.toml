@@ -1,0 +1,32 @@
+[package]
+name = "retype-settings-egui"
+description = "Windows settings application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-types.workspace = true
+serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sha2.workspace = true
+ureq.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# 0.31 supports Rust 1.85. Production uses Glow; wgpu is an opt-in comparison build.
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "accesskit", "glow"] }
+png = "0.17"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi"] }
+raw-window-handle = "0.6"
+
+[features]
+wgpu = ["eframe/wgpu"]
+
+[lints]
+workspace = true
+
+[build-dependencies]
+winres = "0.1.12"

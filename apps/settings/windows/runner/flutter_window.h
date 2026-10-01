@@ -12,6 +12,7 @@
 
 constexpr UINT kShowUpdatesMessage = WM_APP + 27;
 constexpr UINT kHideSettingsMessage = WM_APP + 28;
+constexpr UINT kActivateSettingsMessage = WM_APP + 29;
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {

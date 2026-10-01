@@ -78,8 +78,26 @@ pub fn pack_root() -> Option<std::path::PathBuf> {
         )))
     }
 }
-/// Open the installed settings app without loading Flutter into the TSF host.
+/// Open the installed settings app without loading a UI runtime into the TSF host.
 pub fn open_settings() -> Result<()> {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    // The 32-bit tick travels unchanged through x86/x64 window messages.
+    let opened_at = unsafe { GetTickCount() };
+    let diagnose = |event: &str| {
+        let message: Vec<u16> = format!(
+            "retype settings: {event} open_ms={}\n",
+            unsafe { GetTickCount() }.wrapping_sub(opened_at)
+        )
+        .encode_utf16()
+        .chain([0])
+        .collect();
+        unsafe {
+            windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(windows_core::PCWSTR(
+                message.as_ptr(),
+            ));
+        }
+    };
+    diagnose("launcher.clicked");
     let mut buffer = [0u16; 32768];
     let mut bytes = (buffer.len() * 2) as u32;
     // SAFETY: Fixed UTF-16 buffer; the x86 TIP must read the x64 installation view.
@@ -99,12 +117,21 @@ pub fn open_settings() -> Result<()> {
     let path = std::path::PathBuf::from(String::from_utf16_lossy(&buffer[..length]))
         .join("settings")
         .join("retype.exe");
+    let expected: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().collect();
+    let mut spawn_reason = "no_window";
     // Reuse a live settings window only when it belongs to the active install.
-    // This avoids loading a second Flutter process merely to raise the first.
+    // This avoids loading a second settings process merely to raise the first.
     unsafe {
         use windows::Win32::System::Threading::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
-        if let Ok(window) = FindWindowW(w!("FLUTTER_RUNNER_WIN32_WINDOW"), w!("retype 设置")) {
+        let mut previous = None;
+        while let Ok(window) = FindWindowExW(
+            None,
+            previous,
+            w!("Retype.Settings.Command"),
+            w!("retype 设置"),
+        ) {
+            previous = Some(window);
             let mut pid = 0;
             GetWindowThreadProcessId(window, Some(&mut pid));
             if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
@@ -118,18 +145,44 @@ pub fn open_settings() -> Result<()> {
                 )
                 .is_ok();
                 let _ = windows::Win32::Foundation::CloseHandle(process);
-                if found
-                    && std::path::Path::new(&String::from_utf16_lossy(&executable[..len as usize]))
-                        == path
-                {
-                    let _ = ShowWindow(window, SW_RESTORE);
-                    let _ = SetForegroundWindow(window);
+                let matches = found
+                    && windows::Win32::Globalization::CompareStringOrdinal(
+                        &expected,
+                        &executable[..len as usize],
+                        true,
+                    ) == windows::Win32::Globalization::CSTR_EQUAL;
+                if matches {
+                    let _ = AllowSetForegroundWindow(pid);
+                    // Shared with the runner; carries the click time for warm-open logs.
+                    let _ = PostMessageW(
+                        Some(window),
+                        WM_APP + 29,
+                        windows::Win32::Foundation::WPARAM(opened_at as usize),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
+                    diagnose("reuse.same_version");
                     return Ok(());
                 }
+                diagnose(if found {
+                    "reuse.version_mismatch"
+                } else {
+                    "reuse.path_query_failed"
+                });
+                spawn_reason = if found {
+                    "version_mismatch"
+                } else {
+                    "path_query_failed"
+                };
+            } else {
+                diagnose("reuse.process_query_failed");
+                spawn_reason = "process_query_failed";
             }
         }
     }
+    diagnose("launcher.spawn");
     std::process::Command::new(path)
+        .arg(format!("--opened-at={opened_at}"))
+        .arg(format!("--open-reason={spawn_reason}"))
         .spawn()
         .map_err(|_| windows_core::Error::from(windows::Win32::Foundation::E_FAIL))?;
     Ok(())

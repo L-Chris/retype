@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # ── 1. 版本一致性：tag / Cargo.toml / pubspec 三者必须相同 ────────────
+      # ── 1. 版本一致性：tag 与 Cargo workspace 版本必须相同 ────────────
       # 这一步放在最前面，因为它失败时不该浪费任何构建时间。
       - name: 校验 tag 与版本号一致
         id: version
@@ -47,22 +47,15 @@ jobs:
           tag_version="${tag#v}"
 
           cargo_version="$(sed -nE 's/^version = "([^"]+)".*$/\1/p' Cargo.toml | head -n 1)"
-          pubspec_full="$(sed -nE 's/^version:[[:space:]]*([^[:space:]#]+).*$/\1/p' apps/settings/pubspec.yaml | head -n 1)"
-          pubspec_version="${pubspec_full%%+*}"
 
           echo "tag       : $tag"
           echo "Cargo.toml: $cargo_version"
-          echo "pubspec   : $pubspec_full (-> $pubspec_version)"
 
-          if [[ -z "$cargo_version" || -z "$pubspec_version" ]]; then
+          if [[ -z "$cargo_version" ]]; then
             echo "读不到版本号" >&2; exit 1
           fi
           if [[ "$tag_version" != "$cargo_version" ]]; then
             echo "tag '$tag' 与 Cargo.toml 版本 '$cargo_version' 不一致。请打 v$cargo_version" >&2
-            exit 1
-          fi
-          if [[ "$cargo_version" != "$pubspec_version" ]]; then
-            echo "Cargo.toml ($cargo_version) 与 pubspec ($pubspec_version) 不一致" >&2
             exit 1
           fi
 
@@ -195,18 +188,13 @@ jobs:
       # 还要处理「TIP DLL 正被所有进程占用」—— 让用户手动解压再跑脚本是不负责任的。
       # Restart Manager 负责占用检测与重启后替换，自动更新因此变成
       # 「下载 setup.exe → 校验 sha256 → /VERYSILENT 静默升级」。
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: "3.47.0"
-      - name: 构建 Windows 设置程序
-        working-directory: apps/settings
+      - name: Build Windows settings
         shell: pwsh
         run: |
-          flutter pub get
-          if ($LASTEXITCODE -ne 0) { throw 'Flutter dependencies failed' }
-          flutter build windows --release
-          if ($LASTEXITCODE -ne 0) { throw 'Flutter Windows build failed' }
+          cargo build --release --target x86_64-pc-windows-msvc -p retype-settings-egui
+          if ($LASTEXITCODE) { throw 'Settings build failed' }
+          cargo test -p retype-settings-egui
+          if ($LASTEXITCODE) { throw 'Settings tests failed' }
 
       - name: 安装 Inno Setup
         shell: pwsh

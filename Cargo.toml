@@ -14,12 +14,12 @@ members = [
     "platforms/windows/diag",
     "platforms/windows/updater",
     "tools/dict-build",
+    "apps/settings-egui",
 ]
 
 [workspace.package]
-# 版本号的唯一真源。CI 会校验 git tag、apps/settings/pubspec.yaml 与此处三者一致
-# （见 .github/workflows/release.yml）。改版本只改这里 + pubspec，不要改别处。
-version = "0.4.1"
+# 版本号的唯一真源。设置程序和其他 Rust 包继承此版本；CI 校验 git tag。
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"

@@ -7,10 +7,13 @@
 //! 2. **`retype-diag` 需要一个文本呈现器**，这样在终端里就能验证内核，
 //!    不必每次都注册 TSF（docs/windows-tsf.md 的「开发回路」）。
 //!
-//! M1 用 TSF 原生候选窗，M2 换 Win32 + Direct2D 自绘（独立 UI 线程）。
+//! Windows 候选窗使用 egui 测量和软件渲染；Win32 只负责不激活的窗口及位图呈现。
 #![forbid(unsafe_code)]
 
 use retype_types::{CandidateSource, RenderState, StatusFlags};
+
+#[cfg(feature = "egui")]
+pub mod surface;
 
 /// 候选窗锚点（屏幕坐标，像素）。
 ///

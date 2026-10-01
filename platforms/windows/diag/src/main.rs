@@ -578,7 +578,9 @@ fn bench(cli: &Cli) {
             "yuyanshurumodel",
             "mingtianwanshangwomenyiqichifanba",
         ],
-        PinyinScheme::Flypy => &["a", "m", "w", "y", "mwy", "woe", "nihc", "qiuu"],
+        PinyinScheme::Flypy => &[
+            "a", "m", "w", "y", "mwy", "woe", "nihc", "qiuu", "edu", "eedu", "edum",
+        ],
     };
 
     // 基准要隔离二刷：关掉云端，只测本地首刷

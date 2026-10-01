@@ -192,6 +192,56 @@ mod tests {
     }
 
     #[test]
+    fn flypy_zero_initial_aliases_shift_subsequent_boundaries() {
+        let mut lex = TestLex::default();
+        // No standalone character entries: phrase prefixes must be traversed
+        // directly through the lexicon, rather than decoded into words first.
+        lex.add("额度", "e du", -8.0);
+        lex.add("额度吗", "e du ma", -9.0);
+        lex.add("阿姨", "a yi", -1.0);
+        lex.add("偶哦", "ou o", -1.0);
+        let opts = DecodeOptions::default();
+        for (input, expected) in [
+            ("edu", "额度"),
+            ("eedu", "额度"),
+            ("e'du", "额度"),
+            ("eduma", "额度吗"),
+            ("edum", "额度吗"),
+            ("ayi", "阿姨"),
+            ("ouo", "偶哦"),
+        ] {
+            let out = shuangpin::decode(input, &lex, &opts);
+            assert_eq!(
+                out.candidates[0].text, expected,
+                "{input}: {:?}",
+                out.candidates
+            );
+            assert_eq!(out.candidates[0].consumed, input.len());
+            assert!(!out.has_raw);
+            assert_eq!(out.matched_syllables, out.candidates[0].syllable_len);
+        }
+        let blocked = shuangpin::decode("ed'u", &lex, &opts);
+        assert!(!blocked.candidates.iter().any(|c| c.text == "额度"));
+        // Only the tail is abbreviated; arbitrary interior consonants are not.
+        let blocked = shuangpin::decode("edm", &lex, &opts);
+        assert!(!blocked.candidates.iter().any(|c| c.text == "额度吗"));
+    }
+
+    #[test]
+    fn flypy_retains_multiple_zero_initial_segmentations() {
+        let mut lex = TestLex::default();
+        lex.add("哦", "o", -1.0);
+        lex.add("哦哦", "o o", -8.0);
+        let out = shuangpin::decode("oo", &lex, &DecodeOptions::default());
+        for (text, count) in [("哦", 1), ("哦哦", 2)] {
+            assert!(out
+                .candidates
+                .iter()
+                .any(|c| c.text == text && c.consumed == 2 && c.syllable_len == count));
+        }
+    }
+
+    #[test]
     fn flypy_incomplete_syllables_preview_dictionary_matches() {
         let mut lex = TestLex::default();
         for (text, pinyin, score) in [

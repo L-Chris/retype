@@ -1,7 +1,10 @@
-//! Compact, non-activating candidate surface. Native GDI keeps it independent of
-//! a browser/runtime and allows the same TSF visibility contract as desktop hosts.
+//! Non-activating Win32 surface with egui layout and on-demand CPU rendering.
 use crate::{edit, tip::TipState};
+use retype_candidate_ui::surface::{Bitmap, Surface};
 use retype_types::RenderState;
+use std::cell::RefCell;
+
+thread_local! { static SURFACE: RefCell<Surface> = RefCell::new(Surface::default()); }
 use std::sync::{Arc, Weak};
 use windows::Win32::{
     Foundation::*,
@@ -15,8 +18,7 @@ struct Frame {
     render: RenderState,
     context: ITfContext,
     tip: Weak<TipState>,
-    cells: Vec<RECT>,
-    scale: i32,
+    bitmap: Bitmap,
     width: i32,
     height: i32,
 }
@@ -34,26 +36,6 @@ fn px(value: i32, dpi: i32) -> i32 {
 }
 fn viewport_width(work_area_width: i32, dpi: i32) -> i32 {
     work_area_width.clamp(px(100, dpi), px(480, dpi))
-}
-unsafe fn font(size: i32, dpi: i32, weight: i32) -> HFONT {
-    unsafe {
-        CreateFontW(
-            -px(size, dpi),
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            0,
-            w!("Microsoft YaHei UI"),
-        )
-    }
 }
 pub fn create(owner: Option<HWND>) -> Result<HWND> {
     // SAFETY: Register the class against this DLL (not the host executable).
@@ -90,7 +72,7 @@ pub fn create(owner: Option<HWND>) -> Result<HWND> {
     }
 }
 pub fn measure(render: &RenderState, window: Option<HWND>, anchor: Option<RECT>) -> Layout {
-    // SAFETY: Temporary GDI objects are restored and released on this thread.
+    // SAFETY: Read-only Win32 DPI/monitor queries; egui stays on this apartment.
     unsafe {
         let dpi = window.map(|w| GetDpiForWindow(w)).unwrap_or(96).max(96) as i32;
         let max_width = anchor
@@ -109,25 +91,11 @@ pub fn measure(render: &RenderState, window: Option<HWND>, anchor: Option<RECT>)
         let pad = px(4, dpi);
         let available = viewport - 2 * pad;
         let gap = px(2, dpi);
-        let dc = GetDC(window);
-        let face = font(15, dpi, 400);
-        let previous = SelectObject(dc, face.into());
-        let widths = render
-            .candidates
-            .iter()
-            .map(|candidate| {
-                let mut size = SIZE::default();
-                let _ = GetTextExtentPoint32W(
-                    dc,
-                    &candidate.text.encode_utf16().collect::<Vec<_>>(),
-                    &mut size,
-                );
-                (size.cx + px(22, dpi)).max(px(36, dpi)).min(available)
-            })
-            .collect();
-        SelectObject(dc, previous);
-        let _ = DeleteObject(face.into());
-        ReleaseDC(window, dc);
+        let widths = SURFACE.with(|surface| {
+            surface
+                .borrow_mut()
+                .measure(render, available, dpi as f32 / 96.0)
+        });
         Layout {
             widths,
             available,
@@ -145,61 +113,30 @@ pub fn update(
     render: &RenderState,
     layout: &Layout,
 ) -> (i32, i32) {
-    // SAFETY: Our own HWND, only touched by its apartment; GDI resources restored before deletion.
+    // SAFETY: Our own HWND, only touched by its apartment; bitmap owned by Frame.
     unsafe {
         let dpi = layout.dpi;
-        let dc = GetDC(Some(window));
-        let face = font(15, dpi, 400);
-        let previous = SelectObject(dc, face.into());
-        let pad = px(4, dpi);
-        let gap = layout.gap;
-        let mut row = px(30, dpi);
         let visible = render.visible();
         let widths = layout
             .widths
             .get(render.page_start..render.page_start + visible.len())
             .unwrap_or(&[]);
-        // A single unusually long candidate wraps; ordinary phrases stay on one line.
-        for (candidate, &width) in visible.iter().zip(widths) {
-            let mut rect = RECT {
-                right: (width - px(18, dpi)).max(1),
-                ..Default::default()
-            };
-            DrawTextW(
-                dc,
-                &mut candidate.text.encode_utf16().collect::<Vec<_>>(),
-                &mut rect,
-                DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
-            );
-            row = row.max(rect.bottom + px(10, dpi));
-        }
-        let mut x = pad;
-        let mut cells = Vec::new();
-        for &width in widths {
-            cells.push(RECT {
-                left: x,
-                top: pad,
-                right: x + width,
-                bottom: pad + row,
-            });
-            x += width + gap;
-        }
-        let width = if cells.is_empty() {
-            px(60, dpi)
-        } else {
-            x - gap + pad
-        }
-        .min(layout.viewport);
-        let height = row + pad * 2;
-        SelectObject(dc, previous);
-        let _ = DeleteObject(face.into());
-        ReleaseDC(Some(window), dc);
+        let bitmap = SURFACE.with(|surface| {
+            surface.borrow_mut().render(
+                render,
+                widths,
+                layout.gap,
+                layout.viewport,
+                dpi as f32 / 96.0,
+            )
+        });
+        let width = bitmap.geometry.width as i32;
+        let height = bitmap.geometry.height as i32;
         let frame = Box::new(Frame {
             render: render.clone(),
             context: context.clone(),
             tip: Arc::downgrade(tip),
-            cells,
-            scale: dpi,
+            bitmap,
             width,
             height,
         });
@@ -230,108 +167,39 @@ pub fn update(
     }
 }
 
-unsafe fn rounded(dc: HDC, rect: RECT, fill: u32, border: u32, radius: i32) {
-    unsafe {
-        let brush = CreateSolidBrush(COLORREF(fill));
-        let pen = CreatePen(PS_SOLID, 1, COLORREF(border));
-        let old_brush = SelectObject(dc, brush.into());
-        let old_pen = SelectObject(dc, pen.into());
-        let _ = RoundRect(
-            dc,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            radius,
-            radius,
-        );
-        SelectObject(dc, old_pen);
-        SelectObject(dc, old_brush);
-        let _ = DeleteObject(pen.into());
-        let _ = DeleteObject(brush.into());
-    }
-}
-unsafe fn text(dc: HDC, value: &str, mut rect: RECT, color: u32, flags: DRAW_TEXT_FORMAT) {
-    unsafe {
-        SetTextColor(dc, COLORREF(color));
-        DrawTextW(
-            dc,
-            &mut value.encode_utf16().collect::<Vec<_>>(),
-            &mut rect,
-            DT_NOPREFIX | flags,
-        );
-    }
-}
 unsafe fn paint(window: HWND, frame: &Frame) {
+    // SAFETY: The owned bitmap has exactly width*height top-down BGRX pixels.
+    // GDI only presents the completed egui frame; it does not measure/draw text.
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         let target = BeginPaint(window, &mut ps);
-        let dc = CreateCompatibleDC(Some(target));
-        let bitmap = CreateCompatibleBitmap(target, frame.width, frame.height);
-        let old_bitmap = SelectObject(dc, bitmap.into());
-        let bounds = RECT {
-            left: 0,
-            top: 0,
-            right: frame.width,
-            bottom: frame.height,
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: frame.width,
+                biHeight: -frame.height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let bg = CreateSolidBrush(COLORREF(0x00fdfcfc));
-        FillRect(dc, &bounds, bg);
-        let _ = DeleteObject(bg.into());
-        rounded(dc, bounds, 0x00fdfcfc, 0x00e6e2df, px(10, frame.scale));
-        SetBkMode(dc, TRANSPARENT);
-        let small = font(11, frame.scale, 400);
-        let main = font(15, frame.scale, 400);
-        let old_font = SelectObject(dc, small.into());
-        let p = |v| px(v, frame.scale);
-        for (i, (candidate, cell)) in frame.render.visible().iter().zip(&frame.cells).enumerate() {
-            let selected = frame.render.page_start + i == frame.render.selected;
-            if selected {
-                rounded(dc, *cell, 0x00968f13, 0x00968f13, p(8));
-            }
-            SelectObject(dc, small.into());
-            text(
-                dc,
-                &(i + 1).to_string(),
-                RECT {
-                    left: cell.left + p(4),
-                    right: cell.left + p(16),
-                    ..*cell
-                },
-                if selected { 0x00ffffff } else { 0x009a938e },
-                DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-            );
-            SelectObject(dc, main.into());
-            text(
-                dc,
-                &candidate.text,
-                RECT {
-                    top: cell.top + p(5),
-                    left: cell.left + p(17),
-                    right: cell.right - p(4),
-                    ..*cell
-                },
-                if selected { 0x00ffffff } else { 0x00443d34 },
-                DT_LEFT,
-            );
-        }
-        SelectObject(dc, old_font);
-        let _ = BitBlt(
+        StretchDIBits(
             target,
             0,
             0,
             frame.width,
             frame.height,
-            Some(dc),
             0,
             0,
+            frame.width,
+            frame.height,
+            Some(frame.bitmap.pixels.as_ptr().cast()),
+            &info,
+            DIB_RGB_COLORS,
             SRCCOPY,
         );
-        SelectObject(dc, old_bitmap);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(dc);
-        let _ = DeleteObject(small.into());
-        let _ = DeleteObject(main.into());
         let _ = EndPaint(window, &ps);
     }
 }
@@ -358,18 +226,14 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
                 let frame = &*pointer;
                 let x = (lp.0 & 0xffff) as i16 as i32;
                 let y = ((lp.0 >> 16) & 0xffff) as i16 as i32;
-                let target = frame
-                    .cells
-                    .iter()
-                    .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-                    .map(|i| {
-                        (
-                            Weak::clone(&frame.tip),
-                            frame.context.clone(),
-                            frame.render.page_start + i,
-                            frame.render.gen,
-                        )
-                    });
+                let target = frame.bitmap.geometry.hit_test(x as f32, y as f32).map(|i| {
+                    (
+                        Weak::clone(&frame.tip),
+                        frame.context.clone(),
+                        frame.render.page_start + i,
+                        frame.render.gen,
+                    )
+                });
                 if let Some((tip, context, index, generation)) = target {
                     if let Some(tip) = tip.upgrade() {
                         let _ =
@@ -408,5 +272,26 @@ mod tests {
         assert_eq!(viewport_width(1920, 96), 480);
         assert_eq!(viewport_width(1920, 144), 720);
         assert_eq!(viewport_width(600, 144), 600);
+    }
+
+    #[test]
+    fn candidate_window_retains_nonactivating_native_contract() {
+        // SAFETY: Test owns the window and destroys it on its creating thread.
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let window = create(None).unwrap_or_default();
+            assert!(!window.is_invalid());
+            let style = GetWindowLongW(window, GWL_EXSTYLE) as u32;
+            assert_ne!(style & WS_EX_NOACTIVATE.0, 0);
+            assert_ne!(style & WS_EX_TOOLWINDOW.0, 0);
+            assert_ne!(style & WS_EX_TOPMOST.0, 0);
+            assert_eq!(
+                window_proc(window, WM_MOUSEACTIVATE, WPARAM(0), LPARAM(0)),
+                LRESULT(MA_NOACTIVATE as isize)
+            );
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+            assert_eq!(GetForegroundWindow(), foreground);
+            assert!(DestroyWindow(window).is_ok());
+        }
     }
 }

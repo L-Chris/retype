@@ -1,5 +1,6 @@
 ﻿#include "settings_channel.h"
 #include "flutter_window.h"
+#include "startup_diagnostics.h"
 
 #include <flutter/flutter_engine.h>
 #include <flutter/standard_method_codec.h>
@@ -81,6 +82,15 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
       [window](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
         const auto& method = call.method_name();
+        if (method == "startupMilestone") {
+          const auto* event = std::get_if<std::string>(call.arguments());
+          if (event && (*event == "frame.dart_first" ||
+                        *event == "settings.interactive")) {
+            settings_startup::Log(event->c_str());
+          }
+          result->Success();
+          return;
+        }
         if (method == "closeWindow") {
           PostMessageW(window, kHideSettingsMessage, 0, 0);
           result->Success();
@@ -96,6 +106,7 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
           return;
         }
         if (method == "getSettings") {
+          settings_startup::Log("preferences.begin");
           DWORD scheme = 0;
           DWORD auto_check = 0;
           const bool has_auto_check = ReadDword(L"AutoCheck", &auto_check);
@@ -120,6 +131,7 @@ RegisterSettingsChannel(flutter::FlutterEngine* engine, HWND window) {
           values[flutter::EncodableValue("enabledDictionaryPacks")] =
               flutter::EncodableValue(static_cast<int32_t>(enabled_packs & 0x7f));
           result->Success(flutter::EncodableValue(values));
+          settings_startup::Log("preferences.ready");
           return;
         }
         if (method == "setDictionaryPack") {

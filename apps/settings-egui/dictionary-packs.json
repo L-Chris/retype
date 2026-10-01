@@ -1,0 +1,51 @@
+[
+    {
+        "id":  "mingren",
+        "title":  "名人",
+        "description":  "作家、历史人物等",
+        "bytes":  551174,
+        "sha256":  "80f169636d768114e97cf11ccf652333ada4db2e235f47aeba7baf808256338f"
+    },
+    {
+        "id":  "renming",
+        "title":  "常用人名",
+        "description":  "常见中文姓名",
+        "bytes":  558210,
+        "sha256":  "bfd5439b6b1db4453ecba7bccf33948ecfdff33cfc931f1b97db0fb889400b2b"
+    },
+    {
+        "id":  "yiren",
+        "title":  "艺人",
+        "description":  "演员、歌手等",
+        "bytes":  361727,
+        "sha256":  "0ae50f62844eb04f736fec9442707beb5938220b959db9ecfdca0890db809f39"
+    },
+    {
+        "id":  "diming",
+        "title":  "地名",
+        "description":  "国内外地理名称",
+        "bytes":  3147736,
+        "sha256":  "e5519b85e37159fdf5f71ca342d4b0dfcc9e89847012b2e38f6d8904e8cd3193"
+    },
+    {
+        "id":  "yixue",
+        "title":  "医学",
+        "description":  "医学名词和术语",
+        "bytes":  826294,
+        "sha256":  "a38c29aef6130aff840ab94bd83641ab6061226ca0ebfef007b0ab8fd5f5eaf8"
+    },
+    {
+        "id":  "yaopin",
+        "title":  "药品",
+        "description":  "药品与成分名称",
+        "bytes":  574422,
+        "sha256":  "9596228b5a9ef5cc9202653d3b7da599900182a064bc9b8538781d9bd9c45c4d"
+    },
+    {
+        "id":  "huaxue",
+        "title":  "化学",
+        "description":  "化学名词和物质",
+        "bytes":  793045,
+        "sha256":  "d886b18c68541a94fb0c189bb0c5e00f77fef99f9d2e14c80bf3d6cd477e9070"
+    }
+]

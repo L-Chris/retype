@@ -4,7 +4,7 @@ The main README covers installation and basic contribution steps. This document 
 
 ## Architecture and layout
 
-The platform-independent Rust engine lives under `core/`. `platforms/windows/tsf` is the in-process TSF adapter, and `platforms/windows/updater` performs network work in a separate process. `apps/settings` is a Flutter settings shell, not the TSF input component. See [ARCHITECTURE.md](../ARCHITECTURE.md) and the [ADRs](adr/) for design decisions.
+The platform-independent Rust engine lives under `core/`. `platforms/windows/tsf` is the in-process TSF adapter, and `platforms/windows/updater` performs network work in a separate process. `apps/settings-egui` is the standalone Windows settings application. The former Flutter implementation under `apps/settings` is retained as a reference and asset source; it is no longer built or packaged. See [settings development](../apps/settings-egui/README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the [ADRs](adr/) for design decisions.
 
 The input thread must not perform network calls, file I/O, dictionary loading, or wait on locks across calls. The local first pass remains usable when optional external services fail; asynchronous candidate updates must not remove text already displayed.
 

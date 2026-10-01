@@ -20,6 +20,8 @@ add_executable(${BINARY_NAME} WIN32
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
+# Localized window titles must have identical UTF-16 values in every source/header.
+target_compile_options(${BINARY_NAME} PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
 
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")

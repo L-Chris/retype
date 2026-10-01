@@ -16,6 +16,7 @@ class FakeSettingsRepository implements SettingsRepository {
   bool closed = false;
   bool statisticsEnabled = true;
   bool statisticsCleared = false;
+  int statisticsLoads = 0;
   final Set<String> installedPacks = {};
   final Set<String> enabledPacks = {};
 
@@ -58,32 +59,36 @@ class FakeSettingsRepository implements SettingsRepository {
   @override
   Future<void> setAutoCheck(bool value) async => autoCheck = value;
   @override
-  Future<StatisticsSnapshot> loadStatistics() async => StatisticsSnapshot(
-    enabled: statisticsEnabled,
-    todayChinese: statisticsCleared ? 0 : 12,
-    todayEnglish: statisticsCleared ? 0 : 7,
-    totalChinese: statisticsCleared ? 0 : 30,
-    totalEnglish: statisticsCleared ? 0 : 20,
-    chinesePerMinute: null,
-    englishPerMinute: null,
-    week: List.generate(
-      7,
-      (index) => DailyStatistics(DateTime(2026, 9, index + 20), 0, 0),
-    ),
-    speedHistory: {
-      for (final period in SpeedPeriod.values)
-        period: [
-          PeriodStatistics(DateTime(2026, 9, 27), 20, 20, 20000, 20000),
-          PeriodStatistics(
-            DateTime(2026, 9, 28),
-            30 + period.index * 10,
-            30,
-            20000,
-            20000,
-          ),
-        ],
-    },
-  );
+  Future<StatisticsSnapshot> loadStatistics() async {
+    statisticsLoads++;
+    return StatisticsSnapshot(
+      enabled: statisticsEnabled,
+      todayChinese: statisticsCleared ? 0 : 12,
+      todayEnglish: statisticsCleared ? 0 : 7,
+      totalChinese: statisticsCleared ? 0 : 30,
+      totalEnglish: statisticsCleared ? 0 : 20,
+      chinesePerMinute: null,
+      englishPerMinute: null,
+      week: List.generate(
+        7,
+        (index) => DailyStatistics(DateTime(2026, 9, index + 20), 0, 0),
+      ),
+      speedHistory: {
+        for (final period in SpeedPeriod.values)
+          period: [
+            PeriodStatistics(DateTime(2026, 9, 27), 20, 20, 20000, 20000),
+            PeriodStatistics(
+              DateTime(2026, 9, 28),
+              30 + period.index * 10,
+              30,
+              20000,
+              20000,
+            ),
+          ],
+      },
+    );
+  }
+
   @override
   Future<void> setStatisticsEnabled(bool value) async =>
       statisticsEnabled = value;
@@ -235,6 +240,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(repository.statisticsCleared, true);
     expect(find.text('中文 0  ·  英文 0'), findsNWidgets(2));
+  });
+
+  testWidgets('hidden settings pauses statistics and resumes on reopening', (
+    tester,
+  ) async {
+    final repository = FakeSettingsRepository();
+    await tester.pumpWidget(RetypeApp(repository: repository));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('统计'));
+    await tester.pumpAndSettle();
+    final before = repository.statisticsLoads;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await tester.pump(const Duration(minutes: 2));
+    expect(repository.statisticsLoads, before);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(repository.statisticsLoads, greaterThan(before));
+    final resumed = repository.statisticsLoads;
+    await tester.pump(const Duration(seconds: 5));
+    expect(repository.statisticsLoads, greaterThan(resumed));
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('update entry still opens About after adding Statistics', (

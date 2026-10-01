@@ -1,4 +1,4 @@
-﻿# Shared functions; no UI, network or installation side effects when dot-sourced.
+# Shared functions; no UI, network or installation side effects when dot-sourced.
 function Get-RetypeInstallation {
   $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
   try {
@@ -15,7 +15,7 @@ function Test-RetypeInstallation($Installation) {
   $metadata = @{}
   foreach ($entry in $manifest) { foreach ($key in $entry.Keys) { $metadata[$key] = $entry[$key] } }
   if ($metadata.Version -ne $Installation.Version) { throw 'Installed version metadata does not match.' }
-  foreach ($relative in @('settings\retype.exe','settings\flutter_windows.dll','settings\data\icudtl.dat','settings\data\flutter_assets\AssetManifest.bin')) {
+  foreach ($relative in @('settings\retype.exe')) {
     if (-not (Test-Path -LiteralPath (Join-Path $Installation.Directory $relative))) { throw "Settings bundle is incomplete: $relative" }
   }
   foreach ($arch in @('x64','x86')) {
