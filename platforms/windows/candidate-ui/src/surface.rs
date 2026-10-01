@@ -288,7 +288,7 @@ fn rasterize(
     scale: f32,
     texture: &Texture,
 ) {
-    for triangle in mesh.indices.chunks_exact(3) {
+    for triangle in mesh.indices.as_chunks::<3>().0 {
         let Some(a) = mesh.vertices.get(triangle[0] as usize) else {
             continue;
         };
@@ -555,7 +555,7 @@ mod tests {
             1.0,
             &texture,
         );
-        for row in pixels.chunks_exact(4) {
+        for row in pixels.as_chunks::<4>().0 {
             assert_eq!(row, &[0x00800000, 0x00800000, 0x00800000, 0]);
         }
     }
