@@ -11,11 +11,13 @@ has its own single-instance lock and native message window. Both direct launches
 and the input method route `--updates` to About in an existing same-version
 process. New windows start centered, without a Windows title bar.
 
-Use `tools/scripts/benchmark-settings-egui.ps1` for fresh-process timings and
-`tools/scripts/test-settings-egui.ps1` for reuse and version-isolation checks.
-The process writes `egui.interactive` with the click-to-interactive `open_ms` to
-`%LOCALAPPDATA%\retype\logs\settings-startup.log`, retaining its rotation policy.
-The older Flutter diagnostics below explain the baseline and remain historical.
+Startup benchmarking, timing arguments and normal-launch timing logs have been
+removed from the production app. `tools/scripts/test-settings-egui.ps1` is an
+optional manual check of pages, window reuse and install-path isolation; it does
+not measure startup speed. Ordinary launches never run a UI test sequence.
+
+The older Flutter diagnostics below describe the archived reference app only;
+they do not apply to the production Windows package.
 
 # Historical Flutter startup diagnostics
 

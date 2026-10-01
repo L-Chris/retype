@@ -25,18 +25,10 @@ const PREFERENCES: &str = "Software\\retype";
 
 type AppResult<T> = backend::Result<T>;
 
-#[allow(unsafe_code)]
-fn tick_count() -> u32 {
-    // SAFETY: GetTickCount has no arguments or memory preconditions.
-    unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
-}
-
 struct Options {
     renderer: eframe::Renderer,
-    timing_file: Option<PathBuf>,
     screenshot: Option<PathBuf>,
     exit_after: Option<Duration>,
-    opened_at: u32,
     updates: bool,
     page: Page,
     idle_exit: Duration,
@@ -47,10 +39,8 @@ impl Options {
     fn parse() -> AppResult<Self> {
         let mut options = Self {
             renderer: eframe::Renderer::Glow,
-            timing_file: None,
             screenshot: None,
             exit_after: None,
-            opened_at: tick_count(),
             updates: false,
             page: Page::Input,
             idle_exit: Duration::from_secs(600),
@@ -64,14 +54,10 @@ impl Options {
                     "wgpu" => eframe::Renderer::Wgpu,
                     _ => return Err("renderer must be glow or wgpu".into()),
                 };
-            } else if let Some(value) = argument.strip_prefix("--timing-file=") {
-                options.timing_file = Some(value.into());
             } else if let Some(value) = argument.strip_prefix("--screenshot=") {
                 options.screenshot = Some(value.into());
             } else if let Some(value) = argument.strip_prefix("--exit-after-ms=") {
                 options.exit_after = Some(Duration::from_millis(value.parse()?));
-            } else if let Some(value) = argument.strip_prefix("--opened-at=") {
-                options.opened_at = value.parse()?;
             } else if let Some(value) = argument.strip_prefix("--idle-exit-ms=") {
                 options.idle_exit = Duration::from_millis(value.parse()?);
             } else if let Some(value) = argument.strip_prefix("--hide-after-ms=") {
@@ -87,8 +73,9 @@ impl Options {
                     "about" => Page::About,
                     _ => return Err("Unknown settings page".into()),
                 };
-            } else if argument.starts_with("--open-reason=") {
-                // Launcher diagnostic, accepted for compatibility with old TIPs.
+            } else if argument.starts_with("--open-reason=") || argument.starts_with("--opened-at=")
+            {
+                // Ignore legacy launcher diagnostics from already-loaded older TIPs.
             } else {
                 return Err(format!("unknown argument: {argument}").into());
             }
@@ -128,7 +115,7 @@ fn logo() -> AppResult<egui::ColorImage> {
     ))
 }
 
-fn chinese_fonts(ctx: &egui::Context) -> AppResult<String> {
+fn chinese_fonts(ctx: &egui::Context) -> AppResult<()> {
     let root = std::env::var_os("WINDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
@@ -149,7 +136,7 @@ fn chinese_fonts(ctx: &egui::Context) -> AppResult<String> {
                 .insert(0, "windows-chinese".into());
         }
         ctx.set_fonts(fonts);
-        return Ok(name.into());
+        return Ok(());
     }
     Err("No Windows Chinese font is available".into())
 }
@@ -178,7 +165,6 @@ struct SettingsApp {
     period: Period,
     statistics_pending: bool,
     statistics_refresh: Instant,
-    confirm_clear: bool,
     tasks: Sender<Task>,
     events: Receiver<Event>,
     offer: Option<backend::Offer>,
@@ -189,11 +175,6 @@ struct SettingsApp {
     instance: instance::Window,
     error: Option<String>,
     logo: egui::TextureHandle,
-    font: String,
-    font_ms: f64,
-    initialization_ms: f64,
-    first_ui_ms: Option<f64>,
-    reported: bool,
     screenshot_requested: bool,
 }
 
@@ -227,10 +208,8 @@ impl SettingsApp {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
-        for (opened_at, updates) in requests {
+        for updates in requests {
             self.hidden_since = None;
-            self.options.opened_at = opened_at;
-            self.reported = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             if let Ok(preferences) = backend::preferences() {
@@ -361,16 +340,6 @@ impl SettingsApp {
     }
 
     fn dictionary_page(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "词库", "按需下载扩展词库，补充专业名词、人名与地名。");
-        card(ui, |ui| {
-            ui.label(RichText::new("基础词库已随输入法安装").strong());
-            ui.label(
-                RichText::new("扩展词库来自万象；下载后仅保存在本机，可随时开启或停用。")
-                    .size(13.0)
-                    .color(MUTED),
-            );
-        });
-        ui.add_space(10.0);
         if self.installed_packs.is_empty() {
             ui.spinner();
             ui.label("正在读取词库…");
@@ -449,18 +418,6 @@ impl SettingsApp {
                         .size(12.0)
                         .color(MUTED),
                     );
-                } else {
-                    ui.label(
-                        RichText::new(if enabled {
-                            "已启用"
-                        } else if installed {
-                            "已下载 · 未启用"
-                        } else {
-                            "未下载"
-                        })
-                        .size(12.0)
-                        .color(if enabled { ACCENT } else { MUTED }),
-                    );
                 }
             });
             ui.add_space(8.0);
@@ -470,7 +427,6 @@ impl SettingsApp {
 
     fn statistics_page(&mut self, ui: &mut egui::Ui) {
         use chrono::Datelike;
-        heading(ui, "统计", "中文与英文分别统计，只记录数量和有效输入时间。");
         let Some(snapshot) = self.statistics.clone() else {
             ui.spinner();
             ui.label("正在读取统计…");
@@ -514,12 +470,22 @@ impl SettingsApp {
         });
         ui.add_space(14.0);
         card(ui, |ui| {
-            ui.label(RichText::new("平均速度").strong());
-            ui.label(
-                RichText::new("本期截至当前；与上一完整周期比较")
-                    .size(12.0)
-                    .color(MUTED),
-            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("平均速度").strong());
+                let (rect, response) =
+                    ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::hover());
+                ui.painter()
+                    .circle_stroke(rect.center(), 7.0, Stroke::new(1.0_f32, MUTED));
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "?",
+                    egui::FontId::proportional(12.0),
+                    MUTED,
+                );
+                response
+                    .on_hover_text("均速 = 上屏字符总数 ÷ 有效输入时间；样本不足时不显示速度。");
+            });
             ui.horizontal(|ui| {
                 for period in [Period::Day, Period::Week, Period::Month, Period::Year] {
                     ui.selectable_value(&mut self.period, period, period.label());
@@ -589,11 +555,6 @@ impl SettingsApp {
                 })
                 .collect();
             chart(ui, &data, false);
-            ui.label(
-                RichText::new("均速 = 上屏字符总数 ÷ 有效输入时间；样本不足时不显示速度。")
-                    .size(12.0)
-                    .color(MUTED),
-            );
         });
         ui.add_space(14.0);
         card(ui, |ui| {
@@ -612,53 +573,24 @@ impl SettingsApp {
                 .collect();
             chart(ui, &data, true);
         });
-        ui.add_space(14.0);
-        card(ui, |ui| {
-            let mut enabled = self.preferences.statistics_enabled;
-            if switch_row(ui, &mut enabled, "记录输入统计")
-                && self.save("StatisticsEnabled", enabled)
-            {
-                self.preferences.statistics_enabled = enabled;
-                self.statistics_pending = true;
-                let _ = self.tasks.send(Task::Statistics);
-            }
-            ui.label(
-                RichText::new("中文按上屏汉字数统计，英文按字母数统计；不保存输入内容。")
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            if ui.button("清空统计数据").clicked() {
-                self.confirm_clear = true;
-            }
-        });
-        if self.confirm_clear {
-            egui::Modal::new(egui::Id::new("clear-statistics")).show(ui.ctx(), |ui| {
-                ui.heading("清空统计数据？");
-                ui.label("今日和历史的输入数量及速度记录会清空。");
-                ui.horizontal(|ui| {
-                    if ui.button("取消").clicked() {
-                        self.confirm_clear = false;
-                    }
-                    if ui.button("清空").clicked() {
-                        self.confirm_clear = false;
-                        self.statistics_pending = true;
-                        let _ = self.tasks.send(Task::ClearStatistics);
-                    }
-                });
-            });
-        }
     }
 
     fn about_page(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui| {
-            ui.add_space(6.0);
-            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(86.0)));
-            ui.add_space(16.0);
-            ui.label(RichText::new("retype 输入法").size(28.0).strong());
-            ui.label(RichText::new(&self.preferences.version).color(MUTED));
-            ui.add_space(24.0);
+        ui.horizontal(|ui| {
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(48.0)));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.label(RichText::new("retype 输入法").size(20.0).strong());
+                ui.label(
+                    RichText::new(&self.preferences.version)
+                        .size(13.0)
+                        .color(MUTED),
+                );
+            });
         });
+        ui.add_space(12.0);
         card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
             let mut enabled = self.preferences.auto_check;
             if switch_row(ui, &mut enabled, "每天自动检查并提醒") && self.save("AutoCheck", enabled)
             {
@@ -670,7 +602,6 @@ impl SettingsApp {
                     .color(MUTED),
             );
             ui.separator();
-            ui.label(RichText::new("更新").strong());
             ui.label(RichText::new(&self.update_message).size(14.0).color(MUTED));
             if self.updating || self.installing {
                 ui.spinner();
@@ -725,8 +656,9 @@ impl SettingsApp {
                 self.open("https://github.com/L-Chris/retype/issues");
             }
         });
-        ui.add_space(24.0);
-        ui.vertical_centered(|ui| {
+        ui.add_space(12.0);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
             ui.label(
                 RichText::new("© 2026 retype · MIT License")
                     .size(12.0)
@@ -748,12 +680,12 @@ impl SettingsApp {
         options: Options,
         started: Instant,
     ) -> AppResult<Self> {
-        let font_started = Instant::now();
-        let font = chinese_fonts(&cc.egui_ctx)?;
-        let font_ms = font_started.elapsed().as_secs_f64() * 1000.0;
-        let mut style = (*cc.egui_ctx.style()).clone();
+        chinese_fonts(&cc.egui_ctx)?;
+        let mut style = (*cc.egui_ctx.global_style()).clone();
         style.visuals = egui::Visuals::light();
         style.visuals.override_text_color = Some(INK);
+        style.interaction.selectable_labels = false;
+        style.interaction.multi_widget_text_select = false;
         style.visuals.panel_fill = BACKGROUND;
         style.visuals.widgets.inactive.bg_fill = Color32::WHITE;
         style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
@@ -770,7 +702,7 @@ impl SettingsApp {
         style
             .text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
-        cc.egui_ctx.set_style(style);
+        cc.egui_ctx.set_global_style(style);
         let image = logo()?;
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(
@@ -804,7 +736,6 @@ impl SettingsApp {
             let _ = tasks.send(Task::Check);
         }
         Ok(Self {
-            initialization_ms: started.elapsed().as_secs_f64() * 1000.0,
             started,
             scheme,
             page,
@@ -819,7 +750,6 @@ impl SettingsApp {
             period: Period::Day,
             statistics_pending: page == Page::Statistics,
             statistics_refresh: Instant::now(),
-            confirm_clear: false,
             tasks,
             events,
             offer: None,
@@ -836,20 +766,12 @@ impl SettingsApp {
             logo: cc
                 .egui_ctx
                 .load_texture("retype-logo", image, egui::TextureOptions::LINEAR),
-            font,
-            font_ms,
-            first_ui_ms: None,
-            reported: false,
             screenshot_requested: false,
             options,
         })
     }
 
     fn input_page(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("输入").size(28.0).strong());
-        ui.add_space(8.0);
-        ui.label(RichText::new("选择适合你的拼音输入方式。").color(MUTED));
-        ui.add_space(24.0);
         ui.label(RichText::new("拼音方案").strong());
         ui.add_space(4.0);
         egui::Frame::new()
@@ -896,7 +818,7 @@ impl SettingsApp {
             });
         ui.add_space(12.0);
         ui.label(
-            RichText::new("单按 Shift 切换中英文；组字时用 - 和 = 翻候选页。")
+            RichText::new("切换中英文快捷键：Shift")
                 .size(13.0)
                 .color(MUTED),
         );
@@ -904,58 +826,10 @@ impl SettingsApp {
             ui.colored_label(Color32::DARK_RED, error);
         }
     }
-
-    fn write_timings(&mut self, rendered_previous_frame: bool) {
-        if self.reported || !rendered_previous_frame {
-            return;
-        }
-        self.reported = true;
-        if let Ok(root) = backend::local_root() {
-            use std::io::Write;
-            let directory = root.join("logs");
-            if std::fs::create_dir_all(&directory).is_ok() {
-                let path = directory.join("settings-startup.log");
-                if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= 256 * 1024) {
-                    let previous = directory.join("settings-startup.log.previous");
-                    let _ = std::fs::remove_file(&previous);
-                    let _ = std::fs::rename(&path, &previous);
-                }
-                if let Ok(mut log) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                {
-                    let _ = writeln!(
-                        log,
-                        "{} pid={} event=egui.interactive open_ms={}",
-                        chrono::Utc::now().to_rfc3339(),
-                        std::process::id(),
-                        tick_count().wrapping_sub(self.options.opened_at)
-                    );
-                }
-            }
-        }
-        if let Some(path) = &self.options.timing_file {
-            let report = serde_json::json!({
-                "renderer": format!("{:?}", self.options.renderer),
-                "font": self.font, "font_ms": self.font_ms,
-                "initialization_ms": self.initialization_ms,
-                "first_ui_ms": self.first_ui_ms,
-                "next_frame_ms": self.started.elapsed().as_secs_f64() * 1000.0,
-                "open_ms": tick_count().wrapping_sub(self.options.opened_at),
-                "page": format!("{:?}",self.page),
-            });
-            if let Err(error) = std::fs::write(path, report.to_string()) {
-                self.error = Some(format!("写入启动计时失败：{error}"));
-            }
-        }
-    }
 }
 
-fn heading(ui: &mut egui::Ui, title: &str, subtitle: &str) {
+fn heading(ui: &mut egui::Ui, title: &str) {
     ui.label(RichText::new(title).size(28.0).strong());
-    ui.add_space(8.0);
-    ui.label(RichText::new(subtitle).size(13.0).color(MUTED));
     ui.add_space(24.0);
 }
 fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> bool {
@@ -1201,11 +1075,14 @@ fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], stacked
             egui::FontId::proportional(11.0),
             MUTED,
         );
-        if response
-            .hover_pos()
-            .is_some_and(|p| p.x >= x - step / 2.0 && p.x < x + step / 2.0)
-        {
-            response.clone().on_hover_text(format!(
+        let column = egui::Rect::from_min_max(
+            egui::pos2(x - step / 2.0, rect.top()),
+            egui::pos2(x + step / 2.0, rect.bottom()),
+        )
+        .intersect(ui.clip_rect());
+        let hover = ui.interact(column, response.id.with(i), egui::Sense::hover());
+        if hover.hovered() {
+            hover.on_hover_text_at_pointer(format!(
                 "{label}\n中文 {}\n英文 {}",
                 ch.map(|v| v.to_string())
                     .unwrap_or_else(|| "样本不足".into()),
@@ -1225,18 +1102,20 @@ fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], stacked
 }
 
 impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.lifecycle(ctx);
-        self.write_timings(_frame.info().cpu_usage.is_some());
-        egui::SidePanel::left("sidebar")
-            .exact_width(238.0)
+    }
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        egui::Panel::left("sidebar")
+            .exact_size(238.0)
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(221, 246, 248))
                     .inner_margin(20),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.add_space(12.0);
                 let brand = ui.horizontal(|ui| {
                     ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(38.0)));
@@ -1256,21 +1135,74 @@ impl eframe::App for SettingsApp {
                         self.select_page(page);
                     }
                 }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(RichText::new("简单、专注地输入").size(12.0).color(MUTED));
-                });
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(40))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match self.page {
-                        Page::Input => self.input_page(ui),
-                        Page::Dictionary => self.dictionary_page(ui),
-                        Page::Statistics => self.statistics_page(ui),
-                        Page::About => self.about_page(ui),
-                    });
+            .show(root, |ui| {
+                heading(
+                    ui,
+                    match self.page {
+                        Page::Input => "输入",
+                        Page::Dictionary => "词库",
+                        Page::Statistics => "统计",
+                        Page::About => "关于",
+                    },
+                );
+                ui.scope(|ui| {
+                    let content_style = Arc::clone(ui.style());
+                    let style = ui.style_mut();
+                    // Reserve a separate gutter so the handle never covers cards.
+                    style.spacing.scroll = egui::style::ScrollStyle {
+                        content_margin: egui::Margin::ZERO,
+                        fade: egui::style::ScrollFadeStyle {
+                            strength: 0.0,
+                            size: 0.0,
+                        },
+                        floating: true,
+                        bar_width: 4.0,
+                        floating_width: 4.0,
+                        floating_allocated_width: 0.0,
+                        handle_min_length: 28.0,
+                        bar_inner_margin: 16.0,
+                        bar_outer_margin: 2.0,
+                        foreground_color: true,
+                        dormant_handle_opacity: 1.0,
+                        active_handle_opacity: 1.0,
+                        interact_handle_opacity: 1.0,
+                        dormant_background_opacity: 0.0,
+                        active_background_opacity: 0.0,
+                        interact_background_opacity: 0.0,
+                    };
+                    let scrollbar_gutter = style.spacing.scroll.bar_width
+                        + style.spacing.scroll.bar_inner_margin
+                        + style.spacing.scroll.bar_outer_margin;
+                    style.visuals.extreme_bg_color = BACKGROUND;
+                    style.visuals.widgets.inactive.fg_stroke.color =
+                        Color32::from_rgb(205, 216, 222);
+                    style.visuals.widgets.hovered.fg_stroke.color =
+                        Color32::from_rgb(181, 198, 208);
+                    style.visuals.widgets.active.fg_stroke.color = Color32::from_rgb(159, 183, 197);
+                    egui::ScrollArea::vertical()
+                        .id_salt(match self.page {
+                            Page::Input => "input-content",
+                            Page::Dictionary => "dictionary-content",
+                            Page::Statistics => "statistics-content",
+                            Page::About => "about-content",
+                        })
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            // Keep content width constant even when the bar is hidden.
+                            ui.set_width((ui.available_width() - scrollbar_gutter).max(0.0));
+                            // Scrollbar colors must not change page text or controls.
+                            ui.set_style(content_style);
+                            match self.page {
+                                Page::Input => self.input_page(ui),
+                                Page::Dictionary => self.dictionary_page(ui),
+                                Page::Statistics => self.statistics_page(ui),
+                                Page::About => self.about_page(ui),
+                            }
+                        });
+                });
                 if self.page != Page::Input {
                     if let Some(error) = &self.error {
                         ui.colored_label(Color32::DARK_RED, error);
@@ -1279,11 +1211,11 @@ impl eframe::App for SettingsApp {
             });
         // Foreground areas keep controls visible above every scrollable page.
         // No separate title/header row consumes space in the window.
-        let bounds = ctx.screen_rect();
+        let bounds = ctx.content_rect();
         egui::Area::new(egui::Id::new("window-drag"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(238.0, 0.0))
-            .show(ctx, |ui| {
+            .show(&ctx, |ui| {
                 let response = ui.allocate_response(
                     Vec2::new((bounds.width() - 298.0).max(1.0), 28.0),
                     egui::Sense::drag(),
@@ -1295,7 +1227,7 @@ impl eframe::App for SettingsApp {
         egui::Area::new(egui::Id::new("window-close"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(bounds.right() - 48.0, 12.0))
-            .show(ctx, |ui| {
+            .show(&ctx, |ui| {
                 if ui
                     .add_sized(
                         [36.0, 32.0],
@@ -1304,16 +1236,16 @@ impl eframe::App for SettingsApp {
                     .on_hover_text("关闭")
                     .clicked()
                 {
-                    self.hide(ctx);
+                    self.hide(&ctx);
                 }
             });
-        if self.first_ui_ms.is_none() {
-            self.first_ui_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
-            ctx.request_repaint();
-        }
-        if self.options.screenshot.is_some() && !self.screenshot_requested && self.reported {
-            self.screenshot_requested = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        if self.options.screenshot.is_some() && !self.screenshot_requested {
+            if _frame.info().cpu_usage.is_some() {
+                self.screenshot_requested = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            } else {
+                ctx.request_repaint();
+            }
         }
         if let Some(path) = &self.options.screenshot {
             for event in ctx.input(|input| input.events.clone()) {
@@ -1340,7 +1272,7 @@ impl eframe::App for SettingsApp {
         if let Some(delay) = self.options.hide_after {
             if self.started.elapsed() >= delay {
                 self.options.hide_after = None;
-                self.hide(ctx);
+                self.hide(&ctx);
             } else {
                 ctx.request_repaint_after(delay.saturating_sub(self.started.elapsed()));
             }
@@ -1358,7 +1290,7 @@ impl eframe::App for SettingsApp {
 pub fn run() -> AppResult<()> {
     let started = Instant::now();
     let options = Options::parse()?;
-    let Some(_guard) = instance::acquire(options.updates, options.opened_at)? else {
+    let Some(_guard) = instance::acquire(options.updates)? else {
         return Ok(());
     };
     let native = eframe::NativeOptions {

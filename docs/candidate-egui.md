@@ -1,9 +1,9 @@
 # Candidate window rendering
 
-The Windows candidate window now uses egui 0.31.1 for text measurement, wrapping,
+The Windows candidate window now uses egui 0.36.2 for text measurement, wrapping,
 rounded backgrounds and tessellation. A small CPU backend rasterizes its meshes
 and font atlas into a top-down BGRX bitmap. Win32 presents the finished bitmap.
-This follows egui's [custom integration model](https://github.com/emilk/egui/tree/0.31.1#integrating-with-egui),
+This follows egui's [custom integration model](https://github.com/emilk/egui/tree/0.36.2#integrating-with-egui),
 without adding eframe, winit, an OpenGL context or a GPU device to the TSF DLL.
 
 ## Interaction and appearance
@@ -14,7 +14,9 @@ without adding eframe, winit, an OpenGL context or a GPU device to the TSF DLL.
   Number keys, Space, arrows and `-`/`=` retain their existing behavior.
 - The UIElement Show/Hide negotiation and candidate enumeration are unchanged;
   hosts that draw their own candidates do not get a second popup.
-- Candidate text uses a 15px font, numbers 11px, with the existing colors,
+- Candidate text uses light-mode font coverage to match the light background
+  and avoid dark-mode compensation thickening text edges.
+- Candidate text uses a 16px font, numbers 11px, with the existing colors,
   selected state, 4px outer padding and 2px cell gaps, scaled with DPI.
 - The kernel continues to pack at most eight candidates into a 480 logical pixel
   maximum width. Widths now come from the same egui font layout used to paint.
@@ -29,13 +31,14 @@ without adding eframe, winit, an OpenGL context or a GPU device to the TSF DLL.
 Each TSF apartment lazily retains one egui context, font cache and atlas across
 compositions. It renders only when candidate state changes. `WM_PAINT` copies the
 cached bitmap, and there is no repaint timer or background render loop.
+The font backend uses Skrifa and vello_cpu with font hinting enabled by default.
 The font is loaded from Windows' Fonts directory (Microsoft YaHei preferred,
 then Chinese fallback fonts). Microsoft fonts are not bundled in the installer.
 Unlike the old GDI path, this keeps a font file and atlas in host memory, so this
 change is not a claim of lower memory use. An unavailable CJK font leaves egui's
 default fonts, which cannot display all Chinese characters.
 
-On the development machine, a release benchmark with eight two-character
+On the development machine, a release benchmark using the previous 15px font with eight two-character
 candidates and 200 warm updates per DPI scale measured:
 
 | Scale | Median | P95 |

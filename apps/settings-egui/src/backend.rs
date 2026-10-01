@@ -121,7 +121,6 @@ pub fn local_root() -> Result<PathBuf> {
 pub struct Preferences {
     pub scheme: PinyinScheme,
     pub auto_check: bool,
-    pub statistics_enabled: bool,
     pub pack_mask: u32,
     pub version: String,
     pub directory: PathBuf,
@@ -162,7 +161,6 @@ pub fn preferences() -> Result<Preferences> {
             PinyinScheme::Full
         },
         auto_check,
-        statistics_enabled: dword_at(KEY, "StatisticsEnabled")?.unwrap_or(1) != 0,
         pack_mask: dword_at(KEY, "EnabledDictionaryPacks")?.unwrap_or(0) & 0x7f,
         version: installed("Version")?.unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()),
         directory,
@@ -505,7 +503,6 @@ pub enum Task {
     Packs,
     SetPack(usize, bool, Arc<AtomicBool>),
     Statistics,
-    ClearStatistics,
     Check,
     Install(String),
     Skip(String),
@@ -562,22 +559,9 @@ pub fn worker(
                     set_pack(index, enabled, &cancel, |p| emit(Event::PackProgress(p)))
                         .map_err(|e| e.to_string()),
                 )),
-                Task::Statistics | Task::ClearStatistics => {
+                Task::Statistics => {
                     let now = chrono::Local::now().timestamp_millis();
-                    if matches!(task, Task::ClearStatistics) {
-                        if let Err(e) = statistics.clear(now) {
-                            emit(Event::Error(e.to_string()));
-                            continue;
-                        }
-                    }
-                    match statistics.load(
-                        now,
-                        dword_at(KEY, "StatisticsEnabled")
-                            .ok()
-                            .flatten()
-                            .unwrap_or(1)
-                            != 0,
-                    ) {
+                    match statistics.load(now) {
                         Ok(data) => emit(Event::Statistics(data)),
                         Err(e) => emit(Event::Error(e.to_string())),
                     }

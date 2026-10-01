@@ -127,7 +127,7 @@ impl Store {
             reset: 0,
         }
     }
-    pub fn load(&mut self, now: i64, enabled: bool) -> std::io::Result<Snapshot> {
+    pub fn load(&mut self, now: i64) -> std::io::Result<Snapshot> {
         let reset = fs::read_to_string(self.root.join("reset.txt"))
             .ok()
             .and_then(|v| v.trim().parse().ok())
@@ -252,27 +252,13 @@ impl Store {
         {
             result.today = result.days.get(&today).copied().unwrap_or_default();
         }
-        if enabled && now - last_chinese <= 30_000 {
+        if now - last_chinese <= 30_000 {
             result.chinese_speed = recent.chinese_speed();
         }
-        if enabled && now - last_english <= 30_000 {
+        if now - last_english <= 30_000 {
             result.english_speed = recent.english_speed();
         }
         Ok(result)
-    }
-    pub fn clear(&mut self, now: i64) -> std::io::Result<()> {
-        fs::create_dir_all(&self.root)?;
-        fs::write(self.root.join("reset.txt"), now.to_string())?;
-        self.files.clear();
-        self.reset = now;
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() && entry.path().extension().is_some_and(|v| v == "log")
-            {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-        Ok(())
     }
 }
 
@@ -316,17 +302,17 @@ mod tests {
         let file = root.join("test.log");
         fs::write(&file, format!("{time},20,10,10000,10000\n{time},5"))?;
         let mut store = Store::new(root.clone());
-        assert_eq!(store.load(now, true)?.total.total(), 30);
+        assert_eq!(store.load(now)?.total.total(), 30);
         fs::write(
             &file,
             format!("{time},20,10,10000,10000\n{time},5,0,5000,0\n"),
         )?;
-        assert_eq!(store.load(now, true)?.total.total(), 35);
-        assert_eq!(store.load(now, true)?.total.total(), 35);
-        assert_eq!(store.load(now + 31_000, true)?.chinese_speed, None);
-        store.clear(now + 1)?;
+        assert_eq!(store.load(now)?.total.total(), 35);
+        assert_eq!(store.load(now)?.total.total(), 35);
+        assert_eq!(store.load(now + 31_000)?.chinese_speed, None);
+        fs::write(root.join("reset.txt"), (now + 1).to_string())?;
         fs::write(&file, format!("{time},20,10,10000,10000\n"))?;
-        assert_eq!(store.load(now + 1, true)?.total.total(), 0);
+        assert_eq!(store.load(now + 1)?.total.total(), 0);
         fs::remove_dir_all(root)?;
         Ok(())
     }

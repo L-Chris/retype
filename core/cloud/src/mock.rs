@@ -57,7 +57,7 @@ fn should_fail(cfg: &MockConfig, call: usize) -> bool {
     }
     match cfg.fail_every {
         // 第 n、2n、3n… 次调用失败（call 从 0 开始计数）
-        Some(n) if n >= 2 => ((call as u32) + 1) % n == 0,
+        Some(n) if n >= 2 => ((call as u32) + 1).is_multiple_of(n),
         _ => false,
     }
 }
@@ -235,7 +235,7 @@ impl AsrSession for MockSession {
         }
         self.frames += 1;
         let every = self.cfg.frames_per_event.max(1);
-        if self.frames % every == 0 {
+        if self.frames.is_multiple_of(every) {
             if let Some(ev) = self.script.pop_front() {
                 self.pending.push_back(ev);
             }

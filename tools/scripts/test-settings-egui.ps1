@@ -64,8 +64,7 @@ foreach ($page in @('input','dictionary','statistics','about')) {
   } finally { if (-not $process.HasExited) { Stop-Process -Id $process.Id } }
 }
 
-$report = Join-Path $OutputDirectory 'warm.json'
-$process = Start-Settings $Executable @("--timing-file=`"$report`"", '--hide-after-ms=800')
+$process = Start-Settings $Executable @('--hide-after-ms=800')
 $other = $null
 try {
   $window = Wait-SettingsWindow $process
@@ -77,14 +76,6 @@ try {
   if (-not $duplicate.WaitForExit(10000) -or $duplicate.ExitCode -ne 0) { throw 'Same-version forwarding failed' }
   Wait-Visibility $window $true
   if ($process.HasExited) { throw 'Warm activation replaced the original process' }
-  $deadline = [DateTime]::UtcNow.AddSeconds(5)
-  do {
-    $activePage = (Get-Content -LiteralPath $report -Raw | ConvertFrom-Json).page
-    if ($activePage -eq 'About') { break }
-    Start-Sleep -Milliseconds 25
-  } while ([DateTime]::UtcNow -lt $deadline)
-  if ($activePage -ne 'About') { throw 'Update request did not select the About page' }
-
   $otherDirectory = Join-Path $OutputDirectory 'other-install\settings'
   [void](New-Item -ItemType Directory -Force -Path $otherDirectory)
   $otherExecutable = Join-Path $otherDirectory 'retype.exe'
@@ -101,7 +92,7 @@ try {
   Start-Sleep -Milliseconds 500
   Wait-Visibility $window $false
   if (-not $process.WaitForExit(5000) -or $process.ExitCode -ne 0) { throw 'Hidden idle timer did not exit cleanly' }
-  Write-Output 'Settings smoke tests passed: four pages, hide/restore, warm activation, update routing, version isolation, native close, idle expiry.'
+  Write-Output 'Settings smoke tests passed: four pages, hide/restore, warm activation, update activation, version isolation, native close, idle expiry.'
 } finally {
   foreach ($owned in @($process,$other)) { if ($owned -and -not $owned.HasExited) { Stop-Process -Id $owned.Id } }
 }

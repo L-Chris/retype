@@ -7,6 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 const BACKGROUND: Color32 = Color32::from_rgb(252, 252, 253);
 const ACCENT: Color32 = Color32::from_rgb(19, 143, 150);
 const INK: Color32 = Color32::from_rgb(52, 61, 68);
+const CANDIDATE_FONT_SIZE: f32 = 16.0;
 const MUTED: Color32 = Color32::from_rgb(142, 147, 154);
 
 #[derive(Clone, Debug)]
@@ -48,6 +49,9 @@ pub struct Surface {
 impl Default for Surface {
     fn default() -> Self {
         let context = egui::Context::default();
+        // The popup has a light background; dark-mode font coverage would
+        // artificially thicken the edges of black-on-white candidate text.
+        context.set_theme(egui::Theme::Light);
         let mut fonts = egui::FontDefinitions::default();
         if let Some(directory) = std::env::var_os("WINDIR") {
             let directory = std::path::PathBuf::from(directory).join("Fonts");
@@ -84,54 +88,68 @@ impl Surface {
         }
     }
 
-    fn apply_textures(&mut self, delta: &epaint::textures::TexturesDelta) {
-        for (id, change) in &delta.set {
-            let pixels = match &change.image {
-                epaint::ImageData::Color(image) => image.pixels.clone(),
-                epaint::ImageData::Font(image) => image.srgba_pixels(None).collect(),
-            };
-            let size = change.image.size();
-            if let Some([x, y]) = change.pos {
-                if let Some(texture) = self.textures.get_mut(id) {
-                    for row in 0..size[1] {
-                        let start = (y + row) * texture.size[0] + x;
-                        if let Some(target) = texture.pixels.get_mut(start..start + size[0]) {
-                            target.copy_from_slice(&pixels[row * size[0]..(row + 1) * size[0]]);
+    fn apply_textures(&mut self, delta: &mut epaint::textures::TexturesDelta) {
+        for (id, changes) in &delta.set {
+            for change in changes {
+                let epaint::ImageData::Color(image) = &change.image;
+                let pixels = &image.pixels;
+                let size = image.size;
+                let monochrome = pixels.iter().all(|pixel| {
+                    let [r, g, b, a] = pixel.to_array();
+                    r == a && g == a && b == a
+                });
+                if let Some([x, y]) = change.pos {
+                    if let Some(texture) = self.textures.get_mut(id) {
+                        texture.monochrome &= monochrome;
+                        for row in 0..size[1] {
+                            let start = (y + row) * texture.size[0] + x;
+                            if let Some(target) = texture.pixels.get_mut(start..start + size[0]) {
+                                target.copy_from_slice(&pixels[row * size[0]..(row + 1) * size[0]]);
+                            }
                         }
                     }
+                } else {
+                    self.textures.insert(
+                        *id,
+                        Texture {
+                            size,
+                            pixels: pixels.clone(),
+                            monochrome,
+                        },
+                    );
                 }
-            } else {
-                self.textures.insert(
-                    *id,
-                    Texture {
-                        size,
-                        pixels,
-                        monochrome: matches!(change.image, epaint::ImageData::Font(_)),
-                    },
-                );
             }
         }
+        delta.set.clear();
+    }
+
+    fn free_textures(&mut self, delta: &mut epaint::textures::TexturesDelta) {
+        for id in &delta.free {
+            self.textures.remove(id);
+        }
+        delta.clear();
     }
 
     fn initialize(&mut self, scale: f32) {
         // fonts() needs an initialized pass; keep its atlas delta for the first paint.
         if !self.initialized || self.context.pixels_per_point() != scale {
-            let output = self.context.run(self.input(480.0, 38.0, scale), |_| {});
-            self.apply_textures(&output.textures_delta);
+            let mut output = self.context.run_ui(self.input(480.0, 38.0, scale), |_| {});
+            self.apply_textures(&mut output.textures_delta);
+            self.free_textures(&mut output.textures_delta);
             self.initialized = true;
         }
     }
 
     pub fn measure(&mut self, state: &RenderState, available: i32, scale: f32) -> Vec<i32> {
         self.initialize(scale);
-        self.context.fonts(|fonts| {
+        self.context.fonts_mut(|fonts| {
             state
                 .candidates
                 .iter()
                 .map(|candidate| {
                     let galley = fonts.layout_no_wrap(
                         candidate.text.clone(),
-                        FontId::proportional(15.0),
+                        FontId::proportional(CANDIDATE_FONT_SIZE),
                         INK,
                     );
                     // Round upwards: pagination must never underestimate the painted width.
@@ -154,7 +172,7 @@ impl Surface {
     ) -> Bitmap {
         self.initialize(scale);
         let pad = (4.0 * scale).round();
-        let galleys = self.context.fonts(|fonts| {
+        let galleys = self.context.fonts_mut(|fonts| {
             state
                 .visible()
                 .iter()
@@ -162,7 +180,7 @@ impl Surface {
                 .map(|(candidate, width)| {
                     fonts.layout(
                         candidate.text.clone(),
-                        FontId::proportional(15.0),
+                        FontId::proportional(CANDIDATE_FONT_SIZE),
                         INK,
                         (*width as f32 / scale - 21.0).max(1.0),
                     )
@@ -196,7 +214,7 @@ impl Surface {
             height,
         };
         let input = self.input(width as f32 / scale, height as f32 / scale, scale);
-        let output = self.context.run(input, |ctx| {
+        let mut output = self.context.run_ui(input, |ctx| {
             let painter = ctx.layer_painter(egui::LayerId::background());
             let bounds =
                 Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32) / scale);
@@ -227,7 +245,7 @@ impl Surface {
                 );
             }
         });
-        self.apply_textures(&output.textures_delta);
+        self.apply_textures(&mut output.textures_delta);
         let primitives = self
             .context
             .tessellate(output.shapes, output.pixels_per_point);
@@ -247,9 +265,7 @@ impl Surface {
                 }
             }
         }
-        for id in output.textures_delta.free {
-            self.textures.remove(&id);
-        }
+        self.free_textures(&mut output.textures_delta);
         Bitmap { geometry, pixels }
     }
 }
@@ -462,10 +478,10 @@ mod tests {
                 assert!(
                     surface
                         .context
-                        .fonts(|fonts| fonts
+                        .fonts_mut(|fonts| fonts
                             .layout_no_wrap(
                                 state.candidates[i].text.clone(),
-                                FontId::proportional(15.0),
+                                FontId::proportional(CANDIDATE_FONT_SIZE),
                                 INK
                             )
                             .size()

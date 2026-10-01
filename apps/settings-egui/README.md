@@ -12,8 +12,8 @@ The original `apps/settings` sources remain as a reference and asset source.
   pinned SHA-256 verification and local conversion. Each pack has an on/off switch;
   turning on an undownloaded pack downloads and enables it automatically.
 - Statistics: separate Chinese/English counts and live speeds, weighted average
-  speeds by day/week/month/year, history charts, collection switch and confirmed
-  clearing. Existing numeric logs and reset markers remain compatible.
+  speeds by day/week/month/year and history charts. Collection is always enabled;
+  existing numeric logs and legacy reset markers remain compatible.
 - About: installed version, daily update reminders, manual checks, release notes,
   verified download and elevated installation, installation verification,
   version skipping, feedback and license links.
@@ -37,10 +37,9 @@ cargo build --release -p retype-settings-egui
 cargo test -p retype-settings-egui
 cargo clippy -p retype-settings-egui --all-targets -- -D warnings
 .\tools\scripts\test-settings-egui.ps1
-.\tools\scripts\benchmark-settings-egui.ps1 -Renderer glow -Rounds 3
 ```
 
-The runtime smoke test captures all pages and verifies window reuse and install
+The optional manual runtime smoke test captures all pages and verifies window reuse and install
 path isolation. It opens the update page and checks for a release, but never
 installs an update or changes input/dictionary preferences.
 The optional network test downloads one pack to an isolated temporary directory:
@@ -52,18 +51,14 @@ cargo test -p retype-settings-egui download_and_convert_without_changing_user_pr
 
 Production uses OpenGL (`glow`). An optional comparison build enables wgpu:
 `cargo build --release -p retype-settings-egui --features wgpu`, then
-`--renderer=wgpu`. eframe is pinned to 0.31.1 to support Rust 1.85. Chinese fonts
+`--renderer=wgpu`. egui/eframe are pinned to 0.36.2 and require Rust 1.95 or newer. Chinese fonts
 come from Windows (Microsoft YaHei preferred); Microsoft fonts are not bundled.
 
-Diagnostics support `--page=input|dictionary|statistics|about`, `--updates`,
-`--timing-file=<path>`, `--screenshot=<path>`, `--opened-at=<Windows tick>`,
-`--exit-after-ms=<milliseconds>` `--idle-exit-ms=<milliseconds>` and `--hide-after-ms=<milliseconds>`. Failures write
-`%TEMP%\retype-settings-egui-error.txt` and display a native error message.
+Manual preview options support `--page=input|dictionary|statistics|about`,
+`--updates`, `--screenshot=<path>`, `--exit-after-ms=<milliseconds>`,
+`--idle-exit-ms=<milliseconds>` and `--hide-after-ms=<milliseconds>`.
+Failures write `%TEMP%\retype-settings-egui-error.txt` and display a native message.
 
-Startup benchmarks launch fresh processes with normal OS/driver caches.
-`open_ms` includes process loading and ends at the next UI update after the first
-render; `first_ui_ms` alone does not measure presentation. Memory is sampled
-500ms later, not at its peak. A three-run production measurement on the development machine averaged 505ms
-(437–625ms), with a 5.49 MiB executable and 96 MiB average working set.
-The earlier Flutter baseline averaged about 2422ms. These results depend on
-the machine and cache state; use the script above to measure your environment.
+Startup benchmarking and timing logs have been removed. Functional checks remain
+available on demand; ordinary launches do not run a benchmark or UI test sequence.
+Legacy timing arguments from older input-method launchers are accepted and ignored.

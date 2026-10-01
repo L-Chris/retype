@@ -65,7 +65,6 @@ impl Delta {
 }
 
 static SENDER: OnceLock<Option<SyncSender<Delta>>> = OnceLock::new();
-static ENABLED: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -73,33 +72,6 @@ fn now_ms() -> u64 {
         .map_or(0, |duration| {
             duration.as_millis().min(u64::MAX as u128) as u64
         })
-}
-
-fn enabled() -> bool {
-    let cache = ENABLED.get_or_init(|| Mutex::new(None));
-    let mut cached = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some((checked, value)) = *cached {
-        if checked.elapsed() < Duration::from_millis(500) {
-            return value;
-        }
-    }
-    let mut value = 1u32;
-    let mut size = std::mem::size_of_val(&value) as u32;
-    // SAFETY: DWORD buffer and size match. Missing preference means enabled.
-    let result = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\retype"),
-            w!("StatisticsEnabled"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut value as *mut u32).cast()),
-            Some(&mut size),
-        )
-    };
-    let on = !result.is_ok() || value != 0;
-    *cached = Some((Instant::now(), on));
-    on
 }
 
 fn directory() -> Option<PathBuf> {
@@ -148,22 +120,13 @@ fn enqueue(delta: Delta) {
         // the developer's personal statistics.
         return;
     }
-    if enabled() {
-        if let Some(sender) = sender() {
-            // Never wait for disk or another process in an input callback.
-            let _ = sender.try_send(delta);
-        }
+    if let Some(sender) = sender() {
+        // Never wait for disk or another process in an input callback.
+        let _ = sender.try_send(delta);
     }
 }
 
 pub(crate) fn activity(clock: &Mutex<ActivityClock>, language: Language) {
-    if !enabled() {
-        clock
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .reset();
-        return;
-    }
     let elapsed = clock
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())

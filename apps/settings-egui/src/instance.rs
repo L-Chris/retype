@@ -28,7 +28,7 @@ impl Drop for Guard {
     }
 }
 
-pub fn acquire(updates: bool, opened_at: u32) -> Result<Option<Guard>> {
+pub fn acquire(updates: bool) -> Result<Option<Guard>> {
     let path = std::env::current_exe()?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     path.to_string_lossy().to_lowercase().hash(&mut hash);
@@ -70,12 +70,7 @@ pub fn acquire(updates: bool, opened_at: u32) -> Result<Option<Guard>> {
                         .eq_ignore_ascii_case(&path.to_string_lossy())
                 {
                     let _ = AllowSetForegroundWindow(pid);
-                    PostMessageW(
-                        Some(window),
-                        SHOW,
-                        WPARAM(opened_at as usize),
-                        LPARAM(isize::from(updates)),
-                    )?;
+                    PostMessageW(Some(window), SHOW, WPARAM(0), LPARAM(isize::from(updates)))?;
                     return Ok(None);
                 }
             }
@@ -87,12 +82,12 @@ pub fn acquire(updates: bool, opened_at: u32) -> Result<Option<Guard>> {
 struct State {
     ctx: egui::Context,
     main: HWND,
-    requests: Arc<Mutex<Vec<(u32, bool)>>>,
+    requests: Arc<Mutex<Vec<bool>>>,
     busy: Arc<AtomicBool>,
 }
 pub struct Window {
     handle: HWND,
-    pub requests: Arc<Mutex<Vec<(u32, bool)>>>,
+    pub requests: Arc<Mutex<Vec<bool>>>,
 }
 impl Window {
     pub fn create(main: HWND, ctx: egui::Context, busy: Arc<AtomicBool>) -> Result<Self> {
@@ -162,7 +157,7 @@ unsafe extern "system" fn proc(window: HWND, message: u32, wp: WPARAM, lp: LPARA
                 .requests
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push((wp.0 as u32, lp.0 != 0));
+                .push(lp.0 != 0);
             let _ = ShowWindow(state.main, SW_RESTORE);
             let _ = SetForegroundWindow(state.main);
             state.ctx.request_repaint();
