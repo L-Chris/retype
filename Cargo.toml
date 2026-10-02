@@ -21,7 +21,7 @@ members = [
 
 [workspace.package]
 # 版本号的唯一真源。设置程序和其他 Rust 包继承此版本；CI 校验 git tag。
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"

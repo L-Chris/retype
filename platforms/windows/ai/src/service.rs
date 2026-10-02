@@ -48,7 +48,7 @@ pub fn perform(operation: Operation) -> Result<Response, String> {
             if !provider.models.contains(&model) {
                 return Err("测试模型未保存".into());
             }
-            translate(&provider, &model, "Hello", "简体中文", "", "default", 20)?;
+            translate(&provider, &model, "Hello", "简体中文", "", "none", 20)?;
             Ok(Response::Tested)
         }
         Operation::Translate { text } => {
@@ -215,9 +215,7 @@ pub fn translate(
             json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":text}],"stream":false}),
         ),
     };
-    if provider.kind == ApiKind::Compatible && reasoning != "default" {
-        body["reasoning_effort"] = json!(reasoning);
-    }
+    apply_reasoning(&mut body, provider, model, reasoning)?;
     let agent = agent(seconds);
     let mut request = agent.post(&url);
     match provider.kind {
@@ -242,6 +240,108 @@ pub fn translate(
         .read_json()
         .map_err(error)?;
     parse_translation(provider.kind, &value)
+}
+/// Translate the saved preference into each API's wire format, without sending
+/// reasoning-only fields to known non-reasoning model families.
+fn apply_reasoning(
+    body: &mut Value,
+    provider: &Provider,
+    model: &str,
+    effort: &str,
+) -> Result<(), String> {
+    let budget = match effort {
+        "default" => return Ok(()),
+        "none" => 0,
+        "minimal" => 1024,
+        "low" => 2048,
+        "medium" => 4096,
+        "high" => 8192,
+        _ => return Err("思考等级无效，请在设置中重新选择".into()),
+    };
+    let model = model.to_ascii_lowercase();
+    match provider.kind {
+        ApiKind::Anthropic => {
+            body["thinking"] = if budget == 0 {
+                json!({"type":"disabled"})
+            } else {
+                json!({"type":"enabled","budget_tokens":budget})
+            };
+            if budget > 0 {
+                body["max_tokens"] = json!(16384 + budget);
+            }
+        }
+        ApiKind::Gemini => {
+            if model.contains("gemini-3") {
+                // Pro cannot disable thinking; Flash supports minimal effort.
+                let level = if budget == 0 && !model.contains("pro") {
+                    "minimal"
+                } else if budget <= 2048 {
+                    "low"
+                } else if budget == 4096 && !model.contains("pro") {
+                    "medium"
+                } else {
+                    "high"
+                };
+                body["generationConfig"]["thinkingConfig"] = json!({"thinkingLevel":level});
+            } else if model.contains("gemini-2.5") {
+                let budget = if model.contains("pro") {
+                    budget.max(128)
+                } else {
+                    budget
+                };
+                body["generationConfig"]["thinkingConfig"] = json!({"thinkingBudget":budget});
+            }
+        }
+        ApiKind::Ollama => {
+            body["think"] = if model.starts_with("gpt-oss") {
+                json!(match effort {
+                    "none" | "minimal" | "low" => "low",
+                    "medium" => "medium",
+                    _ => "high",
+                })
+            } else {
+                json!(budget != 0)
+            };
+        }
+        ApiKind::Compatible => {
+            let host = provider.base_url.split('/').nth(2).unwrap_or_default();
+            if provider.preset == "DeepSeek" || host == "api.deepseek.com" {
+                body["thinking"] = json!({"type":if budget == 0 {"disabled"} else {"enabled"}});
+                if budget > 0 {
+                    body["reasoning_effort"] = json!(if budget <= 2048 { "low" } else { "high" });
+                }
+            } else if provider.preset == "OpenRouter" || host == "openrouter.ai" {
+                body["reasoning"] = if budget == 0 {
+                    json!({"enabled":false})
+                } else {
+                    json!({"effort":effort})
+                };
+            } else if provider.preset == "硅基流动" || host == "api.siliconflow.cn" {
+                if model.contains("qwen3") {
+                    body["enable_thinking"] = json!(budget != 0);
+                    if budget > 0 {
+                        body["thinking_budget"] = json!(budget);
+                    }
+                }
+            } else if model.starts_with("gpt-4") || model.starts_with("gpt-3") {
+                // These models do not expose a reasoning control.
+            } else {
+                let effort = if budget == 0
+                    && (model.starts_with("o1")
+                        || model.starts_with("o3")
+                        || model.starts_with("o4")
+                        || model == "gpt-5"
+                        || model.starts_with("gpt-5-"))
+                {
+                    "low"
+                } else {
+                    effort
+                };
+                body["reasoning_effort"] = json!(effort);
+            }
+        }
+    }
+    Ok(())
 }
 pub fn parse_translation(kind: ApiKind, value: &Value) -> Result<String, String> {
     let text = match kind {
@@ -426,6 +526,129 @@ mod http_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reasoning_preferences_use_native_provider_fields() {
+        for (kind, preset, model, effort, expected) in [
+            (
+                ApiKind::Compatible,
+                "DeepSeek",
+                "deepseek-chat",
+                "none",
+                json!({"thinking":{"type":"disabled"}}),
+            ),
+            (
+                ApiKind::Compatible,
+                "DeepSeek",
+                "deepseek-chat",
+                "medium",
+                json!({"thinking":{"type":"enabled"},"reasoning_effort":"high"}),
+            ),
+            (
+                ApiKind::Compatible,
+                "OpenRouter",
+                "qwen/qwen3",
+                "none",
+                json!({"reasoning":{"enabled":false}}),
+            ),
+            (
+                ApiKind::Compatible,
+                "硅基流动",
+                "Qwen/Qwen3-32B",
+                "none",
+                json!({"enable_thinking":false}),
+            ),
+            (ApiKind::Compatible, "自定义", "gpt-4o", "none", json!({})),
+            (
+                ApiKind::Compatible,
+                "OpenAI",
+                "gpt-5.2",
+                "none",
+                json!({"reasoning_effort":"none"}),
+            ),
+            (
+                ApiKind::Compatible,
+                "OpenAI",
+                "o3",
+                "none",
+                json!({"reasoning_effort":"low"}),
+            ),
+            (
+                ApiKind::Anthropic,
+                "Anthropic",
+                "claude-sonnet-4",
+                "none",
+                json!({"thinking":{"type":"disabled"}}),
+            ),
+            (
+                ApiKind::Anthropic,
+                "Anthropic",
+                "claude-sonnet-4",
+                "low",
+                json!({"thinking":{"type":"enabled","budget_tokens":2048},"max_tokens":18432}),
+            ),
+            (
+                ApiKind::Gemini,
+                "Gemini",
+                "gemini-2.5-flash",
+                "none",
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}),
+            ),
+            (
+                ApiKind::Gemini,
+                "Gemini",
+                "gemini-2.5-pro",
+                "none",
+                json!({"generationConfig":{"thinkingConfig":{"thinkingBudget":128}}}),
+            ),
+            (
+                ApiKind::Gemini,
+                "Gemini",
+                "gemini-3-flash-preview",
+                "none",
+                json!({"generationConfig":{"thinkingConfig":{"thinkingLevel":"minimal"}}}),
+            ),
+            (
+                ApiKind::Ollama,
+                "Ollama",
+                "qwen3",
+                "none",
+                json!({"think":false}),
+            ),
+            (
+                ApiKind::Ollama,
+                "Ollama",
+                "gpt-oss:20b",
+                "none",
+                json!({"think":"low"}),
+            ),
+        ] {
+            let provider = Provider {
+                kind,
+                preset: preset.into(),
+                ..Default::default()
+            };
+            let mut body = json!({});
+            assert!(apply_reasoning(&mut body, &provider, model, effort).is_ok());
+            assert_eq!(body, expected, "{preset}/{model}/{effort}");
+            let mut body = json!({});
+            assert!(apply_reasoning(&mut body, &provider, model, "default").is_ok());
+            assert_eq!(body, json!({}));
+        }
+        assert_eq!(Config::default().reasoning, "none");
+        assert_eq!(
+            serde_json::from_str::<Config>("{}")
+                .ok()
+                .map(|c| c.reasoning),
+            Some("none".into())
+        );
+        assert_eq!(
+            serde_json::from_str::<Config>(r#"{"reasoning":"high"}"#)
+                .ok()
+                .map(|c| c.reasoning),
+            Some("high".into())
+        );
+        assert!(apply_reasoning(&mut json!({}), &Provider::default(), "model", "invalid").is_err());
+    }
     #[test]
     fn truncated_output_is_not_used() {
         assert!(parse_translation(

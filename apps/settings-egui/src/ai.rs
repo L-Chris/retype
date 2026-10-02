@@ -452,17 +452,12 @@ impl AiPages {
                                     {
                                         self.config.provider = p.id.clone();
                                         self.config.model = model.clone();
-                                        self.config.reasoning = "default".into();
+                                        self.config.reasoning = "none".into();
                                     }
                                 }
                             }
                         });
                     ui.end_row();
-                    if self
-                        .config
-                        .selected()
-                        .is_ok_and(|p| p.kind == ApiKind::Compatible)
-                        && supports_reasoning(&self.config.model)
                     {
                         provider_label(ui, "思考等级");
                         egui::ComboBox::from_id_salt("reasoning")
@@ -471,7 +466,9 @@ impl AiPages {
                             .selected_text(reasoning_label(&self.config.reasoning))
                             .show_ui(ui, |ui| {
                                 for (value, label) in [
+                                    ("none", "不思考"),
                                     ("default", "模型默认"),
+                                    ("minimal", "极低"),
                                     ("low", "低"),
                                     ("medium", "中"),
                                     ("high", "高"),
@@ -482,7 +479,9 @@ impl AiPages {
                                         label,
                                     );
                                 }
-                            });
+                            })
+                            .response
+                            .on_hover_text("默认不思考；模型不支持关闭时使用最低等级，仅支持开关的模型将极低、低、中、高视为开启。");
                         ui.end_row();
                     }
                     provider_label(ui, "翻译为");
@@ -555,7 +554,7 @@ impl AiPages {
                     if ui.button("恢复默认").clicked() {
                         self.config.instructions.clear();
                         self.config.timeout_seconds = 60;
-                        self.config.reasoning = "default".into();
+                        self.config.reasoning = "none".into();
                     }
                 });
             });
@@ -816,17 +815,13 @@ fn kind_name(kind: ApiKind) -> &'static str {
 }
 fn reasoning_label(value: &str) -> &str {
     match value {
+        "none" => "不思考",
+        "minimal" => "极低",
         "low" => "低",
         "medium" => "中",
         "high" => "高",
         _ => "模型默认",
     }
-}
-fn supports_reasoning(model: &str) -> bool {
-    model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.starts_with("gpt-5")
 }
 
 fn virtual_key(key: egui::Key) -> Option<u16> {

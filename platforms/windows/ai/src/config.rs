@@ -92,7 +92,7 @@ impl Default for Config {
             target: "English".into(),
             preview: false,
             instructions: String::new(),
-            reasoning: "default".into(),
+            reasoning: "none".into(),
             timeout_seconds: 60,
         }
     }

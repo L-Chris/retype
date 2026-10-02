@@ -13,13 +13,13 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::LibraryLoader::*,
+        System::{DataExchange::*, LibraryLoader::*, Memory::*, Ole::CF_UNICODETEXT},
         UI::{HiDpi::GetDpiForWindow, TextServices::*, WindowsAndMessaging::*},
     },
 };
 const TIMER: usize = 88;
 const STATUS_WIDTH: i32 = 360;
-const STATUS_HEIGHT: i32 = 44;
+const STATUS_HEIGHT: i32 = 30;
 const PREVIEW_HEIGHT: i32 = 208;
 struct Frame {
     state: Weak<TipState>,
@@ -61,7 +61,7 @@ pub(crate) fn capture(state: &Arc<TipState>, context: &ITfContext, ec: u32) -> R
         read(context, ec)
     };
     let (original, message) = match snapshot {
-        Ok(text) => (text, "正在翻译…".to_owned()),
+        Ok(text) => (text, "翻译中…".to_owned()),
         Err(e) => (Vec::new(), e),
     };
     let owner = unsafe { context.GetActiveView().and_then(|v| v.GetWnd()) }.unwrap_or_default();
@@ -225,9 +225,15 @@ fn replace_checked(
         if !current() {
             return Err("翻译已取消或输入框已切换，未替换".into());
         }
-        start
-            .SetText(ec, 0, &units)
-            .map_err(|_| "应用拒绝替换，原文保持不变")?;
+        start.SetText(ec, 0, &units).map_err(|error| {
+            crate::settings_log::event(
+                "launcher",
+                "translation_replace_failed",
+                0,
+                format!("stage=set_text hresult={:08x}", error.code().0),
+            );
+            "应用拒绝替换，原文保持不变"
+        })?;
         if start.Collapse(ec, TF_ANCHOR_END).is_err() {
             return Ok(());
         }
@@ -311,8 +317,19 @@ fn request_apply(hwnd: HWND) {
             TF_ES_ASYNCDONTCARE | TF_ES_READWRITE,
         )
     };
-    if !result.is_ok_and(|s| s.is_ok()) {
-        status(hwnd, "应用拒绝替换，原文保持不变");
+    let failure = match result {
+        Ok(session) if session.is_ok() => None,
+        Ok(session) => Some(("session_result", session.0)),
+        Err(error) => Some(("request_edit_session", error.code().0)),
+    };
+    if let Some((stage, code)) = failure {
+        crate::settings_log::event(
+            "launcher",
+            "translation_replace_failed",
+            0,
+            format!("stage={stage} hresult={code:08x}"),
+        );
+        copy_fallback(hwnd);
     }
 }
 #[implement(ITfEditSession)]
@@ -346,12 +363,79 @@ impl ITfEditSession_Impl for Apply_Impl {
             });
             if result.is_ok() {
                 status(hwnd, "翻译完成");
-            } else if let Err(error) = result {
-                status(hwnd, &error);
+            } else if result.is_err() {
+                copy_fallback(hwnd);
             }
             // Translation is not typing activity and does not enter personal word learning.
             Ok(())
         })
+    }
+}
+fn copy_fallback(hwnd: HWND) {
+    copy_fallback_with(hwnd, copy_translation);
+}
+fn copy_fallback_with(hwnd: HWND, copy: impl FnOnce(HWND, &str) -> Result<()>) {
+    // Copy only an already validated, completed translation from a live request.
+    let text = unsafe { frame(hwnd) }.and_then(|f| {
+        if f.cancelled.load(Ordering::Relaxed) || f.applied {
+            return None;
+        }
+        f.preview = false;
+        f.translation.clone()
+    });
+    let Some(text) = text else { return };
+    let result = copy(hwnd, &text);
+    crate::settings_log::event(
+        "launcher",
+        "translation_clipboard_fallback",
+        0,
+        format!(
+            "success={} hresult={:08x}",
+            result.is_ok(),
+            result.as_ref().err().map_or(0, |e| e.code().0)
+        ),
+    );
+    status(
+        hwnd,
+        if result.is_ok() {
+            "译文已复制"
+        } else {
+            "替换失败，无法复制译文"
+        },
+    );
+}
+
+fn copy_translation(hwnd: HWND, text: &str) -> Result<()> {
+    let mut units: Vec<u16> = text.encode_utf16().collect();
+    validate_text(&units).map_err(|_| E_INVALIDARG)?;
+    if units.len() > MAX_TEXT {
+        return Err(E_INVALIDARG.into());
+    }
+    units.push(0);
+    // SAFETY: Allocate movable clipboard storage, copy its bounded UTF-16 data,
+    // and transfer ownership only after SetClipboardData succeeds. Always close
+    // the clipboard and free memory on failures. No clipboard contents are read.
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * std::mem::size_of::<u16>())?;
+        let pointer = GlobalLock(memory);
+        if pointer.is_null() {
+            let error = windows::core::Error::from_thread();
+            let _ = GlobalFree(Some(memory));
+            return Err(error);
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr(), pointer.cast::<u16>(), units.len());
+        let _ = GlobalUnlock(memory);
+        if let Err(error) = OpenClipboard(Some(hwnd)) {
+            let _ = GlobalFree(Some(memory));
+            return Err(error);
+        }
+        let result = EmptyClipboard()
+            .and_then(|_| SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(memory.0))));
+        let _ = CloseClipboard();
+        if result.is_err() {
+            let _ = GlobalFree(Some(memory));
+        }
+        result.map(|_| ())
     }
 }
 unsafe fn frame<'a>(hwnd: HWND) -> Option<&'a mut Frame> {
@@ -366,7 +450,7 @@ fn status(hwnd: HWND, message: &str) {
             f.message = message.into();
             f.applying = false;
             f.busy = false;
-            if message == "翻译完成" {
+            if message == "翻译完成" || message == "译文已复制" {
                 f.applied = true;
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -456,7 +540,7 @@ fn notice_font(dpi: i32) -> HFONT {
     // SAFETY: Fixed font face; callers own and delete the returned GDI font.
     unsafe {
         CreateFontW(
-            -14 * dpi / 96,
+            -12 * dpi / 96,
             0,
             0,
             0,
@@ -491,8 +575,8 @@ fn notice_width(hwnd: HWND, dpi: i32, message: &str, loading: bool) -> i32 {
         if !measured {
             return STATUS_WIDTH * dpi / 96;
         }
-        (size.cx + (if loading { 38 } else { 12 } + 38) * dpi / 96)
-            .clamp(160 * dpi / 96, STATUS_WIDTH * dpi / 96)
+        (size.cx + (if loading { 30 } else { 10 } + 10) * dpi / 96)
+            .clamp(100 * dpi / 96, STATUS_WIDTH * dpi / 96)
     }
 }
 fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
@@ -584,13 +668,23 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
     }
 }
 unsafe fn paint(hwnd: HWND) {
-    // SAFETY: paint lifecycle and temporary font/brush handles are paired and restored.
+    // SAFETY: Paint/DC/bitmap lifetimes are paired, and selected objects are
+    // restored before deletion. The window only receives a completed frame.
     unsafe {
         let mut ps = PAINTSTRUCT::default();
-        let dc = BeginPaint(hwnd, &mut ps);
+        let target = BeginPaint(hwnd, &mut ps);
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);
-        let brush = CreateSolidBrush(COLORREF(0x00faf9f6));
+        let buffer = CreateCompatibleDC(Some(target));
+        let bitmap = CreateCompatibleBitmap(target, rect.right.max(1), rect.bottom.max(1));
+        let buffered = !buffer.is_invalid() && !bitmap.is_invalid();
+        let previous_bitmap = if buffered {
+            Some(SelectObject(buffer, bitmap.into()))
+        } else {
+            None
+        };
+        let dc = if buffered { buffer } else { target };
+        let brush = CreateSolidBrush(COLORREF(0x00fafafa));
         FillRect(dc, &rect, brush);
         let _ = DeleteObject(brush.into());
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
@@ -599,33 +693,39 @@ unsafe fn paint(hwnd: HWND) {
         let font = notice_font(dpi);
         let old = SelectObject(dc, font.into());
         SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, COLORREF(0x003b2b14));
+        SetTextColor(dc, COLORREF(0x00807870));
         if let Some(f) = frame(hwnd) {
             let loading = f.busy || f.applying;
             if loading {
                 draw_spinner(
                     dc,
-                    20 * dpi / 96,
+                    15 * dpi / 96,
                     bar / 2,
-                    7 * dpi / 96,
+                    5 * dpi / 96,
                     f.spinner_phase,
                     dpi,
                 );
             }
-            let close_pen = CreatePen(PS_SOLID, (dpi / 96).max(1), COLORREF(0x008a7c6c));
-            let old_pen = SelectObject(dc, close_pen.into());
-            let center = rect.right - 20 * dpi / 96;
-            let half = 4 * dpi / 96;
-            let _ = MoveToEx(dc, center - half, bar / 2 - half, None);
-            let _ = LineTo(dc, center + half, bar / 2 + half);
-            let _ = MoveToEx(dc, center + half, bar / 2 - half, None);
-            let _ = LineTo(dc, center - half, bar / 2 + half);
-            SelectObject(dc, old_pen);
-            let _ = DeleteObject(close_pen.into());
+            if f.preview && !f.applied {
+                let close_pen = CreatePen(PS_SOLID, (dpi / 96).max(1), COLORREF(0x008a7c6c));
+                let old_pen = SelectObject(dc, close_pen.into());
+                let center = rect.right - 20 * dpi / 96;
+                let half = 4 * dpi / 96;
+                let _ = MoveToEx(dc, center - half, bar / 2 - half, None);
+                let _ = LineTo(dc, center + half, bar / 2 + half);
+                let _ = MoveToEx(dc, center + half, bar / 2 - half, None);
+                let _ = LineTo(dc, center - half, bar / 2 + half);
+                SelectObject(dc, old_pen);
+                let _ = DeleteObject(close_pen.into());
+            }
             let mut heading = RECT {
-                left: if loading { 38 * dpi / 96 } else { pad },
+                left: if loading {
+                    30 * dpi / 96
+                } else {
+                    10 * dpi / 96
+                },
                 top: 0,
-                right: rect.right - 38 * dpi / 96,
+                right: rect.right - (if f.preview && !f.applied { 38 } else { 10 }) * dpi / 96,
                 bottom: bar,
             };
             let mut message: Vec<u16> = f.message.encode_utf16().collect();
@@ -691,6 +791,28 @@ unsafe fn paint(hwnd: HWND) {
         }
         SelectObject(dc, old);
         let _ = DeleteObject(font.into());
+        if let Some(previous) = previous_bitmap {
+            // BeginPaint clips this copy to the invalid region, so animation
+            // frames never touch the text or the rest of the notice.
+            let _ = BitBlt(
+                target,
+                0,
+                0,
+                rect.right,
+                rect.bottom,
+                Some(buffer),
+                0,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(buffer, previous);
+        }
+        if !bitmap.is_invalid() {
+            let _ = DeleteObject(bitmap.into());
+        }
+        if !buffer.is_invalid() {
+            let _ = DeleteDC(buffer);
+        }
         let _ = EndPaint(hwnd, &ps);
     }
 }
@@ -702,7 +824,7 @@ fn draw_spinner(dc: HDC, x: i32, y: i32, radius: i32, phase: u32, dpi: i32) {
         let track = CreatePen(PS_SOLID, (2 * dpi / 96).max(1), COLORREF(0x00e9e5df));
         let pen = SelectObject(dc, track.into());
         let _ = Ellipse(dc, x - radius, y - radius, x + radius, y + radius);
-        let active = CreatePen(PS_SOLID, (2 * dpi / 96).max(1), COLORREF(0x009c9014));
+        let active = CreatePen(PS_SOLID, (dpi / 96).max(1), COLORREF(0x00a09080));
         SelectObject(dc, active.into());
         let angle = phase as f32 * std::f32::consts::TAU / 12.0;
         let end = angle + std::f32::consts::TAU * 0.7;
@@ -721,6 +843,15 @@ fn draw_spinner(dc: HDC, x: i32, y: i32, radius: i32, phase: u32, dpi: i32) {
         SelectObject(dc, brush);
         let _ = DeleteObject(track.into());
         let _ = DeleteObject(active.into());
+    }
+}
+
+fn spinner_dirty_rect(dpi: i32) -> RECT {
+    RECT {
+        left: 7 * dpi / 96,
+        top: (STATUS_HEIGHT / 2 - 8) * dpi / 96,
+        right: 23 * dpi / 96,
+        bottom: (STATUS_HEIGHT / 2 + 8) * dpi / 96,
     }
 }
 
@@ -774,14 +905,14 @@ pub(crate) fn paint_status_window_states(context: &ITfContext) -> Result<()> {
         #[cfg(target_pointer_width = "32")]
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as i32);
         let result = (|| -> Result<()> {
-            let short = notice_width(hwnd, 96, "正在翻译…", true);
+            let short = notice_width(hwnd, 96, "翻译中…", true);
             let long = notice_width(hwnd, 96, "输入框已切换或正在输入，原文保持不变", false);
             assert!(
                 short < long,
                 "Short notices should fit their text instead of occupying the full width"
             );
             for (message, text, height) in [
-                ("正在翻译…", None, STATUS_HEIGHT),
+                ("翻译中…", None, STATUS_HEIGHT),
                 ("读取失败", None, STATUS_HEIGHT),
                 ("", Some(""), PREVIEW_HEIGHT),
                 ("译文预览", Some("你好，这是一个翻译测试。"), PREVIEW_HEIGHT),
@@ -791,19 +922,68 @@ pub(crate) fn paint_status_window_states(context: &ITfContext) -> Result<()> {
                     let data = frame(hwnd).ok_or(E_FAIL)?;
                     data.message = message.into();
                     data.translation = text.map(str::to_owned);
-                    data.busy = message == "正在翻译…";
+                    data.busy = message == "翻译中…";
                     data.preview = height == PREVIEW_HEIGHT;
                 }
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 paint(hwnd);
-                if message == "正在翻译…" {
+                if message == "翻译中…" {
+                    // A lightweight notice has no close hit target at its right edge.
+                    window_proc(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM((10 << 16) | 479));
+                    assert!(frame(hwnd).is_some());
                     for phase in 1..=12 {
                         window_proc(hwnd, WM_TIMER, WPARAM(TIMER), LPARAM(0));
                         assert_eq!(frame(hwnd).ok_or(E_FAIL)?.spinner_phase, phase % 12);
+                        // Message-only test windows have no visible update region.
+                        // Verify the production dirty rectangle stays before the
+                        // caption at common display scales while painting each phase.
+                        for dpi in [96, 120, 144, 192] {
+                            let updated = spinner_dirty_rect(dpi);
+                            assert!(updated.right < 30 * dpi / 96);
+                            assert!(updated.top >= 0);
+                            assert!(updated.bottom <= STATUS_HEIGHT * dpi / 96);
+                        }
                         paint(hwnd);
                     }
                 }
             }
+            // Exercise fallback state transitions without changing the user's
+            // real clipboard. Only the clipboard API boundary is substituted.
+            {
+                let data = frame(hwnd).ok_or(E_FAIL)?;
+                data.translation = Some("完整译文\n第二段😀".into());
+                data.applied = false;
+                data.preview = true;
+            }
+            copy_fallback_with(hwnd, |_, text| {
+                assert_eq!(text, "完整译文\n第二段😀");
+                Err(E_ACCESSDENIED.into())
+            });
+            assert_eq!(frame(hwnd).ok_or(E_FAIL)?.message, "替换失败，无法复制译文");
+            assert!(!frame(hwnd).ok_or(E_FAIL)?.applied);
+            copy_fallback_with(hwnd, |_, text| {
+                assert_eq!(text, "完整译文\n第二段😀");
+                Ok(())
+            });
+            assert_eq!(frame(hwnd).ok_or(E_FAIL)?.message, "译文已复制");
+            assert!(frame(hwnd).ok_or(E_FAIL)?.applied);
+            assert!(!frame(hwnd).ok_or(E_FAIL)?.preview);
+            let copied_again = std::cell::Cell::new(false);
+            copy_fallback_with(hwnd, |_, _| {
+                copied_again.set(true);
+                Ok(())
+            });
+            assert!(!copied_again.get());
+            frame(hwnd).ok_or(E_FAIL)?.applied = false;
+            frame(hwnd)
+                .ok_or(E_FAIL)?
+                .cancelled
+                .store(true, Ordering::Relaxed);
+            copy_fallback_with(hwnd, |_, _| {
+                copied_again.set(true);
+                Ok(())
+            });
+            assert!(!copied_again.get());
             Ok(())
         })();
         let _ = DestroyWindow(hwnd);
@@ -835,7 +1015,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         }
                     });
                     if loading {
-                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+                        let spinner = spinner_dirty_rect(dpi);
+                        let _ = InvalidateRect(Some(hwnd), Some(&spinner), false);
                     }
                     let response = frame(hwnd).and_then(|f| f.response.as_ref()?.try_recv().ok());
                     if let Some(response) = response {
@@ -895,7 +1077,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     let x = (lp.0 & 0xffff) as u16 as i16 as i32;
                     let y = ((lp.0 >> 16) & 0xffff) as u16 as i16 as i32;
                     let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-                    if x >= rect.right - 38 * dpi / 96 && y < STATUS_HEIGHT * dpi / 96 {
+                    if x >= rect.right - 38 * dpi / 96
+                        && y < STATUS_HEIGHT * dpi / 96
+                        && frame(hwnd).is_some_and(|f| f.preview && !f.applied)
+                    {
                         let _ = DestroyWindow(hwnd);
                     } else if x >= rect.right - 84 * dpi / 96
                         && y >= rect.bottom - 40 * dpi / 96
