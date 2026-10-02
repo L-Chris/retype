@@ -24,6 +24,8 @@ struct Data {
     defer: bool,
     hidden: bool,
     no_text_extent: bool,
+    input_scope: Option<InputScope>,
+    requested_scope: bool,
     deferred_flags: Option<u32>,
 }
 
@@ -314,6 +316,10 @@ impl ITextStoreACP_Impl for Store_Impl {
         cfilterattrs: u32,
         pafilterattrs: *const windows_core::GUID,
     ) -> windows_core::Result<()> {
+        lock(&self.data).requested_scope = cfilterattrs > 0
+            && !pafilterattrs.is_null()
+            && unsafe { std::slice::from_raw_parts(pafilterattrs, cfilterattrs as usize) }
+                .contains(&GUID_PROP_INPUTSCOPE);
         Ok(())
     }
     fn RequestAttrsAtPosition(
@@ -323,7 +329,7 @@ impl ITextStoreACP_Impl for Store_Impl {
         pafilterattrs: *const windows_core::GUID,
         dwflags: u32,
     ) -> windows_core::Result<()> {
-        Ok(())
+        self.RequestSupportedAttrs(dwflags, cfilterattrs, pafilterattrs)
     }
     fn RequestAttrsTransitioningAtPosition(
         &self,
@@ -332,7 +338,7 @@ impl ITextStoreACP_Impl for Store_Impl {
         pafilterattrs: *const windows_core::GUID,
         dwflags: u32,
     ) -> windows_core::Result<()> {
-        Ok(())
+        self.RequestSupportedAttrs(dwflags, cfilterattrs, pafilterattrs)
     }
     fn FindNextAttrTransition(
         &self,
@@ -358,8 +364,22 @@ impl ITextStoreACP_Impl for Store_Impl {
         paattrvals: *mut TS_ATTRVAL,
         pcfetched: *mut u32,
     ) -> windows_core::Result<()> {
+        let scope = {
+            let mut data = lock(&self.data);
+            let requested = std::mem::take(&mut data.requested_scope);
+            data.input_scope.filter(|_| requested)
+        };
         unsafe {
             *pcfetched = 0;
+            if let Some(scope) = scope.filter(|_| ulcount > 0) {
+                let object: ITfInputScope = DeclaredScope(scope).into();
+                *paattrvals = TS_ATTRVAL {
+                    idAttr: GUID_PROP_INPUTSCOPE,
+                    dwOverlapId: 0,
+                    varValue: VARIANT::from(object.cast::<windows_core::IUnknown>()?),
+                };
+                *pcfetched = 1;
+            }
         }
         Ok(())
     }
@@ -504,6 +524,7 @@ fn translation_reads_all_text_and_refuses_stale_or_rejected_replacements() -> Re
                 document.CreateContext(tid, 0, &store, &mut context, &mut cookie)?;
                 let context = context.ok_or(E_FAIL)?;
                 document.Push(&context)?;
+                crate::translation::paint_status_window_states(&context)?;
                 let probe =
                     |expected: Option<Vec<u16>>| -> Result<std::result::Result<Vec<u16>, String>> {
                         let output = Arc::new(Mutex::new(None));
@@ -531,7 +552,16 @@ fn translation_reads_all_text_and_refuses_stale_or_rejected_replacements() -> Re
                 assert_eq!(probe(Some(original))?.as_ref().ok(), Some(&translated));
                 assert_eq!(lock(&data).text, translated);
                 lock(&data).hidden = true;
-                assert!(probe(None)?.is_err());
+                // Absence of NOHIDDENTEXT means the host supports hidden text,
+                // not that this ordinary text is private or unreadable.
+                assert_eq!(probe(None)?.as_ref().ok(), Some(&translated));
+                for scope in [IS_PASSWORD, IS_PRIVATE, IS_NUMERIC_PIN] {
+                    lock(&data).input_scope = Some(scope);
+                    assert!(probe(None)?.is_err());
+                    assert_eq!(lock(&data).text, translated);
+                }
+                lock(&data).input_scope = Some(IS_DEFAULT);
+                assert_eq!(probe(None)?.as_ref().ok(), Some(&translated));
                 document.Pop(TF_POPF_ALL)?;
                 manager.Deactivate()?;
                 Ok(())

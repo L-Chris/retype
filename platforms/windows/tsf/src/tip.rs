@@ -8,6 +8,32 @@ use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, 
 use windows::Win32::UI::TextServices::*;
 use windows_core::{implement, Interface, Ref, Result, BOOL, GUID};
 
+const TRANSLATION_COMMAND: GUID = GUID::from_u128(0x40926c8b_8ca6_4ae0_b17c_706ac447a38d);
+
+fn preserved_translation(binding: retype_ai::config::Shortcut) -> Option<TF_PRESERVEDKEY> {
+    // TSF's preserved-key API has no Windows-key modifier. Keep those bindings
+    // on the ordinary key-event path rather than registering a different chord.
+    if binding.vk == 0 || binding.modifiers & 8 != 0 || !binding.valid(false) {
+        return None;
+    }
+    Some(TF_PRESERVEDKEY {
+        uVKey: u32::from(binding.vk),
+        uModifiers: if binding.modifiers & 1 != 0 {
+            TF_MOD_CONTROL
+        } else {
+            0
+        } | if binding.modifiers & 2 != 0 {
+            TF_MOD_ALT
+        } else {
+            0
+        } | if binding.modifiers & 4 != 0 {
+            TF_MOD_SHIFT
+        } else {
+            0
+        },
+    })
+}
+
 fn normalized_modifier(vk: WPARAM) -> u16 {
     match vk.0 as u16 {
         0xa0 | 0xa1 => 0x10,
@@ -98,6 +124,7 @@ pub struct TipState {
     language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
     shift_tap: Mutex<ShiftTap>,
     shortcuts: Mutex<(std::time::Instant, retype_ai::config::Shortcuts)>,
+    preserved_translation: Mutex<Option<retype_ai::config::Shortcut>>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
     pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }
@@ -120,6 +147,7 @@ impl TipState {
             language_bar: Mutex::new(None),
             shift_tap: Mutex::new(ShiftTap::default()),
             shortcuts: Mutex::new((std::time::Instant::now(), retype_ai::secrets::shortcuts())),
+            preserved_translation: Mutex::new(None),
             mode_bridge: Mutex::new(None),
             stats_clock: Mutex::new(stats::ActivityClock::default()),
         })
@@ -176,6 +204,8 @@ impl TipState {
             }
         }
         self.activated.store(true, Ordering::SeqCst);
+        let translation_binding = lock(&self.shortcuts).1.translate;
+        self.sync_translation_key(translation_binding);
         if let Ok(bridge) = crate::langbar::ModeBridge::attach(self, &mgr) {
             *lock(&self.mode_bridge) = Some(bridge);
         }
@@ -206,6 +236,12 @@ impl TipState {
             // SAFETY: Registered sinks belong to this manager and client id.
             unsafe {
                 if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
+                    let translation_binding = lock(&self.preserved_translation).take();
+                    if let Some(binding) = translation_binding {
+                        if let Some(key) = preserved_translation(binding) {
+                            let _ = keys.UnpreserveKey(&TRANSLATION_COMMAND, &key);
+                        }
+                    }
                     let _ = keys.UnadviseKeyEventSink(self.tid.load(Ordering::SeqCst));
                 }
                 let cookies = std::mem::take(&mut *lock(&self.focus_cookie));
@@ -223,11 +259,69 @@ impl TipState {
         self.activated.load(Ordering::SeqCst)
     }
     fn shortcuts(&self) -> retype_ai::config::Shortcuts {
-        let mut cache = lock(&self.shortcuts);
-        if cache.0.elapsed() >= std::time::Duration::from_millis(250) {
-            *cache = (std::time::Instant::now(), retype_ai::secrets::shortcuts());
+        let (bindings, refresh) = {
+            let mut cache = lock(&self.shortcuts);
+            let refresh = cache.0.elapsed() >= std::time::Duration::from_millis(250);
+            if refresh {
+                *cache = (std::time::Instant::now(), retype_ai::secrets::shortcuts());
+            }
+            (cache.1, refresh)
+        };
+        if refresh && self.is_activated() {
+            self.sync_translation_key(bindings.translate);
         }
-        cache.1
+        bindings
+    }
+    fn sync_translation_key(&self, binding: retype_ai::config::Shortcut) {
+        let desired = preserved_translation(binding).map(|_| binding);
+        let previous = *lock(&self.preserved_translation);
+        if previous == desired || settings_host() {
+            return;
+        }
+        let manager = lock(&self.thread_mgr).clone();
+        let Some(keys) = manager.and_then(|mgr| mgr.cast::<ITfKeystrokeMgr>().ok()) else {
+            return;
+        };
+        // SAFETY: Registration belongs to this active TSF client and apartment.
+        // Never hold our mutexes across calls that can invoke a TSF callback.
+        let result = unsafe {
+            if let Some(previous) = previous.and_then(preserved_translation) {
+                if let Err(error) = keys.UnpreserveKey(&TRANSLATION_COMMAND, &previous) {
+                    crate::settings_log::event(
+                        "launcher",
+                        "translation_key_unregister_failed",
+                        0,
+                        format!("hresult={}", error.code().0),
+                    );
+                    return;
+                }
+            }
+            *lock(&self.preserved_translation) = None;
+            if let Some(key) = preserved_translation(binding) {
+                keys.PreserveKey(
+                    self.tid.load(Ordering::SeqCst),
+                    &TRANSLATION_COMMAND,
+                    &key,
+                    &"retype translation".encode_utf16().collect::<Vec<_>>(),
+                )
+            } else {
+                Ok(())
+            }
+        };
+        if result.is_ok() {
+            *lock(&self.preserved_translation) = desired;
+        }
+        crate::settings_log::event(
+            "launcher",
+            "translation_key_registration",
+            0,
+            format!(
+                "enabled={} success={} hresult={}",
+                desired.is_some(),
+                result.is_ok(),
+                result.as_ref().err().map_or(0, |e| e.code().0)
+            ),
+        );
     }
     pub fn session(&self) -> Option<Arc<Session>> {
         lock(&self.session).clone()
@@ -447,6 +541,7 @@ impl ITfThreadMgrEventSink_Impl for FocusSink_Impl {
 impl ITfThreadFocusSink_Impl for FocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
         if let Some(state) = self.state.upgrade() {
+            state.shortcuts();
             state.sync_scheme();
         }
         Ok(())
@@ -507,7 +602,20 @@ impl KeyEventSink_Impl {
             if test || lp.0 & (1 << 30) != 0 {
                 return Ok(true.into());
             }
-            return Ok(edit::request(&state, ctx, work).is_ok().into());
+            let result = edit::request(&state, ctx, work);
+            if matches!(work, edit::Work::Translate) {
+                crate::settings_log::event(
+                    "launcher",
+                    "translation_shortcut",
+                    0,
+                    format!(
+                        "accepted={} hresult={}",
+                        result.is_ok(),
+                        result.as_ref().err().map_or(0, |e| e.code().0)
+                    ),
+                );
+            }
+            return Ok(result.is_ok().into());
         }
         let Some(key) =
             keymap::translate_event((vk.0 & 0xffff) as u16, ((lp.0 >> 16) & 0xff) as u32)
@@ -562,6 +670,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         guarded(|| {
             if foreground.as_bool() {
                 if let Some(state) = self.state.upgrade() {
+                    state.shortcuts();
                     state.sync_scheme();
                 }
             }
@@ -637,13 +746,61 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         Ok(false.into())
     }
     #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM fixes this callback signature.
-    fn OnPreservedKey(&self, _ctx: Ref<'_, ITfContext>, _guid: *const GUID) -> Result<BOOL> {
-        Ok(false.into())
+    fn OnPreservedKey(&self, ctx: Ref<'_, ITfContext>, guid: *const GUID) -> Result<BOOL> {
+        guarded(|| {
+            if guid.is_null() || settings_host() {
+                return Ok(false.into());
+            }
+            // SAFETY: TSF supplies a valid command GUID for this callback.
+            if unsafe { *guid } != TRANSLATION_COMMAND {
+                return Ok(false.into());
+            }
+            let Some(state) = self.state.upgrade().filter(|state| state.is_activated()) else {
+                return Ok(false.into());
+            };
+            let binding = state.shortcuts().translate;
+            if *lock(&state.preserved_translation) != Some(binding) {
+                return Ok(false.into());
+            }
+            let Ok(ctx) = ctx.ok() else {
+                return Ok(false.into());
+            };
+            let result = edit::request(&state, ctx, edit::Work::Translate);
+            crate::settings_log::event(
+                "launcher",
+                "translation_preserved_shortcut",
+                0,
+                format!(
+                    "accepted={} hresult={}",
+                    result.is_ok(),
+                    result.as_ref().err().map_or(0, |e| e.code().0)
+                ),
+            );
+            Ok(result.is_ok().into())
+        })
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preserved_translation_uses_exact_modifiers_and_excludes_disabled_and_win() {
+        use retype_ai::config::Shortcut;
+        let key = preserved_translation(Shortcut::TRANSLATE).map(|key| (key.uVKey, key.uModifiers));
+        assert_eq!(key, Some((0x30, TF_MOD_CONTROL | TF_MOD_ALT)));
+        let key = preserved_translation(Shortcut {
+            vk: 0x54,
+            modifiers: 5,
+        })
+        .map(|key| key.uModifiers);
+        assert_eq!(key, Some(TF_MOD_CONTROL | TF_MOD_SHIFT));
+        assert!(preserved_translation(Shortcut::DISABLED).is_none());
+        assert!(preserved_translation(Shortcut {
+            vk: 0x54,
+            modifiers: 9
+        })
+        .is_none());
+    }
     #[test]
     fn tip_state_starts_inactive() {
         let s = TipState::new();

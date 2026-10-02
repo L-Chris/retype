@@ -13,11 +13,14 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::{DataExchange::*, LibraryLoader::*, Memory::*},
+        System::LibraryLoader::*,
         UI::{HiDpi::GetDpiForWindow, TextServices::*, WindowsAndMessaging::*},
     },
 };
 const TIMER: usize = 88;
+const STATUS_WIDTH: i32 = 360;
+const STATUS_HEIGHT: i32 = 44;
+const PREVIEW_HEIGHT: i32 = 208;
 struct Frame {
     state: Weak<TipState>,
     context: ITfContext,
@@ -32,6 +35,9 @@ struct Frame {
     owner: HWND,
     applying: bool,
     applied: bool,
+    busy: bool,
+    preview: bool,
+    spinner_phase: u32,
 }
 impl Drop for Frame {
     fn drop(&mut self) {
@@ -74,6 +80,9 @@ pub(crate) fn capture(state: &Arc<TipState>, context: &ITfContext, ec: u32) -> R
         owner,
         applying: false,
         applied: false,
+        busy: !original.is_empty(),
+        preview: false,
+        spinner_phase: 0,
     };
     let hwnd = create(data, context, ec)?;
     *lock(&state.translation_window) = Some(hwnd.0 as usize);
@@ -101,9 +110,18 @@ pub(crate) fn capture(state: &Arc<TipState>, context: &ITfContext, ec: u32) -> R
 }
 /// Read to both context anchors in bounded chunks; never use IGNOREEND or a truncated prefix.
 pub(crate) fn read(context: &ITfContext, ec: u32) -> std::result::Result<Vec<u16>, String> {
-    if !crate::edit::learnable(context, ec) {
-        return Err("此输入框不允许读取全文".into());
-    }
+    let status = unsafe { context.GetStatus() };
+    crate::settings_log::event(
+        "launcher",
+        "translation_context",
+        0,
+        format!(
+            "static_flags={} dynamic_flags={} hresult={}",
+            status.as_ref().map_or(0, |s| s.dwStaticFlags),
+            status.as_ref().map_or(0, |s| s.dwDynamicFlags),
+            status.as_ref().err().map_or(0, |e| e.code().0)
+        ),
+    );
     // SAFETY: ec is a granted read/write or read cookie for this context.
     unsafe {
         if context
@@ -124,6 +142,9 @@ pub(crate) fn read(context: &ITfContext, ec: u32) -> std::result::Result<Vec<u16
         range
             .ShiftEndToRange(ec, &end, TF_ANCHOR_END)
             .map_err(|_| "无法确定输入框全文范围")?;
+        if !crate::edit::allowed_input_scope(context, ec, &range) {
+            return Err("此输入框的密码或隐私属性不允许读取全文".into());
+        }
         // ACP bounds confirm this is a complete text-store range rather than a composition fragment.
         let start_acp: ITfRangeACP = range.cast().map_err(|_| "此输入框无法确认全文范围")?;
         let mut start = 0;
@@ -187,7 +208,7 @@ fn replace_checked(
     current: impl Fn() -> bool,
 ) -> std::result::Result<(), String> {
     if read(context, ec)? != original {
-        return Err("原文已变化，未替换；可复制译文".into());
+        return Err("原文已变化，未替换".into());
     }
     let units: Vec<u16> = text.encode_utf16().collect();
     if units.len() > MAX_TEXT {
@@ -206,7 +227,7 @@ fn replace_checked(
         }
         start
             .SetText(ec, 0, &units)
-            .map_err(|_| "应用拒绝替换；可复制译文")?;
+            .map_err(|_| "应用拒绝替换，原文保持不变")?;
         if start.Collapse(ec, TF_ANCHOR_END).is_err() {
             return Ok(());
         }
@@ -268,7 +289,7 @@ fn request_apply(hwnd: HWND) {
         return;
     };
     if !same_target(&state, &context, epoch, owner) {
-        status(hwnd, "输入框已切换或正在输入，原文保持不变；可复制译文");
+        status(hwnd, "输入框已切换或正在输入，原文保持不变");
         return;
     }
     let session: ITfEditSession = Apply {
@@ -291,7 +312,7 @@ fn request_apply(hwnd: HWND) {
         )
     };
     if !result.is_ok_and(|s| s.is_ok()) {
-        status(hwnd, "应用拒绝替换，原文保持不变；可复制译文");
+        status(hwnd, "应用拒绝替换，原文保持不变");
     }
 }
 #[implement(ITfEditSession)]
@@ -316,7 +337,7 @@ impl ITfEditSession_Impl for Apply_Impl {
                 return Ok(());
             };
             if !same_target(&state, &self.context, self.epoch, self.owner) {
-                status(hwnd, "输入框已切换，原文保持不变；可复制译文");
+                status(hwnd, "输入框已切换，原文保持不变");
                 return Ok(());
             }
             let result = replace_checked(&self.context, ec, &self.original, &self.text, || {
@@ -325,9 +346,6 @@ impl ITfEditSession_Impl for Apply_Impl {
             });
             if result.is_ok() {
                 status(hwnd, "翻译完成");
-                unsafe {
-                    SetTimer(Some(hwnd), 99, 1400, None);
-                }
             } else if let Err(error) = result {
                 status(hwnd, &error);
             }
@@ -343,31 +361,59 @@ unsafe fn frame<'a>(hwnd: HWND) -> Option<&'a mut Frame> {
 }
 fn status(hwnd: HWND, message: &str) {
     // SAFETY: called only on the window owner thread, outside any existing frame borrow.
-    let expand = unsafe {
+    let preview = unsafe {
         if let Some(f) = frame(hwnd) {
             f.message = message.into();
             f.applying = false;
+            f.busy = false;
             if message == "翻译完成" {
                 f.applied = true;
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
-            f.translation.is_some() && !f.applied
+            f.preview && f.translation.is_some() && !f.applied
         } else {
             false
         }
     };
-    if expand {
-        resize_preview(hwnd);
+    resize_notice(hwnd, preview);
+    if !preview {
+        // SAFETY: This timer belongs to our owner-thread popup.
+        unsafe {
+            SetTimer(
+                Some(hwnd),
+                99,
+                if message == "翻译完成" {
+                    1400
+                } else {
+                    6000
+                },
+                None,
+            );
+        }
     }
 }
-fn resize_preview(hwnd: HWND) {
+fn resize_notice(hwnd: HWND, preview: bool) {
     // SAFETY: resize the non-activating owned window within its monitor work area.
     unsafe {
         let mut rect = RECT::default();
         if GetWindowRect(hwnd, &mut rect).is_err() {
             return;
         }
-        let height = 300 * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+        let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+        let content = frame(hwnd).map(|f| (f.message.clone(), f.busy || f.applying));
+        let width = if preview {
+            STATUS_WIDTH * dpi / 96
+        } else if let Some((message, loading)) = content {
+            notice_width(hwnd, dpi, &message, loading)
+        } else {
+            STATUS_WIDTH * dpi / 96
+        };
+        let height = (if preview {
+            PREVIEW_HEIGHT
+        } else {
+            STATUS_HEIGHT
+        }) * dpi
+            / 96;
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -379,15 +425,74 @@ fn resize_preview(hwnd: HWND) {
             info.rcWork.top,
             (info.rcWork.bottom - height).max(info.rcWork.top),
         );
+        let left = rect.left.clamp(
+            info.rcWork.left,
+            (info.rcWork.right - width).max(info.rcWork.left),
+        );
         let _ = SetWindowPos(
             hwnd,
             None,
-            rect.left,
+            left,
             top,
-            rect.right - rect.left,
+            width,
             height,
             SWP_NOACTIVATE | SWP_NOZORDER,
         );
+        round_notice(hwnd, width, height, dpi);
+    }
+}
+fn round_notice(hwnd: HWND, width: i32, height: i32, dpi: i32) {
+    // SAFETY: The system owns a successfully assigned region; failed assignment
+    // retains ownership here. This clips the popup's corners without a shadow.
+    unsafe {
+        let radius = 12 * dpi / 96;
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let _ = DeleteObject(region.into());
+        }
+    }
+}
+fn notice_font(dpi: i32) -> HFONT {
+    // SAFETY: Fixed font face; callers own and delete the returned GDI font.
+    unsafe {
+        CreateFontW(
+            -14 * dpi / 96,
+            0,
+            0,
+            0,
+            400,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH.0 as u32,
+            w!("Microsoft YaHei"),
+        )
+    }
+}
+fn notice_width(hwnd: HWND, dpi: i32, message: &str, loading: bool) -> i32 {
+    // SAFETY: Temporary owner-thread DC and font, with no frame borrow held.
+    unsafe {
+        let dc = GetDC(Some(hwnd));
+        if dc.is_invalid() {
+            return STATUS_WIDTH * dpi / 96;
+        }
+        let font = notice_font(dpi);
+        let old = SelectObject(dc, font.into());
+        let text: Vec<u16> = message.encode_utf16().collect();
+        let mut size = SIZE::default();
+        let measured = text.is_empty() || GetTextExtentPoint32W(dc, &text, &mut size).as_bool();
+        SelectObject(dc, old);
+        let _ = DeleteObject(font.into());
+        ReleaseDC(Some(hwnd), dc);
+        if !measured {
+            return STATUS_WIDTH * dpi / 96;
+        }
+        (size.cx + (if loading { 38 } else { 12 } + 38) * dpi / 96)
+            .clamp(160 * dpi / 96, STATUS_WIDTH * dpi / 96)
     }
 }
 fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
@@ -421,8 +526,8 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
             None,
         )?;
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-        let width = 480 * dpi / 96;
-        let height = 120 * dpi / 96;
+        let width = notice_width(hwnd, dpi, &data.message, data.busy);
+        let height = STATUS_HEIGHT * dpi / 96;
         let mut rect = RECT::default();
         let mut selected = [TF_SELECTION::default()];
         let mut count = 0;
@@ -452,11 +557,13 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
             info.rcWork.top,
             (info.rcWork.bottom - height).max(info.rcWork.top),
         );
+        let auto_hide = !data.busy;
         let pointer = Box::into_raw(Box::new(data));
         #[cfg(target_pointer_width = "64")]
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as isize);
         #[cfg(target_pointer_width = "32")]
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as i32);
+        round_notice(hwnd, width, height, dpi);
         if let Err(error) = SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -470,6 +577,9 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
             return Err(error);
         }
         SetTimer(Some(hwnd), TIMER, 100, None);
+        if auto_hide {
+            SetTimer(Some(hwnd), 99, 6000, None);
+        }
         Ok(hwnd)
     }
 }
@@ -484,38 +594,51 @@ unsafe fn paint(hwnd: HWND) {
         FillRect(dc, &rect, brush);
         let _ = DeleteObject(brush.into());
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
-        let pad = 16 * dpi / 96;
-        let bar = 44 * dpi / 96;
-        let font = CreateFontW(
-            -16 * dpi / 96,
-            0,
-            0,
-            0,
-            400,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0 as u32,
-            w!("Microsoft YaHei"),
-        );
+        let pad = 12 * dpi / 96;
+        let bar = STATUS_HEIGHT * dpi / 96;
+        let font = notice_font(dpi);
         let old = SelectObject(dc, font.into());
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, COLORREF(0x003b2b14));
         if let Some(f) = frame(hwnd) {
+            let loading = f.busy || f.applying;
+            if loading {
+                draw_spinner(
+                    dc,
+                    20 * dpi / 96,
+                    bar / 2,
+                    7 * dpi / 96,
+                    f.spinner_phase,
+                    dpi,
+                );
+            }
+            let close_pen = CreatePen(PS_SOLID, (dpi / 96).max(1), COLORREF(0x008a7c6c));
+            let old_pen = SelectObject(dc, close_pen.into());
+            let center = rect.right - 20 * dpi / 96;
+            let half = 4 * dpi / 96;
+            let _ = MoveToEx(dc, center - half, bar / 2 - half, None);
+            let _ = LineTo(dc, center + half, bar / 2 + half);
+            let _ = MoveToEx(dc, center + half, bar / 2 - half, None);
+            let _ = LineTo(dc, center - half, bar / 2 + half);
+            SelectObject(dc, old_pen);
+            let _ = DeleteObject(close_pen.into());
             let mut heading = RECT {
-                left: pad,
-                top: pad,
-                right: rect.right - pad,
-                bottom: pad + bar,
+                left: if loading { 38 * dpi / 96 } else { pad },
+                top: 0,
+                right: rect.right - 38 * dpi / 96,
+                bottom: bar,
             };
             let mut message: Vec<u16> = f.message.encode_utf16().collect();
-            DrawTextW(dc, &mut message, &mut heading, DT_WORDBREAK | DT_NOPREFIX);
-            let top = pad + bar + 8 * dpi / 96;
-            let bottom = rect.bottom - bar - pad;
+            if !message.is_empty() {
+                DrawTextW(
+                    dc,
+                    &mut message,
+                    &mut heading,
+                    DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+            }
+            let top = bar;
+            let bottom = rect.bottom - 40 * dpi / 96;
             let saved = SaveDC(dc);
             IntersectClipRect(dc, pad, top, rect.right - pad, bottom);
             let mut body = RECT {
@@ -536,26 +659,31 @@ unsafe fn paint(hwnd: HWND) {
                 right: rect.right - pad,
                 bottom: 0,
             };
-            DrawTextW(
-                dc,
-                &mut text,
-                &mut measured,
-                DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
-            );
-            f.max_scroll = (measured.bottom - (bottom - top)).max(0);
-            DrawTextW(dc, &mut text, &mut body, DT_WORDBREAK | DT_NOPREFIX);
+            // DrawTextW still dereferences its string pointer for a zero-length
+            // slice. An empty Vec supplies dangling address 0x2, which crashes
+            // the host while the progress/error window has no translation yet.
+            f.max_scroll = 0;
+            if f.preview && !f.applied && !text.is_empty() && bottom > top {
+                DrawTextW(
+                    dc,
+                    &mut text,
+                    &mut measured,
+                    DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT,
+                );
+                f.max_scroll = (measured.bottom - (bottom - top)).max(0);
+                DrawTextW(dc, &mut text, &mut body, DT_WORDBREAK | DT_NOPREFIX);
+            }
             let _ = RestoreDC(dc, saved);
-            for (i, label) in ["替换", "复制译文", "关闭"].iter().enumerate() {
-                let start = pad + i as i32 * (rect.right - pad * 2) / 3;
+            if f.preview && !f.applied && !f.applying {
                 let mut button = RECT {
-                    left: start,
-                    top: rect.bottom - bar,
-                    right: start + (rect.right - pad * 2) / 3 - 6,
+                    left: rect.right - 84 * dpi / 96,
+                    top: bottom,
+                    right: rect.right - pad,
                     bottom: rect.bottom - 8 * dpi / 96,
                 };
                 DrawTextW(
                     dc,
-                    &mut label.encode_utf16().collect::<Vec<_>>(),
+                    &mut "替换".encode_utf16().collect::<Vec<_>>(),
                     &mut button,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
                 );
@@ -566,28 +694,119 @@ unsafe fn paint(hwnd: HWND) {
         let _ = EndPaint(hwnd, &ps);
     }
 }
-fn clipboard(hwnd: HWND, text: &str) -> Result<()> {
-    // SAFETY: clipboard owns the memory only after successful SetClipboardData.
+
+fn draw_spinner(dc: HDC, x: i32, y: i32, radius: i32, phase: u32, dpi: i32) {
+    // SAFETY: Owner-thread paint DC; restore selected objects before deleting pens.
     unsafe {
-        OpenClipboard(Some(hwnd))?;
-        let result = (|| {
-            EmptyClipboard()?;
-            let units: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-            let memory = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2)?;
-            let pointer = GlobalLock(memory);
-            if pointer.is_null() {
-                let _ = GlobalFree(Some(memory));
-                return Err(E_FAIL.into());
-            }
-            std::ptr::copy_nonoverlapping(units.as_ptr(), pointer.cast::<u16>(), units.len());
-            let _ = GlobalUnlock(memory);
-            if let Err(error) = SetClipboardData(13, Some(HANDLE(memory.0))) {
-                let _ = GlobalFree(Some(memory));
-                return Err(error);
+        let brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        let track = CreatePen(PS_SOLID, (2 * dpi / 96).max(1), COLORREF(0x00e9e5df));
+        let pen = SelectObject(dc, track.into());
+        let _ = Ellipse(dc, x - radius, y - radius, x + radius, y + radius);
+        let active = CreatePen(PS_SOLID, (2 * dpi / 96).max(1), COLORREF(0x009c9014));
+        SelectObject(dc, active.into());
+        let angle = phase as f32 * std::f32::consts::TAU / 12.0;
+        let end = angle + std::f32::consts::TAU * 0.7;
+        let _ = Arc(
+            dc,
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            x + (radius as f32 * angle.cos()).round() as i32,
+            y + (radius as f32 * angle.sin()).round() as i32,
+            x + (radius as f32 * end.cos()).round() as i32,
+            y + (radius as f32 * end.sin()).round() as i32,
+        );
+        SelectObject(dc, pen);
+        SelectObject(dc, brush);
+        let _ = DeleteObject(track.into());
+        let _ = DeleteObject(active.into());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn paint_status_window_states(context: &ITfContext) -> Result<()> {
+    // SAFETY: Isolated message-only window on the test COM apartment. It never
+    // appears on the desktop or sends input; it exercises the real GDI painter.
+    unsafe {
+        let module = GetModuleHandleW(None)?;
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(window_proc),
+            hInstance: module.into(),
+            lpszClassName: w!("Retype.Translation.Paint.Test"),
+            ..Default::default()
+        });
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("Retype.Translation.Paint.Test"),
+            w!("paint test"),
+            WS_OVERLAPPED,
+            0,
+            0,
+            480,
+            120,
+            Some(HWND_MESSAGE),
+            None,
+            Some(module.into()),
+            None,
+        )?;
+        let data = Frame {
+            state: Weak::new(),
+            context: context.clone(),
+            epoch: 0,
+            original: Vec::new(),
+            response: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            translation: None,
+            message: String::new(),
+            scroll: 0,
+            max_scroll: 0,
+            owner: HWND::default(),
+            applying: false,
+            applied: false,
+            busy: false,
+            preview: false,
+            spinner_phase: 0,
+        };
+        let pointer = Box::into_raw(Box::new(data));
+        #[cfg(target_pointer_width = "64")]
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as isize);
+        #[cfg(target_pointer_width = "32")]
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as i32);
+        let result = (|| -> Result<()> {
+            let short = notice_width(hwnd, 96, "正在翻译…", true);
+            let long = notice_width(hwnd, 96, "输入框已切换或正在输入，原文保持不变", false);
+            assert!(
+                short < long,
+                "Short notices should fit their text instead of occupying the full width"
+            );
+            for (message, text, height) in [
+                ("正在翻译…", None, STATUS_HEIGHT),
+                ("读取失败", None, STATUS_HEIGHT),
+                ("", Some(""), PREVIEW_HEIGHT),
+                ("译文预览", Some("你好，这是一个翻译测试。"), PREVIEW_HEIGHT),
+            ] {
+                SetWindowPos(hwnd, None, 0, 0, 480, height, SWP_NOACTIVATE | SWP_NOZORDER)?;
+                {
+                    let data = frame(hwnd).ok_or(E_FAIL)?;
+                    data.message = message.into();
+                    data.translation = text.map(str::to_owned);
+                    data.busy = message == "正在翻译…";
+                    data.preview = height == PREVIEW_HEIGHT;
+                }
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                paint(hwnd);
+                if message == "正在翻译…" {
+                    for phase in 1..=12 {
+                        window_proc(hwnd, WM_TIMER, WPARAM(TIMER), LPARAM(0));
+                        assert_eq!(frame(hwnd).ok_or(E_FAIL)?.spinner_phase, phase % 12);
+                        paint(hwnd);
+                    }
+                }
             }
             Ok(())
         })();
-        let _ = CloseClipboard();
+        let _ = DestroyWindow(hwnd);
         result
     }
 }
@@ -607,13 +826,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     LRESULT(0)
                 }
                 WM_TIMER => {
+                    let loading = frame(hwnd).is_some_and(|f| {
+                        if f.busy || f.applying {
+                            f.spinner_phase = (f.spinner_phase + 1) % 12;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if loading {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
                     let response = frame(hwnd).and_then(|f| f.response.as_ref()?.try_recv().ok());
                     if let Some(response) = response {
                         let apply = if let Some(f) = frame(hwnd) {
                             f.response = None;
+                            f.busy = false;
                             match response {
                                 Ok(Response::Translation { text, preview }) => {
                                     f.translation = Some(text);
+                                    f.preview = preview;
                                     f.message = if preview {
                                         "译文预览"
                                     } else {
@@ -634,8 +866,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         } else {
                             false
                         };
-                        if !apply && frame(hwnd).is_some_and(|f| f.translation.is_some()) {
-                            resize_preview(hwnd);
+                        if !apply {
+                            let preview =
+                                frame(hwnd).is_some_and(|f| f.preview && f.translation.is_some());
+                            resize_notice(hwnd, preview);
+                            if !preview {
+                                SetTimer(Some(hwnd), 99, 6000, None);
+                            }
                         }
                         let _ = InvalidateRect(Some(hwnd), None, false);
                         if apply {
@@ -657,19 +894,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     let _ = GetClientRect(hwnd, &mut rect);
                     let x = (lp.0 & 0xffff) as u16 as i16 as i32;
                     let y = ((lp.0 >> 16) & 0xffff) as u16 as i16 as i32;
-                    if y > rect.bottom - 44 * GetDpiForWindow(hwnd).max(96) as i32 / 96 {
-                        if x < rect.right / 3 {
-                            request_apply(hwnd);
-                        } else if x < rect.right * 2 / 3 {
-                            let text = frame(hwnd).and_then(|f| f.translation.clone());
-                            if let Some(text) = text {
-                                if clipboard(hwnd, &text).is_ok() {
-                                    status(hwnd, "译文已复制");
-                                }
-                            }
-                        } else {
-                            let _ = DestroyWindow(hwnd);
-                        }
+                    let dpi = GetDpiForWindow(hwnd).max(96) as i32;
+                    if x >= rect.right - 38 * dpi / 96 && y < STATUS_HEIGHT * dpi / 96 {
+                        let _ = DestroyWindow(hwnd);
+                    } else if x >= rect.right - 84 * dpi / 96
+                        && y >= rect.bottom - 40 * dpi / 96
+                        && frame(hwnd).is_some_and(|f| f.preview && !f.applied && !f.applying)
+                    {
+                        request_apply(hwnd);
                     }
                     LRESULT(0)
                 }

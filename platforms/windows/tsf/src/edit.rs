@@ -333,10 +333,6 @@ pub(crate) fn learnable(ctx: &ITfContext, ec: u32) -> bool {
     // Query scopes only at commit, keeping this extra COM work out of candidate decoding.
     // SAFETY: ec is the host's current granted edit cookie; owned COM values are scoped here.
     unsafe {
-        let property = match ctx.GetAppProperty(&GUID_PROP_INPUTSCOPE) {
-            Ok(property) => property,
-            Err(error) => return absent_scope(error.code()),
-        };
         let mut selection = [TF_SELECTION::default()];
         let mut count = 0;
         let selected = ctx.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selection, &mut count);
@@ -347,7 +343,20 @@ pub(crate) fn learnable(ctx: &ITfContext, ec: u32) -> bool {
         let Some(range) = range else {
             return false;
         };
-        let value = match property.GetValue(ec, &range) {
+        allowed_input_scope(ctx, ec, &range)
+    }
+}
+
+/// Explicit translation checks the input scope independently of automatic learning.
+/// NOHIDDENTEXT is a host capability flag, not a permission to read normal text.
+pub(crate) fn allowed_input_scope(ctx: &ITfContext, ec: u32, range: &ITfRange) -> bool {
+    // SAFETY: The caller holds the context's read cookie; range belongs to this context.
+    unsafe {
+        let property = match ctx.GetAppProperty(&GUID_PROP_INPUTSCOPE) {
+            Ok(property) => property,
+            Err(error) => return absent_scope(error.code()),
+        };
+        let value = match property.GetValue(ec, range) {
             Ok(value) => value,
             Err(error) => return absent_scope(error.code()),
         };
@@ -388,7 +397,7 @@ fn safe_input_scope(value: &VARIANT) -> bool {
 
 fn absent_scope(status: windows_core::HRESULT) -> bool {
     // Legacy ITextStoreACP hosts without an InputScope attribute report E_FAIL or
-    // E_NOTIMPL for this optional app property. NOHIDDENTEXT was already required.
+    // E_NOTIMPL for this optional app property.
     matches!(
         status,
         windows::Win32::Foundation::E_FAIL | windows::Win32::Foundation::E_NOTIMPL

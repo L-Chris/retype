@@ -24,6 +24,7 @@ retype-ai = { path = "../ai" }
 retype-candidate-ui = { path = "../candidate-ui", features = ["egui"] }
 windows-core = { workspace = true }
 tracing = { workspace = true }
+serde_json.workspace = true
 
 # 只用 TSF 相关的 feature。刻意不走 workspace 里那份（含 Direct2D/GDI），
 # 因为这个 DLL 会被注入到每一个进程，依赖越少、加载越快、宿主启动越不受影响。

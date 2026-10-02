@@ -26,6 +26,7 @@ const PREFERENCES: &str = "Software\\retype";
 type AppResult<T> = backend::Result<T>;
 
 struct Options {
+    request_id: u32,
     renderer: eframe::Renderer,
     screenshot: Option<PathBuf>,
     exit_after: Option<Duration>,
@@ -38,6 +39,7 @@ struct Options {
 impl Options {
     fn parse() -> AppResult<Self> {
         let mut options = Self {
+            request_id: crate::settings_log::request_id(),
             renderer: eframe::Renderer::Glow,
             screenshot: None,
             exit_after: None,
@@ -47,7 +49,9 @@ impl Options {
             hide_after: None,
         };
         for argument in std::env::args().skip(1) {
-            if let Some(value) = argument.strip_prefix("--renderer=") {
+            if let Some(value) = argument.strip_prefix("--request-id=") {
+                options.request_id = value.parse()?;
+            } else if let Some(value) = argument.strip_prefix("--renderer=") {
                 options.renderer = match value {
                     "glow" => eframe::Renderer::Glow,
                     #[cfg(feature = "wgpu")]
@@ -156,6 +160,9 @@ enum Page {
 }
 
 struct SettingsApp {
+    open_request: u32,
+    open_started: Instant,
+    frame_logged: bool,
     ai: crate::ai::AiPages,
     options: Options,
     started: Instant,
@@ -202,13 +209,31 @@ impl SettingsApp {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        crate::settings_log::event(
+            "app",
+            "hide_requested",
+            self.open_request,
+            "close button or preview timer",
+        );
         if let Err(error) = self.ai.flush() {
+            crate::settings_log::event(
+                "app",
+                "hide_failed",
+                self.open_request,
+                "preferences flush failed; window kept visible",
+            );
             self.error = Some(error);
             return;
         }
         self.hidden_since = Some(Instant::now());
         self.instance.idle_timer(self.options.idle_exit);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        crate::settings_log::event(
+            "app",
+            "hidden",
+            self.open_request,
+            format!("idle_exit_ms={}", self.options.idle_exit.as_millis()),
+        );
         ctx.request_repaint_after(Duration::from_secs(600));
     }
 
@@ -221,7 +246,17 @@ impl SettingsApp {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
-        for updates in requests {
+        for request in requests {
+            let updates = request.updates;
+            self.open_request = request.id;
+            self.open_started = request.received;
+            self.frame_logged = false;
+            crate::settings_log::event(
+                "app",
+                "show_dispatch",
+                self.open_request,
+                format!("updates={updates}"),
+            );
             self.hidden_since = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -229,6 +264,12 @@ impl SettingsApp {
                 self.scheme = preferences.scheme;
                 self.preferences = preferences;
             }
+            crate::settings_log::event(
+                "app",
+                "show_preferences_ready",
+                self.open_request,
+                "reload complete",
+            );
             if updates {
                 self.select_page(Page::About);
                 self.check_update();
@@ -693,7 +734,19 @@ impl SettingsApp {
         options: Options,
         started: Instant,
     ) -> AppResult<Self> {
+        crate::settings_log::event(
+            "app",
+            "fonts_begin",
+            options.request_id,
+            format!("elapsed_ms={}", started.elapsed().as_millis()),
+        );
         chinese_fonts(&cc.egui_ctx)?;
+        crate::settings_log::event(
+            "app",
+            "fonts_ready",
+            options.request_id,
+            format!("elapsed_ms={}", started.elapsed().as_millis()),
+        );
         let mut style = (*cc.egui_ctx.global_style()).clone();
         style.visuals = egui::Visuals::light();
         style.visuals.override_text_color = Some(INK);
@@ -723,6 +776,7 @@ impl SettingsApp {
             .insert(egui::TextStyle::Button, egui::FontId::proportional(16.0));
         cc.egui_ctx.set_global_style(style);
         let image = logo()?;
+        crate::settings_log::event("app", "logo_ready", options.request_id, "decoded");
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Icon(Some(std::sync::Arc::new(
                 egui::IconData {
@@ -731,7 +785,14 @@ impl SettingsApp {
                     height: image.size[1] as u32,
                 },
             ))));
+        crate::settings_log::event(
+            "app",
+            "preferences_begin",
+            options.request_id,
+            "registry and update state",
+        );
         let preferences = backend::preferences()?;
+        crate::settings_log::event("app", "preferences_ready", options.request_id, "loaded");
         let scheme = preferences.scheme;
         let error = None;
         let page = options.page;
@@ -745,6 +806,19 @@ impl SettingsApp {
             cc.egui_ctx.clone(),
             busy,
         )?;
+        crate::settings_log::event(
+            "app",
+            "ai_preferences_begin",
+            options.request_id,
+            "initializing",
+        );
+        let ai = crate::ai::AiPages::new();
+        crate::settings_log::event(
+            "app",
+            "ai_preferences_ready",
+            options.request_id,
+            "initialized; no values recorded",
+        );
         if page == Page::Dictionary {
             let _ = tasks.send(Task::Packs);
         }
@@ -755,7 +829,10 @@ impl SettingsApp {
             let _ = tasks.send(Task::Check);
         }
         Ok(Self {
-            ai: crate::ai::AiPages::new(),
+            open_request: options.request_id,
+            open_started: started,
+            frame_logged: false,
+            ai,
             started,
             scheme,
             page,
@@ -1359,13 +1436,43 @@ impl eframe::App for SettingsApp {
                 ctx.request_repaint_after(delay.saturating_sub(self.started.elapsed()));
             }
         }
+        if !self.frame_logged && self.hidden_since.is_none() {
+            self.frame_logged = true;
+            self.instance.log_visible(self.open_request);
+            crate::settings_log::event(
+                "app",
+                "ui_frame_complete",
+                self.open_request,
+                format!(
+                    "open_to_frame_ms={} process_elapsed_ms={}",
+                    self.open_started.elapsed().as_millis(),
+                    self.started.elapsed().as_millis()
+                ),
+            );
+        }
     }
 }
 
 pub fn run() -> AppResult<()> {
     let started = Instant::now();
+    crate::settings_log::event("app", "options_parse", 0, "begin");
     let options = Options::parse()?;
-    let Some(_guard) = instance::acquire(options.updates)? else {
+    crate::settings_log::event(
+        "app",
+        "options_ready",
+        options.request_id,
+        format!(
+            "renderer={:?} updates={}",
+            options.renderer, options.updates
+        ),
+    );
+    let Some(_guard) = instance::acquire(options.updates, options.request_id)? else {
+        crate::settings_log::event(
+            "app",
+            "forwarded_exit",
+            options.request_id,
+            "existing instance notified",
+        );
         return Ok(());
     };
     let native = eframe::NativeOptions {
@@ -1379,7 +1486,14 @@ pub fn run() -> AppResult<()> {
             .with_min_inner_size([760.0, 520.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let request = options.request_id;
+    crate::settings_log::event(
+        "app",
+        "renderer_begin",
+        request,
+        format!("elapsed_ms={}", started.elapsed().as_millis()),
+    );
+    let result = eframe::run_native(
         "retype 设置",
         native,
         Box::new(move |cc| {
@@ -1390,7 +1504,18 @@ pub fn run() -> AppResult<()> {
                 })
         }),
     )
-    .map_err(|error| error.to_string().into())
+    .map_err(|error| error.to_string().into());
+    crate::settings_log::event(
+        "app",
+        "renderer_end",
+        request,
+        format!(
+            "success={} elapsed_ms={}",
+            result.is_ok(),
+            started.elapsed().as_millis()
+        ),
+    );
+    result
 }
 
 #[cfg(test)]

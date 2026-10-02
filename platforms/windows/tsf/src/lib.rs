@@ -28,6 +28,8 @@ mod preferences;
 mod registration;
 mod search;
 pub mod session;
+#[path = "../../common/settings_log.rs"]
+mod settings_log;
 mod stats;
 pub mod tip;
 mod translation;

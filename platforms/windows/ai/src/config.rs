@@ -162,7 +162,7 @@ impl Shortcut {
         modifiers: 0,
     };
     pub const TRANSLATE: Self = Self {
-        vk: 0x54,
+        vk: 0x30,
         modifiers: 3,
     };
     pub const DISABLED: Self = Self {

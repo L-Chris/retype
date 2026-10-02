@@ -596,9 +596,6 @@ impl AiPages {
             }
             if !self.test_output.is_empty() {
                 ui.label(&self.test_output);
-                if ui.button("复制译文").clicked() {
-                    ui.ctx().copy_text(self.test_output.clone());
-                }
             }
         });
         self.show_error(ui);
@@ -693,8 +690,10 @@ impl AiPages {
                         ui.horizontal(|ui| {
                             let capturing = self.capture == Some(mode);
                             let text = if capturing {
-                                let mut prefix =
-                                    ui.input(|i| ui.ctx().format_modifiers(i.modifiers));
+                                // Release the input lock before formatting: format_modifiers
+                                // reads Context again and must not run inside ui.input.
+                                let modifiers = ui.input(|i| i.modifiers);
+                                let mut prefix = ui.ctx().format_modifiers(modifiers);
                                 if win_held() {
                                     if !prefix.is_empty() {
                                         prefix.push_str(" + ");
@@ -856,6 +855,52 @@ fn virtual_key(key: egui::Key) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shortcut_capture_renders_and_escape_cancels_without_saving() {
+        for mode in [true, false] {
+            let mut app = AiPages::from_config(
+                Config::default(),
+                HashMap::new(),
+                Shortcuts::default(),
+                None,
+            );
+            app.capture = Some(mode);
+            let ctx = egui::Context::default();
+            for modifiers in [egui::Modifiers::NONE, egui::Modifiers::CTRL] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events: vec![egui::Event::ModifiersChanged(modifiers)],
+                        ..Default::default()
+                    },
+                    |ui| app.shortcuts_page(ui),
+                );
+                output.textures_delta.clear();
+                assert_eq!(app.capture, Some(mode));
+                assert_eq!(app.shortcuts, Shortcuts::default());
+            }
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![
+                        egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            physical_key: Some(egui::Key::Escape),
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ui| app.shortcuts_page(ui),
+            );
+            output.textures_delta.clear();
+            assert_eq!(app.capture, None);
+            assert_eq!(app.tap, 0);
+            assert_eq!(app.shortcuts, Shortcuts::default());
+            assert!(app.error.is_none());
+        }
+    }
     #[test]
     fn forms_fit_normal_and_minimum_content_widths() {
         for width in [420.0, 620.0] {

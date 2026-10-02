@@ -110,6 +110,20 @@ if (-not $Uninstall) {
   $acl.SetAccessRule($read)
   Set-Acl -Path $preferences -AclObject $acl
 
+  # Dedicated startup-only diagnostics, including failures in AppContainer hosts.
+  # No typed text, credentials or provider configuration is written here.
+  $settingsLogs = Join-Path $env:LOCALAPPDATA 'retype\logs'
+  New-Item -ItemType Directory -Path $settingsLogs -Force | Out-Null
+  $logsAcl = Get-Acl -LiteralPath $settingsLogs
+  $logsWrite = [Security.AccessControl.FileSystemAccessRule]::new($packages,
+    [Security.AccessControl.FileSystemRights]'Read, Write',
+    [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow)
+  $logsAcl.SetAccessRule($logsWrite)
+  Set-Acl -LiteralPath $settingsLogs -AclObject $logsAcl
+  Set-ItemProperty -Path $preferences -Name 'SettingsLogPath' -Value $settingsLogs
+
   # The TIP runs inside desktop and AppContainer hosts. Give the dedicated
   # count-only directory (not the whole retype data tree) write access, and
   # publish its real user path since AppContainer LOCALAPPDATA is redirected.
