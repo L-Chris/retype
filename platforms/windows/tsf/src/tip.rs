@@ -8,8 +8,44 @@ use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, 
 use windows::Win32::UI::TextServices::*;
 use windows_core::{implement, Interface, Ref, Result, BOOL, GUID};
 
-fn is_shift(vk: WPARAM) -> bool {
-    matches!(vk.0 & 0xffff, 0x10 | 0xA0 | 0xA1)
+fn normalized_modifier(vk: WPARAM) -> u16 {
+    match vk.0 as u16 {
+        0xa0 | 0xa1 => 0x10,
+        0xa2 | 0xa3 => 0x11,
+        value => value,
+    }
+}
+fn settings_host() -> bool {
+    static SETTINGS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SETTINGS.get_or_init(|| {
+        std::env::current_exe().ok().is_some_and(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            name.eq_ignore_ascii_case("retype-settings-egui.exe")
+                || (name.eq_ignore_ascii_case("retype.exe")
+                    && path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|p| p.eq_ignore_ascii_case("settings")))
+        })
+    })
+}
+fn shortcut_modifiers(mods: Modifiers) -> u8 {
+    u8::from(mods.contains(Modifiers::CTRL))
+        | (u8::from(mods.contains(Modifiers::ALT)) * 2)
+        | (u8::from(mods.contains(Modifiers::SHIFT)) * 4)
+        | (u8::from(mods.contains(Modifiers::WIN)) * 8)
+}
+fn tap_modifiers(vk: u16) -> Modifiers {
+    let bits = shortcut_modifiers(keymap::read_modifiers());
+    let allowed = if vk == 0x10 { 4 } else { 1 };
+    if bits & !allowed == 0 {
+        Modifiers::NONE
+    } else {
+        Modifiers::CTRL
+    }
 }
 
 #[derive(Default)]
@@ -58,8 +94,10 @@ pub struct TipState {
     pub(crate) attribute: AtomicU32,
     focus_cookie: Mutex<Vec<u32>>,
     pub(crate) window: Mutex<Option<CandidateWindow>>,
+    pub(crate) translation_window: Mutex<Option<usize>>,
     language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
     shift_tap: Mutex<ShiftTap>,
+    shortcuts: Mutex<(std::time::Instant, retype_ai::config::Shortcuts)>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
     pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }
@@ -78,8 +116,10 @@ impl TipState {
             attribute: AtomicU32::new(0),
             focus_cookie: Mutex::new(Vec::new()),
             window: Mutex::new(Some(CandidateWindow::default())),
+            translation_window: Mutex::new(None),
             language_bar: Mutex::new(None),
             shift_tap: Mutex::new(ShiftTap::default()),
+            shortcuts: Mutex::new((std::time::Instant::now(), retype_ai::secrets::shortcuts())),
             mode_bridge: Mutex::new(None),
             stats_clock: Mutex::new(stats::ActivityClock::default()),
         })
@@ -150,6 +190,7 @@ impl TipState {
         Ok(())
     }
     pub fn deactivate(self: &Arc<Self>) -> Result<()> {
+        crate::translation::dismiss(self);
         self.activated.store(false, Ordering::SeqCst);
         *lock(&self.shift_tap) = ShiftTap::default();
         lock(&self.stats_clock).reset();
@@ -180,6 +221,13 @@ impl TipState {
     }
     pub fn is_activated(&self) -> bool {
         self.activated.load(Ordering::SeqCst)
+    }
+    fn shortcuts(&self) -> retype_ai::config::Shortcuts {
+        let mut cache = lock(&self.shortcuts);
+        if cache.0.elapsed() >= std::time::Duration::from_millis(250) {
+            *cache = (std::time::Instant::now(), retype_ai::secrets::shortcuts());
+        }
+        cache.1
     }
     pub fn session(&self) -> Option<Arc<Session>> {
         lock(&self.session).clone()
@@ -421,6 +469,9 @@ pub struct KeyEventSink {
 }
 impl KeyEventSink_Impl {
     fn key(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM, test: bool) -> Result<BOOL> {
+        if settings_host() {
+            return Ok(false.into());
+        }
         let Some(state) = self.state.upgrade() else {
             return Ok(false.into());
         };
@@ -436,6 +487,27 @@ impl KeyEventSink_Impl {
         };
         if status.dwDynamicFlags & TS_SD_READONLY != 0 {
             return Ok(false.into());
+        }
+        let bindings = state.shortcuts();
+        let bits = shortcut_modifiers(keymap::read_modifiers());
+        let matches = |binding: retype_ai::config::Shortcut| {
+            binding.vk != 0
+                && !binding.is_tap()
+                && binding.vk == (vk.0 & 0xffff) as u16
+                && binding.modifiers == bits
+        };
+        let work = if matches(bindings.translate) {
+            Some(edit::Work::Translate)
+        } else if matches(bindings.mode) {
+            Some(edit::Work::Toggle)
+        } else {
+            None
+        };
+        if let Some(work) = work {
+            if test || lp.0 & (1 << 30) != 0 {
+                return Ok(true.into());
+            }
+            return Ok(edit::request(&state, ctx, work).is_ok().into());
         }
         let Some(key) =
             keymap::translate_event((vk.0 & 0xffff) as u16, ((lp.0 >> 16) & 0xff) as u32)
@@ -504,11 +576,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnTestKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if settings_host() {
+            return Ok(false.into());
+        }
         guarded(|| {
             let Some(state) = self.state.upgrade() else {
                 return Ok(false.into());
             };
-            if is_shift(vk) {
+            let binding = state.shortcuts().mode;
+            if binding.is_tap() && normalized_modifier(vk) == binding.vk {
                 return Ok(state.is_activated().into());
             }
             lock(&state.shift_tap).other_key();
@@ -516,11 +592,15 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if settings_host() {
+            return Ok(false.into());
+        }
         guarded(|| {
             if let Some(state) = self.state.upgrade() {
-                if is_shift(vk) {
+                let binding = state.shortcuts().mode;
+                if binding.is_tap() && normalized_modifier(vk) == binding.vk {
                     if state.is_activated() {
-                        lock(&state.shift_tap).press(keymap::read_modifiers());
+                        lock(&state.shift_tap).press(tap_modifiers(binding.vk));
                     }
                     return Ok(false.into());
                 }
@@ -530,17 +610,20 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
-        Ok((is_shift(vk)
-            && self
-                .state
-                .upgrade()
-                .is_some_and(|state| state.is_activated() && lock(&state.shift_tap).pressed))
+        Ok((self.state.upgrade().is_some_and(|state| {
+            let binding = state.shortcuts().mode;
+            binding.is_tap()
+                && normalized_modifier(vk) == binding.vk
+                && state.is_activated()
+                && lock(&state.shift_tap).pressed
+        }))
         .into())
     }
     fn OnKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
-        if is_shift(vk) {
-            if let Some(state) = self.state.upgrade() {
-                let toggle = lock(&state.shift_tap).release(keymap::read_modifiers());
+        if let Some(state) = self.state.upgrade() {
+            let binding = state.shortcuts().mode;
+            if binding.is_tap() && normalized_modifier(vk) == binding.vk {
+                let toggle = lock(&state.shift_tap).release(tap_modifiers(binding.vk));
                 if toggle && state.is_activated() {
                     if let Ok(ctx) = ctx.ok() {
                         if let Err(error) = edit::request(&state, ctx, edit::Work::Toggle) {

@@ -215,13 +215,14 @@ impl ITfLangBarItem_Impl for Button_Impl {
         let (chinese, scheme) = self.mode();
         Ok(BSTR::from(
             format!(
-                "retype · {} · {}\n点击或单按 Shift 切换中英；右键打开设置",
+                "retype · {} · {}\n点击或 {} 切换中英；右键打开设置",
                 if chinese { "中文" } else { "英文" },
                 if scheme == PinyinScheme::Flypy {
                     "小鹤双拼"
                 } else {
                     "全拼"
-                }
+                },
+                retype_ai::secrets::shortcuts().mode.label()
             )
             .as_str(),
         ))

@@ -15,6 +15,7 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 - A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
+- Configurable AI providers and models, with a shortcut to translate and replace supported input fields or preview the result first.
 - Personal learning saved locally and shared across applications, Full Pinyin, and Xiaohe Shuangpin, with frequency-based ranking and decaying recent preferences.
 - Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.
 - Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
@@ -32,7 +33,7 @@ Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xia
 Windows development requires stable Rust, the MSVC C++ build tools, and the `i686-pc-windows-msvc` target. Inno Setup is needed to build an installer.
 
 ```powershell
-cargo test --workspace --features retype-learning/broker
+cargo test --workspace --features retype-learning/broker,retype-ai/service
 .\platforms\windows\installer\build.ps1
 .\platforms\windows\installer\build.ps1 -Installer -SkipDict -NoTest
 ```
@@ -40,6 +41,7 @@ cargo test --workspace --features retype-learning/broker
 The [developer notes](docs/development-notes.md) cover the terminal input tool and build pitfalls. The Rust engine, TSF adapter, dictionary pipeline, typing statistics, and update design are documented in [ARCHITECTURE.md](ARCHITECTURE.md), [Windows TSF](docs/windows-tsf.md), [dictionary](docs/dict.md), [typing statistics](docs/typing-statistics.md), and [automatic updates](docs/auto-update.md).
 
 Personal learning storage, sharing, and recovery boundaries are described in [user learning](docs/user-learning.md).
+Provider configuration, translation shortcuts, and editor compatibility boundaries are described in [AI translation](docs/ai-translation.md).
 
 ## Milestones
 

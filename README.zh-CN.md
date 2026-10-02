@@ -15,6 +15,7 @@
 - 内置万象 Base 词库，使用逐词注音和词组权重。
 - 紧凑横排候选窗，支持键盘和鼠标选词。
 - 点击语言栏图标切换中文和英文。
+- 可配置 AI 提供商和模型，通过快捷键翻译受支持输入框的全文，支持自动替换或先预览译文。
 - 选词学习保存在本机并跨应用、全拼和小鹤双拼共享；根据使用次数与逐渐衰减的近期偏好调整排序。
 - 设置中可查看中文、英文分别统计的输入量、速度和最近 7 天趋势；不会保存输入内容。
 - 设置的「关于」页支持每日检查、跳过版本、校验下载，以及用户确认后安装。
@@ -32,7 +33,7 @@ M1 桌面预览已通过独立 RichEdit 输入测试。常用应用及现代 Win
 Windows 开发需要 Rust stable、MSVC C++ 构建工具和 `i686-pc-windows-msvc` 目标；生成安装包还需要 Inno Setup。
 
 ```powershell
-cargo test --workspace --features retype-learning/broker
+cargo test --workspace --features retype-learning/broker,retype-ai/service
 .\platforms\windows\installer\build.ps1
 .\platforms\windows\installer\build.ps1 -Installer -SkipDict -NoTest
 ```
@@ -40,6 +41,7 @@ cargo test --workspace --features retype-learning/broker
 终端调试方法与构建踩坑见 [开发笔记](docs/development-notes.md)。Rust 内核、TSF 适配层、词库、输入统计和更新流程分别见 [架构文档](ARCHITECTURE.md)、[Windows TSF](docs/windows-tsf.md)、[词库](docs/dict.md)、[输入统计](docs/typing-statistics.md) 和 [自动更新](docs/auto-update.md)。
 
 学习数据的保存、共享与恢复边界见 [用户学习](docs/user-learning.md)。
+提供商配置、翻译快捷键和编辑器兼容性边界见 [AI 翻译](docs/ai-translation.md)。
 
 ## 里程碑
 

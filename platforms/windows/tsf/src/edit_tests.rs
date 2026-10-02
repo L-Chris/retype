@@ -451,6 +451,97 @@ fn real_tsf_composition_commit_cancel_and_passthrough() -> Result<()> {
         result
     }
 }
+
+type TranslationReadResult = std::result::Result<Vec<u16>, String>;
+#[implement(ITfEditSession)]
+struct TranslationProbe {
+    context: ITfContext,
+    expected: Option<Vec<u16>>,
+    output: Arc<Mutex<Option<TranslationReadResult>>>,
+}
+impl ITfEditSession_Impl for TranslationProbe_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        let result = if let Some(expected) = &self.expected {
+            crate::translation::replace_verified(
+                &self.context,
+                ec,
+                expected,
+                "完整译文\ntranslated",
+            )
+            .and_then(|_| crate::translation::read(&self.context, ec))
+        } else {
+            crate::translation::read(&self.context, ec)
+        };
+        *lock(&self.output) = Some(result);
+        Ok(())
+    }
+}
+#[test]
+fn translation_reads_all_text_and_refuses_stale_or_rejected_replacements() -> Result<()> {
+    let thread = std::thread::spawn(|| -> Result<()> {
+        // SAFETY: isolated COM text store, never installs or reads a real application.
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let outcome = (|| -> Result<()> {
+                let manager: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let tid = manager.Activate()?;
+                let document = manager.CreateDocumentMgr()?;
+                let original: Vec<u16> =
+                    "你好🙂\nA paragraph ".repeat(400).encode_utf16().collect();
+                let data = Arc::new(Mutex::new(Data {
+                    text: original.clone(),
+                    start: 3,
+                    end: 3,
+                    ..Default::default()
+                }));
+                let store: ITextStoreACP = Store {
+                    data: Arc::clone(&data),
+                }
+                .into();
+                let mut context = None;
+                let mut cookie = 0;
+                document.CreateContext(tid, 0, &store, &mut context, &mut cookie)?;
+                let context = context.ok_or(E_FAIL)?;
+                document.Push(&context)?;
+                let probe =
+                    |expected: Option<Vec<u16>>| -> Result<std::result::Result<Vec<u16>, String>> {
+                        let output = Arc::new(Mutex::new(None));
+                        let session: ITfEditSession = TranslationProbe {
+                            context: context.clone(),
+                            expected,
+                            output: Arc::clone(&output),
+                        }
+                        .into();
+                        context
+                            .RequestEditSession(tid, &session, TF_ES_SYNC | TF_ES_READWRITE)?
+                            .ok()?;
+                        let result = lock(&output).take().ok_or(E_FAIL)?;
+                        Ok(result)
+                    };
+                assert_eq!(probe(None)?.as_ref().ok(), Some(&original));
+                let wrong: Vec<u16> = "older text".encode_utf16().collect();
+                assert!(probe(Some(wrong))?.is_err());
+                assert_eq!(lock(&data).text, original);
+                lock(&data).reject_write = true;
+                assert!(probe(Some(original.clone()))?.is_err());
+                assert_eq!(lock(&data).text, original);
+                lock(&data).reject_write = false;
+                let translated: Vec<u16> = "完整译文\ntranslated".encode_utf16().collect();
+                assert_eq!(probe(Some(original))?.as_ref().ok(), Some(&translated));
+                assert_eq!(lock(&data).text, translated);
+                lock(&data).hidden = true;
+                assert!(probe(None)?.is_err());
+                document.Pop(TF_POPF_ALL)?;
+                manager.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            outcome
+        }
+    });
+    thread.join().map_err(|_| E_FAIL)?
+}
 fn run_host() -> Result<()> {
     unsafe {
         let manager: ITfThreadMgr =

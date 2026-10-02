@@ -81,6 +81,25 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if let Ok(bytes) = listener.receive(&sid) {
+            // An authenticated AppContainer client can request this one fixed native
+            // helper. No client-controlled executable path, arguments or shell command.
+            if serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .is_some_and(|value| value["start_ai"].as_bool() == Some(true))
+            {
+                let helper = directory.join("retype-ai-host.exe");
+                let started = custom_db.is_none()
+                    && helper.is_file()
+                    && retype_learning::client::launch_host(Some(&helper)).is_ok();
+                let response = if started {
+                    br#"{"ai_started":true}"#.as_slice()
+                } else {
+                    br#"{"ai_started":false}"#.as_slice()
+                };
+                let _ = listener.respond(response);
+                listener.disconnect();
+                continue;
+            }
             if let Ok(request) = serde_json::from_slice::<protocol::Request>(&bytes) {
                 if let Ok(response) = store.handle(&request) {
                     if let Ok(bytes) = serde_json::to_vec(&response) {

@@ -34,6 +34,7 @@ pub(crate) enum Work {
     Choose(usize, u64),
     Finish(bool),
     Refresh,
+    Translate,
 }
 
 pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -> Result<()> {
@@ -163,6 +164,11 @@ impl Edit_Impl {
         let Some(session) = state.session() else {
             return Ok(());
         };
+        if matches!(self.work, Work::Translate)
+            && !session.backend.with_kernel(|k| k.has_composition())
+        {
+            return crate::translation::capture(state, &self.context, ec);
+        }
         let existing = lock(&state.composition).clone();
         if existing.as_ref().is_some_and(|c| c.context != self.context) {
             // Cannot edit an old context with a cookie issued for a different document.
@@ -170,6 +176,11 @@ impl Edit_Impl {
             return Err(E_FAIL.into());
         }
         let event = match self.work {
+            Work::Translate => InputEvent::Key {
+                key: Key::Space,
+                mods: Modifiers::NONE,
+                source: InputSource::Keyboard,
+            },
             Work::Choose(index, generation) => {
                 if session.backend.with_kernel(|k| k.generation()) != generation {
                     return Ok(());
@@ -247,6 +258,9 @@ impl Edit_Impl {
                 stats::commit(&text);
             }
         }
+        if matches!(self.work, Work::Translate) {
+            return crate::translation::capture(state, &self.context, ec);
+        }
         Ok(())
     }
     fn refresh(&self, ec: u32) -> Result<()> {
@@ -312,7 +326,7 @@ fn countable(ctx: &ITfContext) -> bool {
     unsafe { ctx.GetStatus() }.is_ok_and(|status| status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0)
 }
 
-fn learnable(ctx: &ITfContext, ec: u32) -> bool {
+pub(crate) fn learnable(ctx: &ITfContext, ec: u32) -> bool {
     if !countable(ctx) {
         return false;
     }

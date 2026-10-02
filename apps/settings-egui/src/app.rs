@@ -16,8 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const INK: Color32 = Color32::from_rgb(20, 43, 59);
-const ACCENT: Color32 = Color32::from_rgb(19, 143, 150);
+pub(crate) const INK: Color32 = Color32::from_rgb(20, 43, 59);
+pub(crate) const ACCENT: Color32 = Color32::from_rgb(19, 143, 150);
 const MUTED: Color32 = Color32::from_rgb(101, 119, 129);
 const BACKGROUND: Color32 = Color32::from_rgb(246, 249, 250);
 const BORDER: Color32 = Color32::from_rgb(227, 233, 236);
@@ -70,6 +70,9 @@ impl Options {
                     "input" => Page::Input,
                     "dictionary" => Page::Dictionary,
                     "statistics" => Page::Statistics,
+                    "providers" => Page::Providers,
+                    "translation" => Page::Translation,
+                    "shortcuts" => Page::Shortcuts,
                     "about" => Page::About,
                     _ => return Err("Unknown settings page".into()),
                 };
@@ -115,7 +118,7 @@ fn logo() -> AppResult<egui::ColorImage> {
     ))
 }
 
-fn chinese_fonts(ctx: &egui::Context) -> AppResult<()> {
+pub(crate) fn chinese_fonts(ctx: &egui::Context) -> AppResult<()> {
     let root = std::env::var_os("WINDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
@@ -145,11 +148,15 @@ fn chinese_fonts(ctx: &egui::Context) -> AppResult<()> {
 enum Page {
     Input,
     Dictionary,
+    Providers,
+    Translation,
+    Shortcuts,
     Statistics,
     About,
 }
 
 struct SettingsApp {
+    ai: crate::ai::AiPages,
     options: Options,
     started: Instant,
     scheme: PinyinScheme,
@@ -180,6 +187,7 @@ struct SettingsApp {
 
 impl SettingsApp {
     fn select_page(&mut self, page: Page) {
+        self.ai.cancel_capture();
         self.page = page;
         match page {
             Page::Dictionary => {
@@ -194,6 +202,10 @@ impl SettingsApp {
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        if let Err(error) = self.ai.flush() {
+            self.error = Some(error);
+            return;
+        }
         self.hidden_since = Some(Instant::now());
         self.instance.idle_timer(self.options.idle_exit);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -201,6 +213,7 @@ impl SettingsApp {
     }
 
     fn lifecycle(&mut self, ctx: &egui::Context) {
+        self.ai.tick(ctx);
         let requests = std::mem::take(
             &mut *self
                 .instance
@@ -694,7 +707,13 @@ impl SettingsApp {
         style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(229, 247, 247);
         style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
         style.spacing.button_padding = Vec2::new(10.0, 7.0);
-        style.visuals.selection.bg_fill = ACCENT;
+        style.visuals.selection.bg_fill = Color32::from_rgb(216, 240, 242);
+        style.visuals.selection.stroke = Stroke::new(1.0, INK);
+        // Windows defaults to painting preedit as a selection. Keep actual
+        // selections visible, and show composition with unobtrusive underlines.
+        style.visuals.ime_composition.legacy_visuals = false;
+        style.visuals.ime_composition.active_underline_stroke = Stroke::new(1.0, ACCENT);
+        style.visuals.ime_composition.inactive_underline_stroke = Stroke::new(1.0, MUTED);
         style.spacing.item_spacing = Vec2::new(10.0, 12.0);
         style
             .text_styles
@@ -736,6 +755,7 @@ impl SettingsApp {
             let _ = tasks.send(Task::Check);
         }
         Ok(Self {
+            ai: crate::ai::AiPages::new(),
             started,
             scheme,
             page,
@@ -816,12 +836,6 @@ impl SettingsApp {
                     }
                 }
             });
-        ui.add_space(12.0);
-        ui.label(
-            RichText::new("切换中英文快捷键：Shift")
-                .size(13.0)
-                .color(MUTED),
-        );
         if let Some(error) = &self.error {
             ui.colored_label(Color32::DARK_RED, error);
         }
@@ -910,6 +924,43 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
                 );
             }
         }
+        Page::Providers => {
+            for y in [-6.0, 0.0, 6.0] {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(origin + Vec2::new(0.0, y), Vec2::new(18.0, 5.0)),
+                    1,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+                painter.circle_filled(origin + Vec2::new(-5.5, y), 0.8, color);
+            }
+        }
+        Page::Translation => {
+            // A language mark and the letter A, drawn with the same stroke as other icons.
+            let point = |x: f32, y: f32| origin + Vec2::new(x, y);
+            for (a, b) in [
+                ((-9.0, -5.0), (3.0, -5.0)),
+                ((-3.0, -9.0), (-3.0, -5.0)),
+                ((0.0, -5.0), (-2.0, 0.0)),
+                ((-2.0, 0.0), (-8.0, 5.0)),
+                ((-6.0, -3.0), (-2.0, 2.0)),
+                ((-2.0, 2.0), (0.0, 3.0)),
+                ((1.0, 9.0), (5.0, -1.0)),
+                ((5.0, -1.0), (9.0, 9.0)),
+                ((2.5, 5.0), (7.5, 5.0)),
+            ] {
+                painter.line_segment([point(a.0, a.1), point(b.0, b.1)], stroke);
+            }
+        }
+        Page::Shortcuts => {
+            painter.text(
+                origin,
+                egui::Align2::CENTER_CENTER,
+                "⌘",
+                egui::FontId::proportional(20.0),
+                color,
+            );
+        }
         Page::About => {
             painter.circle_stroke(origin, 8.5, stroke);
             painter.text(
@@ -930,7 +981,7 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
     );
     response.clicked()
 }
-fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(Color32::WHITE)
         .stroke(Stroke::new(1.0_f32, BORDER))
@@ -1125,16 +1176,24 @@ impl eframe::App for SettingsApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
                 ui.add_space(42.0);
-                for (page, title) in [
-                    (Page::Input, "输入"),
-                    (Page::Dictionary, "词库"),
-                    (Page::Statistics, "统计"),
-                    (Page::About, "关于"),
-                ] {
-                    if navigation(ui, page, title, self.page == page) {
-                        self.select_page(page);
-                    }
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("sidebar-pages")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (page, title) in [
+                            (Page::Input, "输入"),
+                            (Page::Dictionary, "词库"),
+                            (Page::Providers, "AI 提供商"),
+                            (Page::Translation, "翻译"),
+                            (Page::Shortcuts, "快捷键"),
+                            (Page::Statistics, "统计"),
+                            (Page::About, "关于"),
+                        ] {
+                            if navigation(ui, page, title, self.page == page) {
+                                self.select_page(page);
+                            }
+                        }
+                    });
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BACKGROUND).inner_margin(40))
@@ -1144,6 +1203,9 @@ impl eframe::App for SettingsApp {
                     match self.page {
                         Page::Input => "输入",
                         Page::Dictionary => "词库",
+                        Page::Providers => "AI 提供商",
+                        Page::Translation => "翻译",
+                        Page::Shortcuts => "快捷键",
                         Page::Statistics => "统计",
                         Page::About => "关于",
                     },
@@ -1186,6 +1248,9 @@ impl eframe::App for SettingsApp {
                         .id_salt(match self.page {
                             Page::Input => "input-content",
                             Page::Dictionary => "dictionary-content",
+                            Page::Providers => "providers-content",
+                            Page::Translation => "translation-content",
+                            Page::Shortcuts => "shortcuts-content",
                             Page::Statistics => "statistics-content",
                             Page::About => "about-content",
                         })
@@ -1198,6 +1263,16 @@ impl eframe::App for SettingsApp {
                             match self.page {
                                 Page::Input => self.input_page(ui),
                                 Page::Dictionary => self.dictionary_page(ui),
+                                Page::Providers => self.ai.providers(ui),
+                                Page::Translation => {
+                                    self.ai.translation(ui);
+                                    if self.ai.config.selected().is_err()
+                                        && ui.button("配置 AI 提供商").clicked()
+                                    {
+                                        self.select_page(Page::Providers);
+                                    }
+                                }
+                                Page::Shortcuts => self.ai.shortcuts_page(ui),
                                 Page::Statistics => self.statistics_page(ui),
                                 Page::About => self.about_page(ui),
                             }

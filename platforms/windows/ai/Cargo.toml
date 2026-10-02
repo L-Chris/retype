@@ -1,0 +1,28 @@
+[package]
+name = "retype-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+service = ["dep:ureq"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+retype-learning = { path = "../learning" }
+ureq = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
+
+[[bin]]
+name = "retype-ai-host"
+path = "src/main.rs"
+required-features = ["service"]
+
+[lints]
+workspace = true

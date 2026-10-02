@@ -90,10 +90,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets --features retype-learning/broker -- -D warnings
+        run: cargo clippy --workspace --all-targets --features retype-learning/broker,retype-ai/service -- -D warnings
 
       - name: 测试
-        run: cargo test --workspace --features retype-learning/broker
+        run: cargo test --workspace --features retype-learning/broker,retype-ai/service
 
       # ── 4. 构建产物 ──────────────────────────────────────────────────────
       # RETYPE_GITHUB_REPO 会被 core/updater 的 option_env! 烘进二进制，
@@ -107,6 +107,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows payload build failed' }
           cargo build --release --target x86_64-pc-windows-msvc -p retype-learning --features broker
           if ($LASTEXITCODE -ne 0) { throw 'Learning broker build failed' }
+          cargo build --release --target x86_64-pc-windows-msvc -p retype-ai --features service
+          if ($LASTEXITCODE -ne 0) { throw 'AI service build failed' }
 
       # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md）。
       # 安装器将 x86 DLL 放入 x86 子目录，与 x64 共用词库。

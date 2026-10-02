@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod ai;
+#[cfg(windows)]
 mod app;
 #[cfg(windows)]
 mod backend;

@@ -87,10 +87,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets --features retype-learning/broker -- -D warnings
+        run: cargo clippy --workspace --all-targets --features retype-learning/broker,retype-ai/service -- -D warnings
 
       - name: 测试
-        run: cargo test --workspace --features retype-learning/broker
+        run: cargo test --workspace --features retype-learning/broker,retype-ai/service
 
       - name: release 构建
         run: |
@@ -98,6 +98,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows payload build failed' }
           cargo build --release -p retype-learning --features broker
           if ($LASTEXITCODE -ne 0) { throw 'Learning broker build failed' }
+          cargo build --release -p retype-ai --features service
+          if ($LASTEXITCODE -ne 0) { throw 'AI service build failed' }
 
       # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md），安装器把它放进 {app}\x86。
       # retype.iss 的 [Files] 直接引用这个 DLL，缺了 ISCC 会报

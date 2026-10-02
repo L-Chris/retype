@@ -40,6 +40,8 @@ cargo build --release -p retype-tsf -p retype-diag -p retype-updater-cli -p rety
 if ($LASTEXITCODE -ne 0) { throw "cargo build 失败" }
 cargo build --release -p retype-learning --features broker
 if ($LASTEXITCODE -ne 0) { throw "学习后台构建失败" }
+cargo build --release -p retype-ai --features service
+if ($LASTEXITCODE -ne 0) { throw "AI 后台构建失败" }
 rustup target add i686-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw "安装 x86 Rust target 失败" }
 cargo build --release --target i686-pc-windows-msvc -p retype-tsf
@@ -61,7 +63,7 @@ if (-not $SkipDict -or -not (Test-Path $dictTsv) -or -not (Test-Path (Join-Path 
 
 if (-not $NoTest) {
   Step "3/5 自检（内核 + 真实 TSF 文本存储，不修改系统注册）"
-  cargo test --workspace --release --features retype-learning/broker
+  cargo test --workspace --release --features retype-learning/broker,retype-ai/service
   if ($LASTEXITCODE -ne 0) { throw "测试失败" }
   cargo test --release --target i686-pc-windows-msvc -p retype-tsf
   if ($LASTEXITCODE -ne 0) { throw "x86 TSF 测试失败" }
@@ -86,6 +88,7 @@ Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.d
 Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-learning-host.exe') $dist -Force
+Copy-Item (Join-Path $repoRoot 'target\release\retype-ai-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-dict-build.exe') $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force

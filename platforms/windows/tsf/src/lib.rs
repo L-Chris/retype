@@ -30,6 +30,7 @@ mod search;
 pub mod session;
 mod stats;
 pub mod tip;
+mod translation;
 
 use class_factory::ClassFactory;
 use core::ffi::c_void;
