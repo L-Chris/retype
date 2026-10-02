@@ -19,6 +19,7 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 - Personal learning saved locally and shared across applications, Full Pinyin, and Xiaohe Shuangpin, with frequency-based ranking and decaying recent preferences.
 - Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.
 - Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
+- Optional [WebDAV cloud sync](docs/cloud-sync.md) for settings, personal learning, and typing history across computers.
 
 The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility across common applications and modern Windows app environments is still being evaluated; see the [validation record](docs/m1-validation.md).
 

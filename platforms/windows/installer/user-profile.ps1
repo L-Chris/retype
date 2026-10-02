@@ -17,6 +17,10 @@ function Get-UserTips {
 
 $before = @(Get-UserTips)
 if ($Uninstall) {
+  $syncHost = Join-Path $PSScriptRoot 'retype-sync-host.exe'
+  if (Test-Path -LiteralPath $syncHost) {
+    Start-Process -FilePath $syncHost -ArgumentList '--stop' -WindowStyle Hidden -Wait | Out-Null
+  }
   Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'retype Learning' -ErrorAction SilentlyContinue
   $learningHost = Join-Path $PSScriptRoot 'retype-learning-host.exe'
   if (Test-Path -LiteralPath $learningHost) {

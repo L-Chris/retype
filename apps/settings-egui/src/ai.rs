@@ -38,6 +38,21 @@ pub struct AiPages {
     test_output: String,
 }
 impl AiPages {
+    pub fn refresh_from_disk(&mut self) {
+        if self.config != self.saved
+            || self.keys != self.saved_keys
+            || self.job.is_some()
+            || self.capture.is_some()
+        {
+            return;
+        }
+        let updated = Self::new();
+        self.saved.clone_from(&updated.saved);
+        self.config.clone_from(&updated.config);
+        self.saved_keys.clone_from(&updated.saved_keys);
+        self.keys.clone_from(&updated.keys);
+        self.shortcuts = updated.shortcuts;
+    }
     pub fn cancel_capture(&mut self) {
         self.capture = None;
         self.tap = 0;
@@ -774,7 +789,7 @@ fn win_held() -> bool {
     }
 }
 const FORM_HEIGHT: f32 = 36.0;
-fn configure_form(ui: &mut egui::Ui) {
+pub(crate) fn configure_form(ui: &mut egui::Ui) {
     let text_height = ui
         .text_style_height(&egui::TextStyle::Button)
         .max(ui.spacing().icon_width);
@@ -782,10 +797,10 @@ fn configure_form(ui: &mut egui::Ui) {
     ui.spacing_mut().button_padding = egui::vec2(10.0, (FORM_HEIGHT - text_height).max(0.0) / 2.0);
     ui.spacing_mut().item_spacing = egui::vec2(8.0, 12.0);
 }
-fn provider_label(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn provider_label(ui: &mut egui::Ui, text: &str) {
     form_label(ui, text, 76.0);
 }
-fn form_label(ui: &mut egui::Ui, text: &str, width: f32) {
+pub(crate) fn form_label(ui: &mut egui::Ui, text: &str, width: f32) {
     ui.allocate_ui_with_layout(
         egui::vec2(width, FORM_HEIGHT),
         egui::Layout::left_to_right(egui::Align::Center),
@@ -794,7 +809,7 @@ fn form_label(ui: &mut egui::Ui, text: &str, width: f32) {
         },
     );
 }
-fn provider_text(ui: &mut egui::Ui, value: &mut String, width: f32, password: bool) {
+pub(crate) fn provider_text(ui: &mut egui::Ui, value: &mut String, width: f32, password: bool) {
     ui.add(
         egui::TextEdit::singleline(value)
             .font(egui::TextStyle::Body)

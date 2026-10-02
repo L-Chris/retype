@@ -53,6 +53,66 @@ fn chosen() -> Event {
 }
 
 #[test]
+fn cloud_roundtrips_merge_counts_once_and_keep_local_recent_clock() {
+    let a_dir = Directory::new();
+    let b_dir = Directory::new();
+    let mut a = store(&a_dir.db());
+    let mut b = store(&b_dir.db());
+    a.handle(&request("a", 1, chosen())).unwrap();
+    let own_origin = a.sync_export().unwrap().words[0].origin.clone();
+    b.handle(&request("b", 1, chosen())).unwrap();
+    let b_snapshot = b.sync_export().unwrap();
+    a.sync_merge(&b_snapshot).unwrap();
+    a.sync_merge(&b_snapshot).unwrap();
+    let after = a.sync_export().unwrap();
+    assert_eq!(after.words.iter().map(|w| w.count).sum::<u64>(), 2);
+    b.sync_merge(&after).unwrap();
+    b.handle(&request("b", 2, chosen())).unwrap();
+    a.sync_merge(&b.sync_export().unwrap()).unwrap();
+    assert_eq!(
+        a.sync_export()
+            .unwrap()
+            .words
+            .iter()
+            .map(|w| w.count)
+            .sum::<u64>(),
+        3
+    );
+    drop(a);
+    let mut a = store(&a_dir.db());
+    a.sync_merge(&b.sync_export().unwrap()).unwrap();
+    let before = a.sync_export().unwrap();
+    assert_eq!(before.words.iter().map(|w| w.count).sum::<u64>(), 3);
+    let result = a.handle(&request("a", 2, chosen())).unwrap();
+    let ranking = result.snapshot.unwrap().ranking.unwrap();
+    assert_eq!(ranking.tick, 2);
+    assert_eq!(ranking.records[0].count, 4);
+    assert!(ranking.records[0].recent > 1.0 && ranking.records[0].recent < 2.1);
+    let valid = a.sync_export().unwrap();
+    let mut invalid = valid.clone();
+    invalid.words[0].count = u64::MAX;
+    assert!(a.sync_merge(&invalid).is_err());
+    assert_eq!(a.sync_export().unwrap(), valid);
+    let mut restored = valid.clone();
+    for word in &mut restored.words {
+        if word.origin == own_origin {
+            word.count += 3;
+        }
+    }
+    a.sync_merge(&restored).unwrap();
+    a.sync_merge(&restored).unwrap();
+    assert_eq!(
+        a.sync_export()
+            .unwrap()
+            .words
+            .iter()
+            .map(|w| w.count)
+            .sum::<u64>(),
+        7
+    );
+}
+
+#[test]
 fn restart_keeps_scores_readings_receipts_and_usage_facts() {
     let directory = Directory::new();
     let mut broker = store(&directory.db());

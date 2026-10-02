@@ -6,6 +6,66 @@ pub const VERSION: u32 = 1;
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 pub const MAX_BATCH: usize = 128;
 
+/// Absolute per-origin counters. Imported evidence retains its origin so a
+/// round trip between devices cannot count the same selection twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncLearning {
+    pub words: Vec<SyncWord>,
+    pub corrections: Vec<SyncCorrection>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncWord {
+    pub origin: String,
+    pub pinyin: String,
+    pub text: String,
+    pub count: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncCorrection {
+    pub origin: String,
+    pub from: String,
+    pub to: String,
+    pub count: u32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncRequest {
+    Export,
+    Merge(SyncLearning),
+}
+impl SyncLearning {
+    pub fn valid(&self) -> bool {
+        let origin = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        self.words.len() <= 100_000
+            && self.corrections.len() <= 100_000
+            && self.words.iter().all(|w| {
+                origin(&w.origin)
+                    && w.count > 0
+                    && w.count <= 1_000_000_000
+                    && (Event::Coinage {
+                        text: w.text.clone(),
+                        pinyin: w.pinyin.clone(),
+                    })
+                    .to_learning()
+                    .is_some()
+            })
+            && self.corrections.iter().all(|c| {
+                origin(&c.origin)
+                    && c.count > 0
+                    && c.count <= 1_000_000_000
+                    && (Event::Corrected {
+                        from: c.from.clone(),
+                        to: c.to.clone(),
+                    })
+                    .to_learning()
+                    .is_some()
+            })
+    }
+}
+
 /// Stable spellings, never dictionary-specific numeric syllable IDs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {

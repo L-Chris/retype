@@ -42,6 +42,8 @@ cargo build --release -p retype-learning --features broker
 if ($LASTEXITCODE -ne 0) { throw "学习后台构建失败" }
 cargo build --release -p retype-ai --features service
 if ($LASTEXITCODE -ne 0) { throw "AI 后台构建失败" }
+cargo build --release -p retype-sync
+if ($LASTEXITCODE -ne 0) { throw "云同步后台构建失败" }
 rustup target add i686-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw "安装 x86 Rust target 失败" }
 cargo build --release --target i686-pc-windows-msvc -p retype-tsf
@@ -89,6 +91,7 @@ Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-learning-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-ai-host.exe') $dist -Force
+Copy-Item (Join-Path $repoRoot 'target\release\retype-sync-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-dict-build.exe') $dist -Force
 if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force

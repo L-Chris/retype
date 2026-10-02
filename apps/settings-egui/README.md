@@ -17,6 +17,9 @@ The original `apps/settings` sources remain as a reference and asset source.
 - About: installed version, daily update reminders, manual checks, release notes,
   verified download and elevated installation, installation verification,
   version skipping, feedback and license links.
+- Cloud sync: WebDAV connection tests, background automatic/manual sync, first-merge
+  summaries and conflict resolution. Settings, personal learning and statistics
+  synchronize together; credentials remain local. See [cloud sync](../../docs/cloud-sync.md).
 - Borderless, centered, draggable window with no header row and a close button
   at the top right of the content area. Closing
   with that button retains a hidden window for ten minutes; native close exits

@@ -250,6 +250,35 @@ pub fn set_pack(
     cancelled(cancel)?;
     pack_preference(index, enabled)
 }
+pub fn sync_enabled_packs() -> Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = local_root()?.join("dict-packs");
+    fs::create_dir_all(&root)?;
+    let Ok(_lock) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(root.join("sync-download.lock"))
+    else {
+        return Ok(());
+    };
+    let cancel = AtomicBool::new(false);
+    let builder = preferences()?.directory.join("retype-dict-build.exe");
+    for (index, pack) in packs()?.iter().enumerate() {
+        if preferences()?.pack_mask & (1 << index) != 0 && !pack_installed(&root, pack) {
+            download_pack(&root, pack, &builder, &cancel, |_| {})?;
+            set(
+                "DictionaryGeneration",
+                dword_at(KEY, "DictionaryGeneration")?
+                    .unwrap_or(0)
+                    .wrapping_add(1),
+            )?;
+        }
+    }
+    Ok(())
+}
 fn download_pack(
     root: &Path,
     pack: &Pack,

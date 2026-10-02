@@ -1,0 +1,168 @@
+//! Isolated in-memory WebDAV server; never reads user settings or credentials.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+use super::*;
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+    net::TcpListener,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+};
+struct Mock {
+    url: String,
+    files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Mock {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/dav/", listener.local_addr().unwrap());
+        let files = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
+        let copy = Arc::clone(&files);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !stopping.load(Ordering::Relaxed) {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(3)));
+                let mut input = Vec::new();
+                let mut split = 0;
+                let mut length = 0;
+                loop {
+                    let mut buf = [0u8; 4096];
+                    let size = socket.read(&mut buf).unwrap_or(0);
+                    if size == 0 {
+                        break;
+                    }
+                    input.extend_from_slice(&buf[..size]);
+                    if let Some(offset) = input.windows(4).position(|p| p == b"\r\n\r\n") {
+                        split = offset + 4;
+                        let header = String::from_utf8_lossy(&input[..offset]).to_lowercase();
+                        length = header
+                            .lines()
+                            .find_map(|l| {
+                                l.strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if input.len() >= split + length {
+                            break;
+                        }
+                    }
+                }
+                let header = String::from_utf8_lossy(&input[..split]);
+                let mut parts = header.lines().next().unwrap_or_default().split_whitespace();
+                let method = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default().to_owned();
+                let mut files = copy.lock().unwrap();
+                let (code, body) = match method {
+                    "MKCOL" => (201, vec![]),
+                    "PUT"
+                        if header.to_lowercase().contains("if-none-match: *")
+                            && files.contains_key(&path) =>
+                    {
+                        (412, vec![])
+                    }
+                    "PUT" => {
+                        files.insert(
+                            path,
+                            input
+                                .get(split..split + length)
+                                .unwrap_or_default()
+                                .to_vec(),
+                        );
+                        (201, vec![])
+                    }
+                    "GET" => files
+                        .get(&path)
+                        .map_or((404, vec![]), |bytes| (200, bytes.clone())),
+                    "DELETE" => {
+                        files.remove(&path);
+                        (204, vec![])
+                    }
+                    "PROPFIND" => {
+                        let hrefs = files
+                            .keys()
+                            .filter(|k| k.starts_with("/dav/retype/v1/devices/"))
+                            .map(|k| format!("<d:response><d:href>{k}</d:href></d:response>"))
+                            .collect::<String>();
+                        (
+                            207,
+                            format!("<d:multistatus xmlns:d=\"DAV:\">{hrefs}</d:multistatus>")
+                                .into_bytes(),
+                        )
+                    }
+                    _ => (405, vec![]),
+                };
+                drop(files);
+                let header = format!(
+                    "HTTP/1.1 {code} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(&body);
+            }
+        });
+        Self {
+            url,
+            files,
+            stop,
+            worker: Some(worker),
+        }
+    }
+    fn cloud(&self) -> WebDav {
+        WebDav::new(
+            &Config {
+                url: self.url.clone(),
+                username: "fixture".into(),
+                ..Default::default()
+            },
+            "not-a-user-password",
+        )
+        .unwrap()
+    }
+}
+impl Drop for Mock {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+#[test]
+fn published_versions_are_checked_and_interrupted_uploads_keep_the_last_index() {
+    let mock = Mock::new();
+    let cloud = mock.cloud();
+    cloud.test().unwrap();
+    let device = "a".repeat(32);
+    let make = |revision| serde_json::json!({"version":1,"device":device,"revision":revision});
+    cloud.publish(&device, &make(1)).unwrap();
+    assert_eq!(cloud.devices().unwrap(), vec![device.clone()]);
+    let index_path = format!("/dav/retype/v1/devices/{device}.json");
+    let index = mock.files.lock().unwrap()[&index_path].clone();
+    // An abandoned object is not a committed snapshot.
+    cloud.put("objects/abandoned.json", br#"{}"#, true).unwrap();
+    assert_eq!(mock.files.lock().unwrap()[&index_path], index);
+    for revision in 2..=7 {
+        cloud.publish(&device, &make(revision)).unwrap();
+    }
+    let index: Index = serde_json::from_slice(&mock.files.lock().unwrap()[&index_path]).unwrap();
+    assert_eq!(index.previous.len(), 3);
+    let loaded: serde_json::Value = cloud.download(&device).unwrap();
+    assert_eq!(loaded["revision"], 7);
+    let object = format!("/dav/retype/v1/objects/{}.json", index.hash);
+    mock.files
+        .lock()
+        .unwrap()
+        .insert(object, br#"{"wrong":1}"#.to_vec());
+    assert!(cloud.download::<serde_json::Value>(&device).is_err());
+}

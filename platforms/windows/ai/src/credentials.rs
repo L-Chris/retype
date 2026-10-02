@@ -9,7 +9,13 @@ use windows_sys::Win32::{
     Foundation::*, Security::Credentials::*, Storage::FileSystem::*, System::Registry::*,
 };
 pub fn key(id: &str) -> io::Result<String> {
-    let name = wide(&format!("retype/ai/{id}"));
+    read_credential(&format!("retype/ai/{id}"))
+}
+pub fn cloud_password(account: &str) -> io::Result<String> {
+    read_credential(&format!("retype/sync/{account}"))
+}
+fn read_credential(target: &str) -> io::Result<String> {
+    let name = wide(target);
     let mut credential = null_mut();
     // SAFETY: owned credential copied before CredFree.
     unsafe {
@@ -38,7 +44,13 @@ pub fn key(id: &str) -> io::Result<String> {
     }
 }
 pub fn save_key(id: &str, value: &str) -> io::Result<()> {
-    let name = wide(&format!("retype/ai/{id}"));
+    write_credential(&format!("retype/ai/{id}"), value)
+}
+pub fn save_cloud_password(account: &str, value: &str) -> io::Result<()> {
+    write_credential(&format!("retype/sync/{account}"), value)
+}
+fn write_credential(target: &str, value: &str) -> io::Result<()> {
+    let name = wide(target);
     let user = wide("retype");
     // SAFETY: synchronous APIs copy the live input buffers.
     unsafe {

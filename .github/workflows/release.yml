@@ -109,6 +109,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Learning broker build failed' }
           cargo build --release --target x86_64-pc-windows-msvc -p retype-ai --features service
           if ($LASTEXITCODE -ne 0) { throw 'AI service build failed' }
+          cargo build --release --target x86_64-pc-windows-msvc -p retype-sync
+          if ($LASTEXITCODE -ne 0) { throw 'Cloud sync service build failed' }
 
       # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md）。
       # 安装器将 x86 DLL 放入 x86 子目录，与 x64 共用词库。

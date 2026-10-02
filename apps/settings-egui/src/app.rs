@@ -77,6 +77,7 @@ impl Options {
                     "providers" => Page::Providers,
                     "translation" => Page::Translation,
                     "shortcuts" => Page::Shortcuts,
+                    "cloud" => Page::Cloud,
                     "about" => Page::About,
                     _ => return Err("Unknown settings page".into()),
                 };
@@ -156,6 +157,7 @@ enum Page {
     Translation,
     Shortcuts,
     Statistics,
+    Cloud,
     About,
 }
 
@@ -164,6 +166,7 @@ struct SettingsApp {
     open_started: Instant,
     frame_logged: bool,
     ai: crate::ai::AiPages,
+    cloud: Option<crate::cloud::CloudPage>,
     options: Options,
     started: Instant,
     scheme: PinyinScheme,
@@ -200,6 +203,11 @@ impl SettingsApp {
             Page::Dictionary => {
                 let _ = self.tasks.send(Task::Packs);
             }
+            Page::Cloud => {
+                if self.cloud.is_none() {
+                    self.cloud = Some(crate::cloud::CloudPage::new());
+                }
+            }
             Page::Statistics if !self.statistics_pending => {
                 self.statistics_pending = true;
                 let _ = self.tasks.send(Task::Statistics);
@@ -226,6 +234,9 @@ impl SettingsApp {
             return;
         }
         self.hidden_since = Some(Instant::now());
+        if let Some(cloud) = &mut self.cloud {
+            cloud.flush(ctx);
+        }
         self.instance.idle_timer(self.options.idle_exit);
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         crate::settings_log::event(
@@ -239,6 +250,17 @@ impl SettingsApp {
 
     fn lifecycle(&mut self, ctx: &egui::Context) {
         self.ai.tick(ctx);
+        if let Some(cloud) = &mut self.cloud {
+            if cloud.tick(ctx) {
+                if let Ok(prefs) = backend::preferences() {
+                    self.scheme = prefs.scheme;
+                    self.preferences = prefs;
+                }
+                self.ai.refresh_from_disk();
+                let _ = self.tasks.send(Task::Statistics);
+                let _ = self.tasks.send(Task::Packs);
+            }
+        }
         let requests = std::mem::take(
             &mut *self
                 .instance
@@ -833,6 +855,11 @@ impl SettingsApp {
             open_started: started,
             frame_logged: false,
             ai,
+            cloud: (page == Page::Cloud
+                || retype_sync::config::root()
+                    .and_then(|root| retype_sync::config::Config::load_at(&root))
+                    .is_ok_and(|config| config.enabled))
+            .then(crate::cloud::CloudPage::new),
             started,
             scheme,
             page,
@@ -1038,6 +1065,15 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
                 color,
             );
         }
+        Page::Cloud => {
+            for (x, y, radius) in [(-5.0, 1.0, 5.0), (0.0, -3.0, 6.0), (6.0, 1.0, 4.0)] {
+                painter.circle_stroke(origin + Vec2::new(x, y), radius, stroke);
+            }
+            painter.line_segment(
+                [origin + Vec2::new(-7.0, 6.0), origin + Vec2::new(8.0, 6.0)],
+                stroke,
+            );
+        }
         Page::About => {
             painter.circle_stroke(origin, 8.5, stroke);
             painter.text(
@@ -1069,7 +1105,7 @@ pub(crate) fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
             contents(ui);
         });
 }
-fn switch_row(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
+pub(crate) fn switch_row(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).strong());
@@ -1264,6 +1300,7 @@ impl eframe::App for SettingsApp {
                             (Page::Translation, "翻译"),
                             (Page::Shortcuts, "快捷键"),
                             (Page::Statistics, "统计"),
+                            (Page::Cloud, "云同步"),
                             (Page::About, "关于"),
                         ] {
                             if navigation(ui, page, title, self.page == page) {
@@ -1284,6 +1321,7 @@ impl eframe::App for SettingsApp {
                         Page::Translation => "翻译",
                         Page::Shortcuts => "快捷键",
                         Page::Statistics => "统计",
+                        Page::Cloud => "云同步",
                         Page::About => "关于",
                     },
                 );
@@ -1329,6 +1367,7 @@ impl eframe::App for SettingsApp {
                             Page::Translation => "translation-content",
                             Page::Shortcuts => "shortcuts-content",
                             Page::Statistics => "statistics-content",
+                            Page::Cloud => "cloud-content",
                             Page::About => "about-content",
                         })
                         .auto_shrink([false, false])
@@ -1351,6 +1390,11 @@ impl eframe::App for SettingsApp {
                                 }
                                 Page::Shortcuts => self.ai.shortcuts_page(ui),
                                 Page::Statistics => self.statistics_page(ui),
+                                Page::Cloud => {
+                                    if let Some(cloud) = &mut self.cloud {
+                                        cloud.ui(ui);
+                                    }
+                                }
                                 Page::About => self.about_page(ui),
                             }
                         });

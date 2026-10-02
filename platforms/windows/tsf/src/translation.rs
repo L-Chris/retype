@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Weak,
     },
+    time::{Duration, Instant},
 };
 use windows::{
     core::{implement, w, Interface, Result, PCWSTR},
@@ -21,6 +22,7 @@ const TIMER: usize = 88;
 const STATUS_WIDTH: i32 = 360;
 const STATUS_HEIGHT: i32 = 30;
 const PREVIEW_HEIGHT: i32 = 208;
+const ERROR_NOTICE_DURATION: Duration = Duration::from_secs(3);
 struct Frame {
     state: Weak<TipState>,
     context: ITfContext,
@@ -38,6 +40,7 @@ struct Frame {
     busy: bool,
     preview: bool,
     spinner_phase: u32,
+    hide_at: Option<Instant>,
 }
 impl Drop for Frame {
     fn drop(&mut self) {
@@ -83,6 +86,7 @@ pub(crate) fn capture(state: &Arc<TipState>, context: &ITfContext, ec: u32) -> R
         busy: !original.is_empty(),
         preview: false,
         spinner_phase: 0,
+        hide_at: None,
     };
     let hwnd = create(data, context, ec)?;
     *lock(&state.translation_window) = Some(hwnd.0 as usize);
@@ -454,27 +458,25 @@ fn status(hwnd: HWND, message: &str) {
                 f.applied = true;
             }
             let _ = InvalidateRect(Some(hwnd), None, false);
-            f.preview && f.translation.is_some() && !f.applied
+            let preview = f.preview && f.translation.is_some() && !f.applied;
+            f.hide_at = if preview {
+                None
+            } else {
+                Some(
+                    Instant::now()
+                        + if message == "翻译完成" {
+                            Duration::from_millis(1400)
+                        } else {
+                            ERROR_NOTICE_DURATION
+                        },
+                )
+            };
+            preview
         } else {
             false
         }
     };
     resize_notice(hwnd, preview);
-    if !preview {
-        // SAFETY: This timer belongs to our owner-thread popup.
-        unsafe {
-            SetTimer(
-                Some(hwnd),
-                99,
-                if message == "翻译完成" {
-                    1400
-                } else {
-                    6000
-                },
-                None,
-            );
-        }
-    }
 }
 fn resize_notice(hwnd: HWND, preview: bool) {
     // SAFETY: resize the non-activating owned window within its monitor work area.
@@ -579,7 +581,7 @@ fn notice_width(hwnd: HWND, dpi: i32, message: &str, loading: bool) -> i32 {
             .clamp(100 * dpi / 96, STATUS_WIDTH * dpi / 96)
     }
 }
-fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
+fn create(mut data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
     // SAFETY: this module owns window class, user data and all GDI resources.
     unsafe {
         let mut module = HMODULE::default();
@@ -641,7 +643,7 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
             info.rcWork.top,
             (info.rcWork.bottom - height).max(info.rcWork.top),
         );
-        let auto_hide = !data.busy;
+        data.hide_at = (!data.busy).then(|| Instant::now() + ERROR_NOTICE_DURATION);
         let pointer = Box::into_raw(Box::new(data));
         #[cfg(target_pointer_width = "64")]
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, pointer as isize);
@@ -660,9 +662,16 @@ fn create(data: Frame, context: &ITfContext, ec: u32) -> Result<HWND> {
             let _ = DestroyWindow(hwnd);
             return Err(error);
         }
-        SetTimer(Some(hwnd), TIMER, 100, None);
-        if auto_hide {
-            SetTimer(Some(hwnd), 99, 6000, None);
+        if SetTimer(Some(hwnd), TIMER, 100, None) == 0 {
+            let error = windows::core::Error::from_thread();
+            crate::settings_log::event(
+                "launcher",
+                "translation_timer_failed",
+                0,
+                format!("hresult={:08x}", error.code().0),
+            );
+            let _ = DestroyWindow(hwnd);
+            return Err(error);
         }
         Ok(hwnd)
     }
@@ -898,6 +907,7 @@ pub(crate) fn paint_status_window_states(context: &ITfContext) -> Result<()> {
             busy: false,
             preview: false,
             spinner_phase: 0,
+            hide_at: None,
         };
         let pointer = Box::into_raw(Box::new(data));
         #[cfg(target_pointer_width = "64")]
@@ -984,9 +994,31 @@ pub(crate) fn paint_status_window_states(context: &ITfContext) -> Result<()> {
                 Ok(())
             });
             assert!(!copied_again.get());
+            // A stopped/error notice expires even when no worker response will
+            // ever arrive (for example an empty field rejected during capture).
+            {
+                let data = frame(hwnd).ok_or(E_FAIL)?;
+                data.message = "输入框为空".into();
+                data.busy = false;
+                data.applying = false;
+                data.hide_at = Some(Instant::now() + ERROR_NOTICE_DURATION);
+            }
+            window_proc(hwnd, WM_TIMER, WPARAM(TIMER), LPARAM(0));
+            assert!(
+                IsWindow(Some(hwnd)).as_bool(),
+                "Do not close before the deadline"
+            );
+            frame(hwnd).ok_or(E_FAIL)?.hide_at = Some(Instant::now() - Duration::from_millis(1));
+            window_proc(hwnd, WM_TIMER, WPARAM(TIMER), LPARAM(0));
+            assert!(
+                !IsWindow(Some(hwnd)).as_bool(),
+                "Expired errors must destroy the notice"
+            );
             Ok(())
         })();
-        let _ = DestroyWindow(hwnd);
+        if IsWindow(Some(hwnd)).as_bool() {
+            let _ = DestroyWindow(hwnd);
+        }
         result
     }
 }
@@ -1001,11 +1033,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     LRESULT(0)
                 }
                 WM_ERASEBKGND => LRESULT(1),
-                WM_TIMER if wp.0 == 99 => {
-                    let _ = DestroyWindow(hwnd);
-                    LRESULT(0)
-                }
-                WM_TIMER => {
+                WM_TIMER if wp.0 == TIMER => {
+                    if frame(hwnd).is_some_and(|f| {
+                        f.hide_at.is_some_and(|deadline| Instant::now() >= deadline)
+                    }) {
+                        let _ = DestroyWindow(hwnd);
+                        return LRESULT(0);
+                    }
                     let loading = frame(hwnd).is_some_and(|f| {
                         if f.busy || f.applying {
                             f.spinner_phase = (f.spinner_phase + 1) % 12;
@@ -1052,8 +1086,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                             let preview =
                                 frame(hwnd).is_some_and(|f| f.preview && f.translation.is_some());
                             resize_notice(hwnd, preview);
-                            if !preview {
-                                SetTimer(Some(hwnd), 99, 6000, None);
+                            if let Some(f) = frame(hwnd) {
+                                f.hide_at =
+                                    (!preview).then(|| Instant::now() + ERROR_NOTICE_DURATION);
                             }
                         }
                         let _ = InvalidateRect(Some(hwnd), None, false);

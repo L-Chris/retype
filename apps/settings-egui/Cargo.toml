@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 retype-types.workspace = true
 retype-ai = { path = "../../platforms/windows/ai" }
+retype-sync = { path = "../../platforms/windows/sync" }
 serde_json.workspace = true
 serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

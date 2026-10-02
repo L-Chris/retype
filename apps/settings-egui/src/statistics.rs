@@ -242,6 +242,35 @@ impl Store {
                 }
             }
         }
+        if let Ok(bytes) = fs::read(self.root.join("cloud-history.json")) {
+            if let Ok(rows) = serde_json::from_slice::<Vec<retype_sync::statistics::Bucket>>(&bytes)
+            {
+                for row in rows {
+                    let Some(seconds) = row
+                        .minute
+                        .checked_mul(60)
+                        .and_then(|v| i64::try_from(v).ok())
+                    else {
+                        continue;
+                    };
+                    if seconds.saturating_mul(1000) < reset || seconds.saturating_mul(1000) > now {
+                        continue;
+                    }
+                    if let Some(date) = Local
+                        .timestamp_opt(seconds, 0)
+                        .single()
+                        .map(|v| v.date_naive())
+                    {
+                        result.days.entry(date).or_default().add(Counts {
+                            chinese: row.counts.chinese,
+                            english: row.counts.english,
+                            chinese_ms: row.counts.chinese_ms,
+                            english_ms: row.counts.english_ms,
+                        });
+                    }
+                }
+            }
+        }
         for counts in result.days.values() {
             result.total.add(*counts);
         }

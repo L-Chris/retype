@@ -41,7 +41,11 @@ impl Store {
                 PRIMARY KEY(original,replacement));
             CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, seen INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, tick INTEGER NOT NULL DEFAULT 0);
-            INSERT OR IGNORE INTO metadata(id,revision) VALUES(1,0);")?;
+            INSERT OR IGNORE INTO metadata(id,revision) VALUES(1,0);
+            CREATE TABLE IF NOT EXISTS sync_identity (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync_words (origin TEXT NOT NULL,pinyin TEXT NOT NULL,text TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,pinyin,text));
+            CREATE INDEX IF NOT EXISTS sync_words_key ON sync_words(pinyin,text);
+            CREATE TABLE IF NOT EXISTS sync_corrections (origin TEXT NOT NULL,original TEXT NOT NULL,replacement TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,original,replacement));")?;
         // Preserve exact v1 selection counts. Old additive logp values are not a prior;
         // resolve real dictionary/segmented scores asynchronously instead of reusing them.
         if schema == 1 {
@@ -56,6 +60,13 @@ impl Store {
             )?;
         }
         db.execute_batch("PRAGMA user_version=2; COMMIT;")?;
+        // Seed existing evidence exactly once; subsequent selections are owned
+        // by a stable local origin, separate from imported cumulative counts.
+        db.execute_batch("BEGIN IMMEDIATE;
+            INSERT OR IGNORE INTO sync_identity VALUES('origin',lower(hex(randomblob(16))));
+            INSERT INTO sync_words SELECT 'seed-'||(SELECT value FROM sync_identity WHERE id='origin'),pinyin,text,MAX(usage_count,selections,1) FROM entries WHERE NOT EXISTS(SELECT 1 FROM sync_identity WHERE id='seeded');
+            INSERT INTO sync_corrections SELECT 'seed-'||(SELECT value FROM sync_identity WHERE id='origin'),original,replacement,count FROM corrections WHERE NOT EXISTS(SELECT 1 FROM sync_identity WHERE id='seeded');
+            INSERT OR IGNORE INTO sync_identity VALUES('seeded','1'); COMMIT;")?;
         let user = Arc::new(UserDict::new());
         let learner = Learner::with_system(Arc::clone(&user), system);
         let mut store = Self {
@@ -216,8 +227,34 @@ impl Store {
                         tx.execute("UPDATE entries SET selections=selections+1,last_used=?3 WHERE pinyin=?1 AND text=?2", params![pinyin,text,now])?;
                     }
                 }
+                let origin: String = tx.query_row(
+                    "SELECT value FROM sync_identity WHERE id='origin'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if let Some(ranking) = &next.ranking {
+                    for record in &ranking.records {
+                        let previous = before_usage
+                            .get(&(record.pinyin.clone(), record.text.clone()))
+                            .map_or(0, |r| r.count);
+                        let delta = record.count.saturating_sub(previous);
+                        if delta > 0 {
+                            tx.execute("INSERT INTO sync_words VALUES(?1,?2,?3,?4) ON CONFLICT(origin,pinyin,text) DO UPDATE SET count=count+excluded.count",params![origin,record.pinyin,record.text,delta.min(i64::MAX as u64) as i64])?;
+                        }
+                    }
+                }
                 for (from, to, count) in &next.corrections {
                     tx.execute("INSERT INTO corrections VALUES(?1,?2,?3) ON CONFLICT(original,replacement) DO UPDATE SET count=excluded.count", params![from,to,count])?;
+                    let previous = self
+                        .snapshot
+                        .corrections
+                        .iter()
+                        .find(|(a, b, _)| a == from && b == to)
+                        .map_or(0, |(_, _, n)| *n);
+                    let delta = count.saturating_sub(previous);
+                    if delta > 0 {
+                        tx.execute("INSERT INTO sync_corrections VALUES(?1,?2,?3,?4) ON CONFLICT(origin,original,replacement) DO UPDATE SET count=count+excluded.count",params![origin,from,to,delta])?;
+                    }
                 }
                 tx.execute("INSERT INTO clients VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET sequence=excluded.sequence,seen=excluded.seen", params![request.client, acknowledged as i64, now])?;
                 tx.execute("UPDATE metadata SET revision=revision+1 WHERE id=1", [])?;
@@ -249,5 +286,84 @@ impl Store {
             snapshot: (request.known_revision != Some(self.revision))
                 .then(|| self.snapshot.clone()),
         })
+    }
+
+    pub fn sync_export(&self) -> rusqlite::Result<crate::protocol::SyncLearning> {
+        let words = self
+            .db
+            .prepare("SELECT origin,pinyin,text,count FROM sync_words ORDER BY origin,pinyin,text")?
+            .query_map([], |r| {
+                Ok(crate::protocol::SyncWord {
+                    origin: r.get(0)?,
+                    pinyin: r.get(1)?,
+                    text: r.get(2)?,
+                    count: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let corrections = self.db.prepare("SELECT origin,original,replacement,count FROM sync_corrections ORDER BY origin,original,replacement")?
+            .query_map([], |r| Ok(crate::protocol::SyncCorrection {origin:r.get(0)?,from:r.get(1)?,to:r.get(2)?,count:r.get(3)?}))?.collect::<rusqlite::Result<_>>()?;
+        Ok(crate::protocol::SyncLearning { words, corrections })
+    }
+
+    pub fn sync_merge(&mut self, incoming: &crate::protocol::SyncLearning) -> rusqlite::Result<()> {
+        use crate::protocol::Event;
+        if incoming.words.len() > 100_000 || incoming.corrections.len() > 100_000 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let origin_valid = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        for word in &incoming.words {
+            if !origin_valid(&word.origin)
+                || word.count == 0
+                || word.count > 1_000_000_000
+                || (Event::Coinage {
+                    text: word.text.clone(),
+                    pinyin: word.pinyin.clone(),
+                })
+                .to_learning()
+                .is_none()
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        for c in &incoming.corrections {
+            if !origin_valid(&c.origin)
+                || c.count == 0
+                || c.count > 1_000_000_000
+                || (Event::Corrected {
+                    from: c.from.clone(),
+                    to: c.to.clone(),
+                })
+                .to_learning()
+                .is_none()
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        let tick: i64 = self
+            .db
+            .query_row("SELECT tick FROM metadata WHERE id=1", [], |r| r.get(0))?;
+        let tx = self.db.transaction()?;
+        let mut changed = 0;
+        for word in &incoming.words {
+            // Max also restores this device's own evidence after a local backup
+            // rollback; a stale remote copy can never reduce live counters.
+            changed+=tx.execute("INSERT INTO sync_words VALUES(?1,?2,?3,?4) ON CONFLICT(origin,pinyin,text) DO UPDATE SET count=excluded.count WHERE excluded.count>sync_words.count",params![word.origin,word.pinyin,word.text,word.count as i64])?;
+            tx.execute("INSERT OR IGNORE INTO entries(pinyin,text,logp,usage_count,recent,last_tick) VALUES(?1,?2,-20,0,0,?3)",params![word.pinyin,word.text,tick])?;
+        }
+        for c in &incoming.corrections {
+            changed+=tx.execute("INSERT INTO sync_corrections VALUES(?1,?2,?3,?4) ON CONFLICT(origin,original,replacement) DO UPDATE SET count=excluded.count WHERE excluded.count>sync_corrections.count",params![c.origin,c.from,c.to,c.count])?;
+        }
+        if changed > 0 {
+            tx.execute_batch("UPDATE entries SET usage_count=(SELECT SUM(count) FROM sync_words WHERE pinyin=entries.pinyin AND text=entries.text);
+                INSERT INTO corrections SELECT original,replacement,MIN(SUM(count),4294967295) FROM sync_corrections GROUP BY original,replacement HAVING 1 ON CONFLICT(original,replacement) DO UPDATE SET count=excluded.count;
+                UPDATE metadata SET revision=revision+1 WHERE id=1;")?;
+        }
+        tx.commit()?;
+        self.reload()
     }
 }

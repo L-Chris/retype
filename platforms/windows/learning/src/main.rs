@@ -65,6 +65,12 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&system),
         retype_dict::FallbackPolicy::SingleChar,
     );
+    if custom_db.is_none() {
+        let sync = directory.join("retype-sync-host.exe");
+        if sync.is_file() {
+            let _ = retype_learning::client::launch_host(Some(&sync));
+        }
+    }
     loop {
         if custom_db.is_none() {
             if let Some(active) = transport::read_machine_registry("ActiveDir") {
@@ -107,6 +113,18 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if request.stop {
                         return Ok(());
+                    }
+                }
+            } else if let Ok(request) = serde_json::from_slice::<protocol::SyncRequest>(&bytes) {
+                let result = match request {
+                    protocol::SyncRequest::Export => store.sync_export(),
+                    protocol::SyncRequest::Merge(data) => {
+                        store.sync_merge(&data).and_then(|_| store.sync_export())
+                    }
+                };
+                if let Ok(snapshot) = result {
+                    if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+                        let _ = listener.respond(&bytes);
                     }
                 }
             }

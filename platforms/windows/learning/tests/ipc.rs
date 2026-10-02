@@ -118,6 +118,37 @@ fn real_pipe_survives_broker_crash_and_replayed_requests() {
 }
 
 #[test]
+fn cloud_learning_merge_and_export_use_the_real_authenticated_pipe() {
+    let mut broker = Broker::start();
+    let exchange = |broker: &Broker, request: &SyncRequest| -> SyncLearning {
+        let bytes =
+            transport::exchange(&broker.pipe, &serde_json::to_vec(request).unwrap()).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let incoming = SyncLearning {
+        words: vec![SyncWord {
+            origin: "remote-fixture".into(),
+            pinyin: "ni'hao".into(),
+            text: "你好".into(),
+            count: 7,
+        }],
+        corrections: vec![],
+    };
+    let first = exchange(&broker, &SyncRequest::Merge(incoming.clone()));
+    assert_eq!(first.words[0].count, 7);
+    let again = exchange(&broker, &SyncRequest::Merge(incoming));
+    assert_eq!(again, first);
+    broker.restart();
+    assert_eq!(exchange(&broker, &SyncRequest::Export), first);
+    let snapshot = broker
+        .call(&Broker::poll("after-cloud"))
+        .unwrap()
+        .snapshot
+        .unwrap();
+    assert_eq!(snapshot.ranking.unwrap().records[0].count, 7);
+}
+
+#[test]
 fn second_broker_cannot_become_another_writer() {
     let broker = Broker::start();
     let status = Command::new(env!("CARGO_BIN_EXE_retype-learning-host"))
