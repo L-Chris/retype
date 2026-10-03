@@ -1,7 +1,7 @@
 //! Windows TSF lifecycle and keyboard routing. Text changes run under TSF edit locks.
 use crate::{candidate::CandidateWindow, display, edit, keymap, session::Session, stats};
 
-use retype_types::{InputEvent, InputSource, Key, Modifiers};
+use retype_types::{InputEvent, Key, Modifiers};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, WPARAM};
@@ -362,6 +362,14 @@ impl TipState {
         if let Some(session) = self.session() {
             session.sync_packs();
             let scheme = crate::preferences::scheme();
+            let (enabled, spelling) = crate::preferences::english_options();
+            if session
+                .backend
+                .with_kernel(|k| (k.config().english_enabled, k.config().english_spelling))
+                != (enabled, spelling)
+            {
+                session.submit(InputEvent::SetEnglishOptions { enabled, spelling });
+            }
             if session.backend.with_kernel(|k| k.config().pinyin_scheme) != scheme {
                 session.submit(InputEvent::SetPinyinScheme(scheme));
                 self.notify_language_bar();
@@ -377,11 +385,7 @@ impl TipState {
     }
     pub(crate) fn reset_kernel(&self) {
         if let Some(s) = self.session() {
-            s.submit(InputEvent::Key {
-                key: Key::Escape,
-                mods: Modifiers::NONE,
-                source: InputSource::Keyboard,
-            });
+            s.submit(InputEvent::ResetComposition);
         }
     }
     pub(crate) fn finish(self: &Arc<Self>, cancel: bool) {
@@ -400,10 +404,31 @@ impl TipState {
         if session.shadow {
             return false;
         }
-        let (chinese, composing) = session
-            .backend
-            .with_kernel(|k| (k.is_chinese(), k.has_composition()));
+        let (chinese, composing, english, candidates, selected) =
+            session.backend.with_kernel(|k| {
+                (
+                    k.is_chinese(),
+                    k.has_composition(),
+                    k.config().english_enabled,
+                    k.has_candidates(),
+                    k.english_candidate_selected(),
+                )
+            });
         let composing = composing || self.pending.load(Ordering::SeqCst) > 0;
+        if !chinese && english {
+            if !mods.is_plain() {
+                return false;
+            }
+            return matches!(key,Key::Char(c) if c.is_ascii_alphabetic())
+                || composing
+                    && (matches!(
+                        key,
+                        Key::Char(_) | Key::Space | Key::Escape | Key::Backspace
+                    ) || candidates
+                        && (matches!(key, Key::Up | Key::Down)
+                            || key == Key::Tab && !mods.contains(Modifiers::SHIFT))
+                        || selected && matches!(key, Key::PageUp | Key::PageDown));
+        }
         wants_key(key, mods, chinese, composing)
     }
 }
@@ -628,6 +653,14 @@ impl KeyEventSink_Impl {
             mods = mods.union(Modifiers::SHIFT);
         }
         let wanted = state.wants(key, mods);
+        let english = state.session().is_some_and(|session| {
+            session
+                .backend
+                .with_kernel(|k| !k.is_chinese() && k.config().english_enabled)
+        });
+        if english && status.dwStaticFlags & TS_SS_NOHIDDENTEXT == 0 {
+            return Ok(false.into());
+        }
         let direct = !wanted
             && status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0
             && state.session().is_some_and(|session| !session.shadow)
@@ -647,6 +680,16 @@ impl KeyEventSink_Impl {
                 .into());
         }
         if !wanted {
+            if english
+                && state
+                    .session()
+                    .is_some_and(|session| session.backend.with_kernel(|k| k.has_composition()))
+            {
+                // Flush the word synchronously, then allow the real key to reach
+                // the host (Enter submits searches; arrows and shortcuts stay native).
+                let _ = edit::request(&state, ctx, edit::Work::Boundary(key, mods));
+                return Ok(false.into());
+            }
             // End existing composition before shortcuts, navigation or English passthrough.
             state.finish(false);
             return Ok(false.into());
@@ -654,7 +697,14 @@ impl KeyEventSink_Impl {
         match edit::request(&state, ctx, edit::Work::Key(key, mods)) {
             Ok(()) => {
                 if status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0 {
-                    stats::activity(&state.stats_clock, stats::Language::Chinese);
+                    stats::activity(
+                        &state.stats_clock,
+                        if english {
+                            stats::Language::English
+                        } else {
+                            stats::Language::Chinese
+                        },
+                    );
                 }
                 Ok(true.into())
             }

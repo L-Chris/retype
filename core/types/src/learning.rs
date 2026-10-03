@@ -8,6 +8,9 @@ use crate::SyllableId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LearningEvent {
+    EnglishWord {
+        text: String,
+    },
     /// 用户从候选中选了词。记录位置，用于「常选项置顶」。
     CandidateChosen {
         source: InputSource,
@@ -33,10 +36,15 @@ pub enum LearningEvent {
     /// 单独一个变体而不是复用 `CandidateChosen`：语音给的是**自然文本**，
     /// 没有音节序列，需要学习层自己注音后才能进用户词库。
     /// 这正是 test.md 图 5 的闭环 —— 语音学过的专业词要能反哺拼音候选。
-    VoiceCommit { text: String },
+    VoiceCommit {
+        text: String,
+    },
 }
 
 /// 学习记录的持久化后端。M0 提供内存实现，M2 换 SQLite（见 roadmap）。
 pub trait LearningStore: Send + Sync {
     fn record(&self, event: LearningEvent);
+    fn english_words(&self, _prefix: &str, _limit: usize) -> Vec<(String, u64)> {
+        Vec::new()
+    }
 }

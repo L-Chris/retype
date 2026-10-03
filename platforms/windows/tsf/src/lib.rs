@@ -19,6 +19,7 @@ mod candidate;
 pub mod class_factory;
 mod display;
 mod edit;
+mod english_updates;
 pub mod ids;
 pub mod keymap;
 mod langbar;

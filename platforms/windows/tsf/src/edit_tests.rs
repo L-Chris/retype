@@ -578,7 +578,10 @@ fn run_host() -> Result<()> {
             CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
         let tid = manager.Activate()?;
         let document = manager.CreateDocumentMgr()?;
-        let data = Arc::new(Mutex::new(Data::default()));
+        let data = Arc::new(Mutex::new(Data {
+            input_scope: Some(IS_DEFAULT),
+            ..Default::default()
+        }));
         let store: ITextStoreACP = Store {
             data: Arc::clone(&data),
         }
@@ -729,6 +732,61 @@ fn run_host() -> Result<()> {
         );
         request(&state, &context, Work::Toggle)?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        for ch in "hel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        assert!(session.backend.with_kernel(|k| k
+            .render_state()
+            .candidates
+            .iter()
+            .any(|c| c.text == "hello")));
+        request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("hel "));
+        for ch in "hel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        let first = session
+            .backend
+            .with_kernel(|k| k.render_state().candidates[0].text.clone());
+        request(&state, &context, Work::Key(Key::Tab, Modifiers::NONE))?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with(&format!("{first} ")));
+        lock(&seen_candidates).clear();
+        for ch in "hellp".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !lock(&seen_candidates).iter().any(|word| word == "hello")
+            && std::time::Instant::now() < deadline
+        {
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&message);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            lock(&seen_candidates).iter().any(|word| word == "hello"),
+            "background spelling suggestions must reach UI-less hosts without another key"
+        );
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("hellp"));
+        request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
+        for ch in "word".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        assert!(!state.wants(Key::Enter, Modifiers::NONE));
+        request(
+            &state,
+            &context,
+            Work::Boundary(Key::Enter, Modifiers::NONE),
+        )?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("word"));
+        assert!(lock(&state.composition).is_none());
+        lock(&data).input_scope = Some(IS_PASSWORD);
+        request(&state, &context, Work::Key(Key::Char('s'), Modifiers::NONE))?;
+        assert!(lock(&state.composition).is_none());
+        assert!(!session.backend.with_kernel(|k| k.has_candidates()));
+        lock(&data).input_scope = Some(IS_DEFAULT);
         request(&state, &context, Work::Toggle)?;
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
         let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
@@ -777,7 +835,16 @@ fn run_host() -> Result<()> {
         lock(&data).hidden = true;
         assert!(!keys.OnTestKeyDown(&context, letter, lp)?.as_bool());
         request(&state, &context, Work::SetChinese(true))?;
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !session
+            .user
+            .snapshot()
+            .iter()
+            .any(|entry| entry.1 == "你好")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let learned_before = session.user.snapshot();
         assert!(
             learned_before.iter().any(|entry| entry.1 == "你好"),

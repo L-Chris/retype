@@ -119,6 +119,7 @@ pub fn local_root() -> Result<PathBuf> {
 }
 #[derive(Clone)]
 pub struct Preferences {
+    pub english: (bool, bool),
     pub scheme: PinyinScheme,
     pub auto_check: bool,
     pub pack_mask: u32,
@@ -155,6 +156,10 @@ pub fn preferences() -> Result<Preferences> {
                 .unwrap_or_default()
         });
     Ok(Preferences {
+        english: (
+            dword_at(KEY, "EnglishDisabled")?.unwrap_or(0) == 0,
+            dword_at(KEY, "EnglishSpellingDisabled")?.unwrap_or(0) == 0,
+        ),
         scheme: if dword_at(KEY, "PinyinScheme")? == Some(1) {
             PinyinScheme::Flypy
         } else {

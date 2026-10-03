@@ -134,6 +134,15 @@ pub enum InputEvent {
     /// 中英切换（Shift / 热键 / 语言栏点击）。平台层判定后投递，内核不猜按键组合。
     ToggleChinese,
     SetPinyinScheme(PinyinScheme),
+    SetEnglishOptions {
+        enabled: bool,
+        spelling: bool,
+    },
+    EnglishCompleted {
+        gen: super::Generation,
+        candidates: Vec<super::Candidate>,
+    },
+    ResetComposition,
     Voice(VoiceEvent),
     /// 用户从候选窗选了第 index 个
     CandidateChosen {

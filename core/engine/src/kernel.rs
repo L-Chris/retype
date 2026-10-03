@@ -18,6 +18,8 @@ use retype_types::{
     RenderState, RerankJob, RerankOutcome, SideEffect, StatusFlags, VoiceEvent,
 };
 use std::sync::Arc;
+#[path = "english.rs"]
+mod english;
 
 /// Chinese punctuation mapping, also used by platform key routing.
 pub fn chinese_punctuation(c: char) -> Option<&'static str> {
@@ -49,6 +51,8 @@ pub fn chinese_punctuation(c: char) -> Option<&'static str> {
 /// 内核配置。
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
+    pub english_enabled: bool,
+    pub english_spelling: bool,
     pub pinyin_scheme: retype_types::PinyinScheme,
     pub decode: DecodeOptions,
     /// 是否启用二刷（断网/未配置云端时应关掉，省掉无谓的等待与打点）
@@ -63,6 +67,8 @@ pub struct KernelConfig {
 impl Default for KernelConfig {
     fn default() -> Self {
         Self {
+            english_enabled: true,
+            english_spelling: true,
             pinyin_scheme: retype_types::PinyinScheme::Full,
             decode: DecodeOptions::default(),
             rerank_enabled: true,
@@ -110,6 +116,7 @@ pub struct Kernel {
     candidates: Vec<Candidate>,
     syllables: Vec<String>,
     selected: usize,
+    english_selected: bool,
     page_start: usize,
     page_starts: Vec<usize>,
     double_quote_open: bool,
@@ -168,6 +175,7 @@ impl Kernel {
             candidates: Vec::new(),
             syllables: Vec::new(),
             selected: 0,
+            english_selected: false,
             page_start: 0,
             page_starts: Vec::new(),
             double_quote_open: false,
@@ -205,6 +213,12 @@ impl Kernel {
 
     pub fn has_composition(&self) -> bool {
         !self.buffer.is_empty() || !self.parts.is_empty()
+    }
+    pub fn has_candidates(&self) -> bool {
+        !self.candidates.is_empty()
+    }
+    pub fn english_candidate_selected(&self) -> bool {
+        self.english_selected
     }
 
     pub fn committed_text(&self) -> String {
@@ -263,6 +277,36 @@ impl Kernel {
     pub fn handle(&mut self, ev: InputEvent) -> Vec<KernelAction> {
         let mut actions: Vec<KernelAction> = Vec::with_capacity(4);
         match ev {
+            InputEvent::ResetComposition => self.cancel_composition(&mut actions),
+            InputEvent::SetEnglishOptions { enabled, spelling } => {
+                if !self.is_chinese() && self.has_composition() {
+                    self.commit_english(None, "", &mut actions);
+                }
+                self.cfg.english_enabled = enabled;
+                self.cfg.english_spelling = spelling;
+            }
+            InputEvent::EnglishCompleted { gen, candidates } => {
+                if gen == self.gen
+                    && !self.is_chinese()
+                    && self.has_composition()
+                    && self.cfg.english_spelling
+                {
+                    for c in candidates {
+                        if self.candidates.len() >= 32 {
+                            break;
+                        }
+                        if !self
+                            .candidates
+                            .iter()
+                            .any(|existing| existing.text == c.text)
+                        {
+                            self.candidates.push(c);
+                        }
+                    }
+                    self.page_starts.clear();
+                    actions.push(KernelAction::Render(self.render_state()));
+                }
+            }
             InputEvent::Key { key, mods, source } => self.on_key(key, mods, source, &mut actions),
             InputEvent::ToggleChinese => self.on_toggle_chinese(&mut actions),
             InputEvent::SetPinyinScheme(scheme) => {
@@ -278,7 +322,13 @@ impl Kernel {
             InputEvent::FocusChanged { app, field } => self.on_focus(app, field, &mut actions),
             InputEvent::ContextUpdated(snap) => self.on_context(snap),
             InputEvent::Voice(v) => self.on_voice(v, &mut actions),
-            InputEvent::CandidateChosen { index } => self.choose(index, &mut actions),
+            InputEvent::CandidateChosen { index } => {
+                if !self.is_chinese() {
+                    self.commit_english(Some(index), " ", &mut actions);
+                } else {
+                    self.choose(index, &mut actions);
+                }
+            }
             InputEvent::CandidatePage { delta } => self.page(delta, &mut actions),
             InputEvent::RerankCompleted { gen, result } => {
                 self.on_rerank(gen, result, &mut actions)
@@ -296,6 +346,10 @@ impl Kernel {
         source: InputSource,
         actions: &mut Vec<KernelAction>,
     ) {
+        if !self.is_chinese() && self.cfg.english_enabled {
+            self.on_english_key(key, mods, actions);
+            return;
+        }
         // 带 Ctrl/Alt/Win 的一律是宿主快捷键。若此时还留着组字串，
         // 必须先清掉 —— 否则宿主执行了快捷键，而屏幕上还挂着半截拼音。
         if !mods.is_plain() {
@@ -660,6 +714,10 @@ impl Kernel {
 
     /// 上屏原始字母（回车的逃生通道）。
     fn commit_raw_letters(&mut self, actions: &mut Vec<KernelAction>) {
+        if !self.is_chinese() {
+            self.commit_english(None, "", actions);
+            return;
+        }
         let text = self.composition_text();
         self.emit_part_learning(actions);
         self.reset_composition();
@@ -693,6 +751,8 @@ impl Kernel {
     }
 
     fn reset_composition(&mut self) {
+        self.english_selected = false;
+        self.status = self.status.difference(StatusFlags::ENGLISH_SELECTED);
         self.buffer.clear();
         self.parts.clear();
         self.candidates.clear();

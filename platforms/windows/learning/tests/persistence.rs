@@ -53,6 +53,47 @@ fn chosen() -> Event {
 }
 
 #[test]
+fn english_learning_survives_restart_and_cloud_roundtrips_once() {
+    use retype_types::LearningStore;
+    let a_dir = Directory::new();
+    let b_dir = Directory::new();
+    let mut a = store(&a_dir.db());
+    let mut b = store(&b_dir.db());
+    let event = Event::English {
+        text: "Retype".into(),
+    };
+    a.handle(&request("a", 1, event.clone())).unwrap();
+    a.handle(&request("a", 1, event.clone())).unwrap(); // retry is idempotent
+    a.handle(&request("a", 2, event)).unwrap();
+    assert!(a.sync_export().unwrap().words.is_empty()); // no pinyin pollution
+    drop(a);
+    let mut a = store(&a_dir.db());
+    let exported = a.sync_export().unwrap();
+    assert_eq!(exported.english[0].count, 2);
+    b.sync_merge(&exported).unwrap();
+    b.sync_merge(&exported).unwrap();
+    a.sync_merge(&b.sync_export().unwrap()).unwrap();
+    assert_eq!(a.sync_export().unwrap().english[0].count, 2);
+    let response = b
+        .handle(&Request {
+            version: VERSION,
+            client: "reader".into(),
+            known_revision: None,
+            events: vec![],
+            stop: false,
+        })
+        .unwrap();
+    let learner = Learner::new(Arc::new(UserDict::new()));
+    response.snapshot.unwrap().restore(learner.user(), &learner);
+    assert_eq!(learner.english_words("ret", 8), vec![("Retype".into(), 2)]);
+    assert!(Event::English {
+        text: "secret@example.com".into()
+    }
+    .to_learning()
+    .is_none());
+}
+
+#[test]
 fn cloud_roundtrips_merge_counts_once_and_keep_local_recent_clock() {
     let a_dir = Directory::new();
     let b_dir = Directory::new();

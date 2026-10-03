@@ -28,6 +28,7 @@ pub(crate) struct Composition {
 #[derive(Clone, Copy)]
 pub(crate) enum Work {
     Key(Key, Modifiers),
+    Boundary(Key, Modifiers),
     Direct(char),
     Toggle,
     SetChinese(bool),
@@ -38,7 +39,8 @@ pub(crate) enum Work {
 }
 
 pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -> Result<()> {
-    let pending_counted = !matches!(work, Work::Direct(_));
+    let synchronous = matches!(work, Work::Direct(_) | Work::Boundary(..));
+    let pending_counted = !synchronous;
     let cancelled = Arc::new(AtomicBool::new(false));
     let completed = Arc::new(AtomicBool::new(false));
     let session: ITfEditSession = Edit {
@@ -65,7 +67,7 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
         let status = context.RequestEditSession(
             state.tid.load(Ordering::SeqCst),
             &session,
-            if matches!(work, Work::Direct(_)) {
+            if synchronous {
                 TF_ES_SYNC
             } else {
                 TF_ES_ASYNCDONTCARE
@@ -75,7 +77,7 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
                 TF_ES_READWRITE
             },
         )?;
-        if matches!(work, Work::Direct(_)) && !completed.load(Ordering::SeqCst) {
+        if synchronous && !completed.load(Ordering::SeqCst) {
             // Some hosts return an asynchronous success even for TF_ES_SYNC.
             // Cancel that deferred session and let the host receive the key.
             cancelled.store(true, Ordering::SeqCst);
@@ -120,7 +122,7 @@ impl ITfEditSession_Impl for Edit_Impl {
             self.state.writing.store(true, Ordering::SeqCst);
             let result = guarded(|| self.run(ec));
             self.state.writing.store(false, Ordering::SeqCst);
-            if result.is_ok() && matches!(self.work, Work::Direct(_)) {
+            if result.is_ok() && matches!(self.work, Work::Direct(_) | Work::Boundary(..)) {
                 self.completed.store(true, Ordering::SeqCst);
             }
             if result.is_err() {
@@ -147,8 +149,29 @@ impl Edit_Impl {
             if c.as_ref().is_some_and(|c| {
                 c.context == self.context && self.finishing.as_ref() == Some(&c.object)
             }) {
+                let english = state.session().and_then(|session| {
+                    session
+                        .backend
+                        .with_kernel(|k| (!k.is_chinese() && !cancel).then(|| k.composition_text()))
+                });
                 end(state, ec, cancel)?;
                 state.reset_kernel();
+                if let Some(text) = english {
+                    if countable(&self.context) {
+                        stats::commit(&text);
+                    }
+                    if learnable(&self.context, ec)
+                        && text.len() >= 2
+                        && text.len() <= 64
+                        && text.bytes().all(|c| c.is_ascii_alphabetic() || c == b'\'')
+                    {
+                        if let Some(session) = state.session() {
+                            session
+                                .backend
+                                .record_learning(retype_types::LearningEvent::EnglishWord { text });
+                        }
+                    }
+                }
             }
             return Ok(());
         }
@@ -164,6 +187,25 @@ impl Edit_Impl {
         let Some(session) = state.session() else {
             return Ok(());
         };
+        if matches!(self.work, Work::Key(..) | Work::Boundary(..))
+            && session.backend.with_kernel(|k| !k.is_chinese())
+            && !learnable(&self.context, ec)
+        {
+            // Hidden/private/password scopes receive literal text, with neither
+            // predictions nor personal learning. Do not read surrounding text.
+            let literal = match self.work {
+                Work::Key(Key::Char(c), _) => Some(c.to_string()),
+                Work::Key(Key::Space, _) => Some(" ".into()),
+                _ => None,
+            };
+            end(state, ec, false)?;
+            state.reset_kernel();
+            state.hide();
+            if let Some(text) = literal {
+                replace(state, &self.context, ec, &text, false)?;
+            }
+            return Ok(());
+        }
         if matches!(self.work, Work::Translate)
             && !session.backend.with_kernel(|k| k.has_composition())
         {
@@ -177,7 +219,11 @@ impl Edit_Impl {
         }
         let event = match self.work {
             Work::Translate => InputEvent::Key {
-                key: Key::Space,
+                key: if session.backend.with_kernel(|k| k.is_chinese()) {
+                    Key::Space
+                } else {
+                    Key::Enter
+                },
                 mods: Modifiers::NONE,
                 source: InputSource::Keyboard,
             },
@@ -187,7 +233,7 @@ impl Edit_Impl {
                 }
                 InputEvent::CandidateChosen { index }
             }
-            Work::Key(key, mods) => InputEvent::Key {
+            Work::Key(key, mods) | Work::Boundary(key, mods) => InputEvent::Key {
                 key,
                 mods,
                 source: InputSource::Keyboard,
@@ -286,6 +332,14 @@ impl Edit_Impl {
                     && !clipped.as_bool())
                 .then_some(rect);
                 let initial = session.backend.with_kernel(|k| k.render_state());
+                if !matches!(self.work, Work::Refresh)
+                    && initial.composition.len() >= 3
+                    && session
+                        .backend
+                        .with_kernel(|k| !k.is_chinese() && k.config().english_spelling)
+                {
+                    crate::english_updates::watch(state);
+                }
                 let owner = self
                     .context
                     .GetActiveView()

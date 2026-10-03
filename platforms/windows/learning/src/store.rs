@@ -43,6 +43,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, tick INTEGER NOT NULL DEFAULT 0);
             INSERT OR IGNORE INTO metadata(id,revision) VALUES(1,0);
             CREATE TABLE IF NOT EXISTS sync_identity (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sync_english (origin TEXT NOT NULL,text TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,text));
             CREATE TABLE IF NOT EXISTS sync_words (origin TEXT NOT NULL,pinyin TEXT NOT NULL,text TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,pinyin,text));
             CREATE INDEX IF NOT EXISTS sync_words_key ON sync_words(pinyin,text);
             CREATE TABLE IF NOT EXISTS sync_corrections (origin TEXT NOT NULL,original TEXT NOT NULL,replacement TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,original,replacement));")?;
@@ -82,6 +83,13 @@ impl Store {
     }
 
     fn reload(&mut self) -> rusqlite::Result<()> {
+        self.snapshot.english = self
+            .db
+            .prepare(
+                "SELECT text,SUM(count) FROM sync_english GROUP BY text ORDER BY text LIMIT 10000",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?
+            .collect::<rusqlite::Result<_>>()?;
         self.revision =
             self.db
                 .query_row("SELECT revision FROM metadata WHERE id=1", [], |row| {
@@ -232,6 +240,11 @@ impl Store {
                     [],
                     |r| r.get(0),
                 )?;
+                for event in &applied {
+                    if let Event::English { text } = event {
+                        tx.execute("INSERT INTO sync_english VALUES(?1,?2,1) ON CONFLICT(origin,text) DO UPDATE SET count=count+1",params![origin,text])?;
+                    }
+                }
                 if let Some(ranking) = &next.ranking {
                     for record in &ranking.records {
                         let previous = before_usage
@@ -303,10 +316,28 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
         let corrections = self.db.prepare("SELECT origin,original,replacement,count FROM sync_corrections ORDER BY origin,original,replacement")?
             .query_map([], |r| Ok(crate::protocol::SyncCorrection {origin:r.get(0)?,from:r.get(1)?,to:r.get(2)?,count:r.get(3)?}))?.collect::<rusqlite::Result<_>>()?;
-        Ok(crate::protocol::SyncLearning { words, corrections })
+        let english = self
+            .db
+            .prepare("SELECT origin,text,count FROM sync_english ORDER BY origin,text")?
+            .query_map([], |r| {
+                Ok(crate::protocol::SyncEnglish {
+                    origin: r.get(0)?,
+                    text: r.get(1)?,
+                    count: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(crate::protocol::SyncLearning {
+            words,
+            corrections,
+            english,
+        })
     }
 
     pub fn sync_merge(&mut self, incoming: &crate::protocol::SyncLearning) -> rusqlite::Result<()> {
+        if !incoming.valid() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         use crate::protocol::Event;
         if incoming.words.len() > 100_000 || incoming.corrections.len() > 100_000 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -349,6 +380,9 @@ impl Store {
             .query_row("SELECT tick FROM metadata WHERE id=1", [], |r| r.get(0))?;
         let tx = self.db.transaction()?;
         let mut changed = 0;
+        for word in &incoming.english {
+            changed+=tx.execute("INSERT INTO sync_english VALUES(?1,?2,?3) ON CONFLICT(origin,text) DO UPDATE SET count=excluded.count WHERE excluded.count>sync_english.count",params![word.origin,word.text,word.count as i64])?;
+        }
         for word in &incoming.words {
             // Max also restores this device's own evidence after a local backup
             // rollback; a stale remote copy can never reduce live counters.

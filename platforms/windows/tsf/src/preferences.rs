@@ -25,6 +25,14 @@ pub fn scheme() -> PinyinScheme {
     }
 }
 
+pub fn english_options() -> (bool, bool) {
+    // Disabled flags default to zero, so existing installations gain completion.
+    (
+        read_dword(w!("EnglishDisabled")) == 0,
+        read_dword(w!("EnglishSpellingDisabled")) == 0,
+    )
+}
+
 fn read_dword(name: windows_core::PCWSTR) -> u32 {
     let mut value = 0u32;
     let mut size = 4;

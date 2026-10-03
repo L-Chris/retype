@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+retype-english.workspace = true
 retype-types = { workspace = true }
 retype-pinyin = { workspace = true }
 retype-dict = { workspace = true }

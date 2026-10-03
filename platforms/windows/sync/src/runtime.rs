@@ -177,6 +177,14 @@ fn portable() -> Result<BTreeMap<String, Value>> {
             json!(registry("PinyinScheme")?.unwrap_or(0)),
         ),
         (
+            "input.english".into(),
+            json!(registry("EnglishDisabled")?.unwrap_or(0) == 0),
+        ),
+        (
+            "input.english_spelling".into(),
+            json!(registry("EnglishSpellingDisabled")?.unwrap_or(0) == 0),
+        ),
+        (
             "dictionary.enabled".into(),
             json!(registry("EnabledDictionaryPacks")?.unwrap_or(0) & 0x7f),
         ),
@@ -261,6 +269,16 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
         .and_then(Value::as_u64)
         .filter(|v| *v <= 0x7f)
         .ok_or("词库设置无效")? as u32;
+    let english = values
+        .get("input.english")
+        .map(Value::as_bool)
+        .unwrap_or(Some(true))
+        .ok_or("英文输入设置无效")?;
+    let spelling = values
+        .get("input.english_spelling")
+        .map(Value::as_bool)
+        .unwrap_or(Some(true))
+        .ok_or("英文拼写设置无效")?;
     let auto = values
         .get("updates.auto_check")
         .and_then(Value::as_bool)
@@ -330,6 +348,8 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
     retype_ai::secrets::save_shortcuts(shortcuts).map_err(|_| "无法保存同步后的快捷键")?;
     let previous_mask = registry("EnabledDictionaryPacks")?.unwrap_or(0);
     set_registry("PinyinScheme", scheme)?;
+    set_registry("EnglishDisabled", u32::from(!english))?;
+    set_registry("EnglishSpellingDisabled", u32::from(!spelling))?;
     set_registry("EnabledDictionaryPacks", mask)?;
     if previous_mask != mask {
         set_registry(

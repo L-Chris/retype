@@ -595,6 +595,10 @@ mod tests {
     #[test]
     fn english_mode_passes_everything_through() {
         let f = fixture(false);
+        f.backend.submit(InputEvent::SetEnglishOptions {
+            enabled: false,
+            spelling: false,
+        });
         f.backend.submit(InputEvent::ToggleChinese);
         let acts = type_str(&f.backend, "nihao");
         assert!(acts.iter().all(|a| matches!(a, KernelAction::PassThrough)));

@@ -15,6 +15,7 @@ A Chinese input method built around a shared Rust input engine. Windows desktop 
 - A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
+- Offline English word completion and spelling suggestions, with case preservation and persistent personal vocabulary; see [English input](docs/english-input.md).
 - Configurable AI providers and models, with a shortcut to translate and replace supported input fields or preview the result first.
 - Personal learning saved locally and shared across applications, Full Pinyin, and Xiaohe Shuangpin, with frequency-based ranking and decaying recent preferences.
 - Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.
@@ -28,6 +29,8 @@ The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility
 Download the Windows installer from the [latest release](https://github.com/L-Chris/retype/releases/latest). It includes both 64-bit and 32-bit input components. If an earlier installer has a pending restart, complete that restart before upgrading.
 
 Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme, view typing statistics, or check for updates. Reopen applications that were already running after an update so they load the new input component.
+
+In English mode, Space commits what you typed; Tab or clicking a candidate accepts it with a trailing space. Use Up/Down to select explicitly, then Space to accept it with a trailing space. Numbers and punctuation remain ordinary input. Settings > Input controls English completion and spelling suggestions.
 
 ## Build from source
 

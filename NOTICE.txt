@@ -38,6 +38,18 @@
 - 用途: 单字降级与开发辅助工具中的多音字权重；不参与默认万象词库的构建
 - 许可: Unicode License V3；完整文本见本目录 `LICENSE-Unicode.txt`
 
+### English word frequencies
+- Source: https://github.com/wolfgarbe/SymSpell, commit c239062ae02961df18ab7da1671d01b4388204e0
+- File: SymSpell/frequency_dictionary_en_82_765.txt, by Wolf Garbe.
+- Upstream combines SCOWL word lists (Kevin Atkinson and contributing word-list authors)
+  with Google Books Ngram frequencies (https://books.google.com/ngrams/).
+- Google Ngram data is licensed under CC BY 3.0; SCOWL carries its own word-list
+  notices and permissions. See LICENSE-Google-Ngram, LICENSE-SCOWL and LICENSE-SymSpell.
+- retype filters unsupported non-ASCII entries and precompiles prefix indexes;
+  spelling suggestions use an independently implemented bounded one-edit search.
+- The compiled English data retains its upstream notices and applicable data licenses;
+  those licenses are separate from retype's MIT code license.
+
 ## 构建工具链
 
 - Rust standard library — MIT OR Apache-2.0

@@ -2335,7 +2335,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "retype-ai"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-learning",
  "serde",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "retype-candidate-ui"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "egui",
  "png 0.17.16",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "retype-cloud"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "futures",
  "retype-types",
@@ -2366,14 +2366,14 @@ dependencies = [
 
 [[package]]
 name = "retype-context"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-diag"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-candidate-ui",
  "retype-cloud",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "pinyin",
  "retype-file-map",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict-build"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2407,21 +2407,29 @@ dependencies = [
 
 [[package]]
 name = "retype-engine"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "crossbeam-channel",
  "futures",
  "retype-cloud",
  "retype-context",
  "retype-dict",
+ "retype-english",
  "retype-pinyin",
  "retype-types",
  "tracing",
 ]
 
 [[package]]
+name = "retype-english"
+version = "0.6.5"
+dependencies = [
+ "retype-types",
+]
+
+[[package]]
 name = "retype-ffi"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-dict",
  "retype-engine",
@@ -2431,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "retype-file-map"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "memmap2",
  "sha2",
@@ -2440,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "retype-learning"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2454,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "retype-pinyin"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "pinyin",
  "retype-types",
@@ -2462,7 +2470,7 @@ dependencies = [
 
 [[package]]
 name = "retype-settings-egui"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "chrono",
  "eframe",
@@ -2482,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "retype-sync"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "base64 0.22.1",
  "retype-ai",
@@ -2499,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "retype-tsf"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-ai",
  "retype-candidate-ui",
@@ -2519,11 +2527,11 @@ dependencies = [
 
 [[package]]
 name = "retype-types"
-version = "0.6.4"
+version = "0.6.5"
 
 [[package]]
 name = "retype-updater"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "serde_json",
  "sha2",
@@ -2533,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "retype-updater-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "retype-updater",
  "serde_json",

@@ -10,8 +10,16 @@ pub const MAX_BATCH: usize = 128;
 /// round trip between devices cannot count the same selection twice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncLearning {
+    #[serde(default)]
+    pub english: Vec<SyncEnglish>,
     pub words: Vec<SyncWord>,
     pub corrections: Vec<SyncCorrection>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncEnglish {
+    pub origin: String,
+    pub text: String,
+    pub count: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncWord {
@@ -40,6 +48,17 @@ impl SyncLearning {
                 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
         };
         self.words.len() <= 100_000
+            && self.english.len() <= 100_000
+            && self.english.iter().all(|w| {
+                origin(&w.origin)
+                    && w.count > 0
+                    && w.count <= 1_000_000_000
+                    && (Event::English {
+                        text: w.text.clone(),
+                    })
+                    .to_learning()
+                    .is_some()
+            })
             && self.corrections.len() <= 100_000
             && self.words.iter().all(|w| {
                 origin(&w.origin)
@@ -69,6 +88,9 @@ impl SyncLearning {
 /// Stable spellings, never dictionary-specific numeric syllable IDs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    English {
+        text: String,
+    },
     Chosen {
         text: String,
         pinyin: String,
@@ -89,6 +111,7 @@ pub enum Event {
 impl Event {
     pub fn from_learning(event: LearningEvent) -> Option<Self> {
         let converted = match event {
+            LearningEvent::EnglishWord { text } => Self::English { text },
             LearningEvent::CandidateChosen {
                 text,
                 syllables,
@@ -120,6 +143,14 @@ impl Event {
             (!ids.is_empty() && ids.len() <= 64).then_some(ids)
         }
         match self {
+            Self::English { text }
+                if (2..=64).contains(&text.len())
+                    && text.as_bytes()[0].is_ascii_alphabetic()
+                    && text.as_bytes()[text.len() - 1].is_ascii_alphabetic()
+                    && text.bytes().all(|b| b.is_ascii_alphabetic() || b == b'\'') =>
+            {
+                Some(LearningEvent::EnglishWord { text: text.clone() })
+            }
             Self::Chosen {
                 text,
                 pinyin,
@@ -157,6 +188,8 @@ pub struct Entry {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub english: Vec<(String, u64)>,
     pub entries: Vec<Entry>,
     pub corrections: Vec<(String, String, u32)>,
     #[serde(default)]
@@ -180,6 +213,7 @@ pub struct Usage {
 impl Snapshot {
     pub fn capture(user: &UserDict, learner: &Learner) -> Self {
         let mut snapshot = Self {
+            english: learner.english_snapshot(),
             entries: user
                 .snapshot()
                 .into_iter()
@@ -249,6 +283,7 @@ impl Snapshot {
             });
         }
         learner.restore_corrections(self.corrections.clone());
+        learner.restore_english(self.english.clone());
     }
 }
 

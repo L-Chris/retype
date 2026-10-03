@@ -189,7 +189,13 @@ impl Surface {
                         INK,
                     );
                     // Round upwards: pagination must never underestimate the painted width.
-                    ((galley.size().x + 22.0) * scale)
+                    ((galley.size().x
+                        + if state.status.contains(retype_types::StatusFlags::CHINESE) {
+                            22.0
+                        } else {
+                            10.0
+                        })
+                        * scale)
                         .ceil()
                         .max(36.0 * scale)
                         .min(available as f32) as i32
@@ -263,19 +269,29 @@ impl Surface {
             );
             for (i, (cell, galley)) in geometry.cells.iter().zip(&galleys).enumerate() {
                 let cell = Rect::from_min_max(cell.min / scale, cell.max / scale);
-                let selected = state.page_start + i == state.selected;
+                let chinese = state.status.contains(retype_types::StatusFlags::CHINESE);
+                let selected = state.page_start + i == state.selected
+                    && (chinese
+                        || state
+                            .status
+                            .contains(retype_types::StatusFlags::ENGLISH_SELECTED));
                 if selected {
                     painter.rect_filled(cell, 4, ACCENT);
                 }
-                painter.text(
-                    Pos2::new(cell.left() + 4.0, cell.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    (i + 1).to_string(),
-                    FontId::proportional(11.0),
-                    if selected { Color32::WHITE } else { MUTED },
-                );
+                if chinese {
+                    painter.text(
+                        Pos2::new(cell.left() + 4.0, cell.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        (i + 1).to_string(),
+                        FontId::proportional(11.0),
+                        if selected { Color32::WHITE } else { MUTED },
+                    );
+                }
                 painter.galley_with_override_text_color(
-                    Pos2::new(cell.left() + 17.0, cell.top() + 5.0),
+                    Pos2::new(
+                        cell.left() + if chinese { 17.0 } else { 4.0 },
+                        cell.top() + 5.0,
+                    ),
                     Arc::clone(galley),
                     if selected { Color32::WHITE } else { INK },
                 );
@@ -539,6 +555,7 @@ mod tests {
     }
     fn state(texts: &[&str]) -> RenderState {
         RenderState {
+            status: retype_types::StatusFlags::CHINESE,
             composition: "nihao".into(),
             page_size: texts.len(),
             candidates: texts

@@ -958,6 +958,31 @@ impl SettingsApp {
                     }
                 }
             });
+        ui.add_space(24.0);
+        ui.label(RichText::new("英文输入").strong());
+        ui.add_space(4.0);
+        card(ui, |ui| {
+            if switch_row(ui, &mut self.preferences.english.0, "智能英文输入") {
+                if let Err(error) =
+                    backend::set("EnglishDisabled", u32::from(!self.preferences.english.0))
+                {
+                    self.preferences.english.0 = !self.preferences.english.0;
+                    self.error = Some(format!("保存设置失败：{error}"));
+                }
+            }
+            ui.separator();
+            ui.add_enabled_ui(self.preferences.english.0, |ui| {
+                if switch_row(ui, &mut self.preferences.english.1, "拼写建议") {
+                    if let Err(error) = backend::set(
+                        "EnglishSpellingDisabled",
+                        u32::from(!self.preferences.english.1),
+                    ) {
+                        self.preferences.english.1 = !self.preferences.english.1;
+                        self.error = Some(format!("保存设置失败：{error}"));
+                    }
+                }
+            });
+        });
         if let Some(error) = &self.error {
             ui.colored_label(Color32::DARK_RED, error);
         }

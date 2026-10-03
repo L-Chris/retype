@@ -75,6 +75,7 @@ impl StatusFlags {
     pub const VOICE_OPTIMIZING: Self = Self(1 << 5);
     /// 处于降级状态（词库缺失 / host 不可用 / 云端熔断）
     pub const DEGRADED: Self = Self(1 << 6);
+    pub const ENGLISH_SELECTED: Self = Self(1 << 7);
 
     #[inline]
     pub const fn bits(self) -> u16 {
@@ -182,6 +183,10 @@ pub struct RerankOutcome {
 /// 内核要求平台层执行的异步副作用。**绝不在输入线程上执行。**
 #[derive(Debug, Clone, PartialEq)]
 pub enum SideEffect {
+    EnglishSuggest {
+        gen: Generation,
+        input: String,
+    },
     Rerank(RerankJob),
     Learn(crate::learning::LearningEvent),
     /// 请求采集一次上下文（TSF 侧异步读 ITfContext）

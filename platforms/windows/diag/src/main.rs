@@ -32,6 +32,7 @@ struct Cli {
     dict: String,
     inline: bool,
     bench: bool,
+    english: bool,
     no_cloud: bool,
     context: Option<String>,
     /// 覆盖 `DecodeOptions::word_bonus`，用来现场调参
@@ -49,6 +50,7 @@ impl Default for Cli {
             dict: DEFAULT_DICT.to_string(),
             inline: false,
             bench: false,
+            english: false,
             no_cloud: false,
             context: None,
             word_bonus: None,
@@ -71,6 +73,7 @@ retype-diag —— retype 输入内核的终端调试台
               文件不存在时会退化成「全量单字」模式，正好用来验证降级路径
   --inline    同步执行二刷（结果确定，便于断言）；默认走异步 LocalBackend
   --bench     跑一遍首刷延迟基准后退出
+  --english   使用英文补全模式；可与 --bench 组合
   --no-cloud  完全关闭云端，模拟断网
   --context   预设光标前文，用来观察二刷的重排效果
   --wb <f>    覆盖每词加分 word_bonus（默认取 DecodeOptions 的值）
@@ -129,6 +132,7 @@ fn parse_args(argv: &[String]) -> Result<Cli, String> {
             "--dict" => c.dict = val(&mut i)?,
             "--inline" => c.inline = true,
             "--bench" => c.bench = true,
+            "--english" => c.english = true,
             "--no-cloud" => c.no_cloud = true,
             "--context" => c.context = Some(val(&mut i)?),
             "--wb" => {
@@ -247,6 +251,7 @@ impl App {
         let kernel = Kernel::new(
             KernelConfig {
                 rerank_enabled: !cli.no_cloud,
+                chinese_on_start: !cli.english,
                 decode: decode_options(cli),
                 pinyin_scheme: cli.scheme,
                 ..Default::default()
@@ -436,6 +441,7 @@ fn report(acts: &[KernelAction]) {
 
 fn side_name(s: &retype_types::SideEffect) -> &'static str {
     match s {
+        retype_types::SideEffect::EnglishSuggest { .. } => "英文拼写建议",
         retype_types::SideEffect::Rerank(_) => "二刷请求",
         retype_types::SideEffect::Learn(_) => "学习回写",
         retype_types::SideEffect::CollectContext => "采集上下文",
@@ -574,22 +580,36 @@ fn key_ev(k: Key) -> InputEvent {
 /// 按键 → 候选上屏的本地路径必须远小于一帧（16.7ms）。
 fn bench(cli: &Cli) {
     const P99_BUDGET: Duration = Duration::from_millis(6);
-    let inputs: &[&str] = match cli.scheme {
-        PinyinScheme::Full => &[
-            "nihao",
-            "nihaomashijie",
-            "woxiangchifan",
-            "shanghai",
-            "xian",
-            "zhongguorenmin",
-            "jintiantianqibucuo",
-            "rengongzhineng",
-            "yuyanshurumodel",
-            "mingtianwanshangwomenyiqichifanba",
-        ],
-        PinyinScheme::Flypy => &[
-            "a", "m", "w", "y", "mwy", "woe", "nihc", "qiuu", "edu", "eedu", "edum",
-        ],
+    let inputs: &[&str] = if cli.english {
+        &[
+            "a",
+            "hel",
+            "translation",
+            "don't",
+            "HELLO",
+            "teh",
+            "hellp",
+            "programming",
+            "retype",
+        ]
+    } else {
+        match cli.scheme {
+            PinyinScheme::Full => &[
+                "nihao",
+                "nihaomashijie",
+                "woxiangchifan",
+                "shanghai",
+                "xian",
+                "zhongguorenmin",
+                "jintiantianqibucuo",
+                "rengongzhineng",
+                "yuyanshurumodel",
+                "mingtianwanshangwomenyiqichifanba",
+            ],
+            PinyinScheme::Flypy => &[
+                "a", "m", "w", "y", "mwy", "woe", "nihc", "qiuu", "edu", "eedu", "edum",
+            ],
+        }
     };
 
     // 基准要隔离二刷：关掉云端，只测本地首刷
@@ -606,6 +626,9 @@ fn bench(cli: &Cli) {
         KernelConfig {
             pinyin_scheme: cli.scheme,
             rerank_enabled: false,
+            chinese_on_start: !cli.english,
+            // This benchmark measures the synchronous first pass only.
+            english_spelling: !cli.english,
             decode: decode_options(cli),
             ..Default::default()
         },
@@ -654,9 +677,13 @@ fn bench(cli: &Cli) {
 
     // 顺带看几个真实解码结果，确认词库确实生效
     println!("\n── 抽样解码结果 ──");
-    let examples: &[&str] = match cli.scheme {
-        PinyinScheme::Full => &["nihaomashijie", "shanghai", "rengongzhineng", "xian"],
-        PinyinScheme::Flypy => &["a", "mwy", "woe", "nihc", "qiuu"],
+    let examples: &[&str] = if cli.english {
+        &["hel", "transl", "HEL", "don't"]
+    } else {
+        match cli.scheme {
+            PinyinScheme::Full => &["nihaomashijie", "shanghai", "rengongzhineng", "xian"],
+            PinyinScheme::Flypy => &["a", "mwy", "woe", "nihc", "qiuu"],
+        }
     };
     for s in examples {
         for c in s.chars() {

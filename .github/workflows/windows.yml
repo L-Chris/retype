@@ -1,0 +1,132 @@
+name: Windows validation and build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      register-tip:
+        type: boolean
+        default: false
+      source-ref:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RETYPE_GITHUB_REPO: ${{ github.repository }}
+
+jobs:
+  quality:
+    name: Format, Clippy and workspace tests
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-quality
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --features retype-learning/broker,retype-ai/service -- -D warnings
+      - run: cargo test --locked --workspace --features retype-learning/broker,retype-ai/service
+
+  tip:
+    name: TIP and payload (${{ matrix.arch }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: x86
+            target: i686-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-tip-${{ matrix.arch }}
+      - name: Build and validate payload
+        shell: pwsh
+        run: ./tools/ci/windows-payload.ps1 -Target '${{ matrix.target }}' -RegisterTip:$${{ inputs.register-tip && matrix.arch == 'x64' }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}
+          retention-days: 1
+          path: .ci/payload/${{ matrix.arch }}/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  settings:
+    name: Settings release binary
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-settings
+      - run: cargo build --locked --release --target x86_64-pc-windows-msvc -p retype-settings-egui
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-settings
+          path: target/x86_64-pc-windows-msvc/release/retype-settings-egui.exe
+          retention-days: 1
+          if-no-files-found: error
+
+  installer:
+    name: Assemble and validate installer
+    needs: [quality, tip, settings]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x64
+          path: .ci/payload/x64
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x86
+          path: .ci/payload/x86
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-settings
+          path: .ci/payload/x64
+      - name: Package installer
+        shell: pwsh
+        run: ./tools/ci/windows-installer.ps1 -Version '${{ inputs.version }}'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          include-hidden-files: true
+          retention-days: 7
+          path: |
+            dist/*-setup.exe
+            dist/*.sha256
+            .ci/payload/x64/bench.txt
+            .ci/payload/x64/update-check.json
+          if-no-files-found: error

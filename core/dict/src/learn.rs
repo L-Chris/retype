@@ -80,6 +80,7 @@ pub struct Learner {
     corrections: RwLock<HashMap<(String, String), u32>>,
     events: RwLock<Vec<LearningEvent>>,
     keep_events: usize,
+    english: RwLock<std::collections::BTreeMap<String, u64>>,
 }
 
 impl std::fmt::Debug for Learner {
@@ -101,6 +102,7 @@ impl Learner {
             corrections: RwLock::new(HashMap::new()),
             events: RwLock::new(Vec::new()),
             keep_events: 512,
+            english: RwLock::new(Default::default()),
         }
     }
 
@@ -114,6 +116,22 @@ impl Learner {
 
     pub fn user(&self) -> &Arc<UserDict> {
         &self.user
+    }
+
+    pub fn english_snapshot(&self) -> Vec<(String, u64)> {
+        self.english
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(word, count)| (word.clone(), *count))
+            .collect()
+    }
+    pub fn restore_english(&self, words: Vec<(String, u64)>) {
+        *self.english.write().unwrap_or_else(|p| p.into_inner()) = words
+            .into_iter()
+            .filter(|(word, count)| valid_english(word) && *count > 0)
+            .take(10_000)
+            .collect();
     }
 
     pub fn correction_count(&self, from: &str, to: &str) -> u32 {
@@ -288,8 +306,30 @@ impl Learner {
 }
 
 impl LearningStore for Learner {
+    fn english_words(&self, prefix: &str, limit: usize) -> Vec<(String, u64)> {
+        let mut words: Vec<_> = self
+            .english
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(word, count)| **count >= 2 && word.to_ascii_lowercase().starts_with(prefix))
+            .map(|(word, count)| (word.clone(), *count))
+            .collect();
+        words.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        words.truncate(limit);
+        words
+    }
     fn record(&self, event: LearningEvent) {
         match &event {
+            LearningEvent::EnglishWord { text } => {
+                if valid_english(text) {
+                    let mut words = self.english.write().unwrap_or_else(|p| p.into_inner());
+                    if words.len() < 10_000 || words.contains_key(text) {
+                        let count = words.entry(text.clone()).or_default();
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
             LearningEvent::CandidateChosen {
                 text, syllables, ..
             } => {
@@ -307,6 +347,13 @@ impl LearningStore for Learner {
         }
         self.push_event(event);
     }
+}
+
+fn valid_english(text: &str) -> bool {
+    (2..=64).contains(&text.len())
+        && text.as_bytes()[0].is_ascii_alphabetic()
+        && text.as_bytes()[text.len() - 1].is_ascii_alphabetic()
+        && text.bytes().all(|b| b.is_ascii_alphabetic() || b == b'\'')
 }
 
 #[cfg(test)]

@@ -145,6 +145,12 @@ impl KernelBackend for InlineBackend {
             let acts = { lock_or_recover(&self.kernel).handle(e) };
             for a in acts {
                 match a {
+                    KernelAction::Side(SideEffect::EnglishSuggest { gen, input }) => {
+                        pending.push_back(InputEvent::EnglishCompleted {
+                            gen,
+                            candidates: retype_english::correct(&input, 8),
+                        });
+                    }
                     KernelAction::Side(SideEffect::Rerank(job)) => {
                         let outcome = run_rerank(&self.cloud, &job);
                         pending.push_back(InputEvent::RerankCompleted {
@@ -211,6 +217,8 @@ pub struct LocalBackend {
     out: Sender<KernelAction>,
     rx: Receiver<KernelAction>,
     jobs: Sender<RerankJob>,
+    english_jobs: Sender<(u64, String)>,
+    english_pending: Receiver<(u64, String)>,
     learns: Sender<LearningEvent>,
     me: OnceLock<Weak<Self>>,
 }
@@ -236,6 +244,7 @@ impl LocalBackend {
         let (out, rx) = unbounded();
         let (jobs_tx, jobs_rx) = unbounded::<RerankJob>();
         let (learn_tx, learn_rx) = unbounded::<LearningEvent>();
+        let (english_jobs, english_rx) = crossbeam_channel::bounded(1);
         let b = Arc::new(Self {
             kernel: Mutex::new(kernel),
             cloud,
@@ -243,12 +252,32 @@ impl LocalBackend {
             out,
             rx,
             jobs: jobs_tx,
+            english_jobs,
+            english_pending: english_rx.clone(),
             learns: learn_tx,
             me: OnceLock::new(),
         });
         let _ = b.me.set(Arc::downgrade(&b));
         spawn_rerank_worker(Arc::downgrade(&b), jobs_rx, opts.rerank_debounce);
         spawn_learn_worker(Arc::downgrade(&b), learn_rx);
+        let weak = Arc::downgrade(&b);
+        let _ = std::thread::Builder::new()
+            .name("retype-english".into())
+            .spawn(move || {
+                while let Ok((gen, input)) = english_rx.recv() {
+                    let Some(b) = weak.upgrade() else { break };
+                    if lock_or_recover(&b.kernel).generation() != gen {
+                        continue;
+                    }
+                    let candidates =
+                        guarded("english", Vec::new(), || retype_english::correct(&input, 8));
+                    let actions = lock_or_recover(&b.kernel)
+                        .handle(InputEvent::EnglishCompleted { gen, candidates });
+                    for action in actions {
+                        let _ = b.out.send(action);
+                    }
+                }
+            });
         b
     }
 
@@ -327,7 +356,18 @@ impl KernelBackend for LocalBackend {
     }
 
     fn poll_action(&self) -> Option<KernelAction> {
-        self.rx.try_recv().ok()
+        while let Ok(action) = self.rx.try_recv() {
+            if let KernelAction::Render(ref render) = action {
+                if render.gen != self.with_kernel(|k| k.generation()) {
+                    continue;
+                }
+                // Selection/layout can change within one generation. Publish
+                // the latest state rather than a worker's earlier snapshot.
+                return Some(KernelAction::Render(self.render()));
+            }
+            return Some(action);
+        }
+        None
     }
 
     fn render(&self) -> RenderState {
@@ -361,6 +401,12 @@ impl LocalBackend {
         let mut out = Vec::with_capacity(acts.len());
         for a in acts {
             match a {
+                KernelAction::Side(SideEffect::EnglishSuggest { gen, input }) => {
+                    // Keep only the latest queued word; generation validation also
+                    // drops a result if typing advanced during the calculation.
+                    let _ = self.english_pending.try_recv();
+                    let _ = self.english_jobs.try_send((gen, input));
+                }
                 KernelAction::Side(SideEffect::Rerank(job)) => {
                     // 投递失败（worker 已退出）就静默放弃二刷，首刷结果照常可用
                     let _ = self.jobs.send(job);
@@ -378,5 +424,47 @@ impl LocalBackend {
 
     pub fn record_learning(&self, event: LearningEvent) {
         let _ = self.learns.send(event);
+    }
+}
+
+#[cfg(test)]
+mod english_async_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::{offline_cloud, KernelConfig};
+    use retype_types::{InputSource, Key, Modifiers};
+
+    #[test]
+    fn queued_spelling_render_cannot_restore_an_old_word() {
+        let cloud = offline_cloud(Duration::from_millis(10));
+        let user = Arc::new(retype_dict::UserDict::new());
+        let kernel = Kernel::new(
+            KernelConfig {
+                chinese_on_start: false,
+                english_spelling: false,
+                ..Default::default()
+            },
+            Arc::new(retype_dict::single_char_fallback()),
+            Arc::new(retype_dict::Learner::new(user)),
+            Arc::clone(&cloud),
+        );
+        let backend = LocalBackend::new(kernel, cloud);
+        let key = |key| InputEvent::Key {
+            key,
+            mods: Modifiers::NONE,
+            source: InputSource::Keyboard,
+        };
+        for c in "hel".chars() {
+            backend.submit(key(Key::Char(c)));
+        }
+        let old = backend.render();
+        backend.out.send(KernelAction::Render(old.clone())).unwrap();
+        backend.submit(key(Key::Char('l')));
+        assert!(backend.poll_action().is_none());
+        assert_eq!(backend.render().composition, "hell");
+        backend.out.send(KernelAction::Render(old)).unwrap();
+        backend.submit(key(Key::Space));
+        assert!(backend.poll_action().is_none());
+        assert!(backend.render().composition.is_empty());
     }
 }

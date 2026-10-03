@@ -1,0 +1,4 @@
+Source: https://github.com/wolfgarbe/SymSpell
+Commit: c239062ae02961df18ab7da1671d01b4388204e0
+File: SymSpell/frequency_dictionary_en_82_765.txt
+Derived from SCOWL and Google Books Ngram; see NOTICE.txt.

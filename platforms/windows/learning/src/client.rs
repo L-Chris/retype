@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Client {
+    english: Arc<Learner>,
     pub user: Arc<UserDict>,
     sender: SyncSender<Event>,
 }
@@ -32,15 +33,15 @@ impl Client {
     ) -> Arc<Self> {
         let user = Arc::new(UserDict::new());
         let (sender, receiver) = mpsc::sync_channel(1024);
+        let learner = Arc::new(Learner::with_system(Arc::new(UserDict::new()), system));
         let client = Arc::new(Self {
             user: Arc::clone(&user),
             sender,
+            english: Arc::clone(&learner),
         });
         let spawned = std::thread::Builder::new()
             .name("retype-learning-cache".into())
             .spawn(move || {
-                let local = Arc::new(UserDict::new());
-                let learner = Learner::with_system(local, system);
                 run(user, learner, receiver, fallback_host, endpoint);
             });
         if spawned.is_err() {
@@ -50,6 +51,9 @@ impl Client {
     }
 }
 impl LearningStore for Client {
+    fn english_words(&self, prefix: &str, limit: usize) -> Vec<(String, u64)> {
+        self.english.english_words(prefix, limit)
+    }
     fn record(&self, event: LearningEvent) {
         if let Some(event) = Event::from_learning(event) {
             if self.sender.try_send(event).is_err() {
@@ -79,7 +83,7 @@ pub fn launch_host(fallback: Option<&std::path::Path>) -> std::io::Result<()> {
 
 fn run(
     user: Arc<UserDict>,
-    learner: Learner,
+    learner: Arc<Learner>,
     receiver: Receiver<Event>,
     fallback: Option<PathBuf>,
     endpoint: Option<String>,

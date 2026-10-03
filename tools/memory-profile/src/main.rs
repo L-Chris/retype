@@ -84,6 +84,7 @@ fn candidate() {
     let mut surface = Surface::default();
     sample("candidate_fonts_loaded", start);
     let mut state = RenderState {
+        status: retype_types::StatusFlags::CHINESE,
         candidates: [
             "我是", "我说", "我市", "我想", "我上", "我时", "我司", "卧室",
         ]

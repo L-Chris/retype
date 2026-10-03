@@ -171,6 +171,8 @@ impl Session {
         let cloud = offline_cloud(Duration::from_millis(200));
         let kernel = Kernel::new(
             KernelConfig {
+                english_enabled: crate::preferences::english_options().0,
+                english_spelling: crate::preferences::english_options().1,
                 pinyin_scheme: crate::preferences::scheme(),
                 decode: retype_pinyin::DecodeOptions {
                     page_size: 8,

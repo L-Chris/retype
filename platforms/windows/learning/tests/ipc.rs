@@ -126,6 +126,7 @@ fn cloud_learning_merge_and_export_use_the_real_authenticated_pipe() {
         serde_json::from_slice(&bytes).unwrap()
     };
     let incoming = SyncLearning {
+        english: vec![],
         words: vec![SyncWord {
             origin: "remote-fixture".into(),
             pinyin: "ni'hao".into(),

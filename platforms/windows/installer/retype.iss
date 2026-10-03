@@ -139,6 +139,9 @@ Source: "LICENSE"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "NOTICE.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "data\dict\raw\wanxiang-base\LICENSE"; DestDir: "{code:GetPayloadDir}"; DestName: "LICENSE-wanxiang"; Flags: ignoreversion
 Source: "data\dict\raw\LICENSE-Unicode.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\english\LICENSE-SymSpell"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\english\LICENSE-SCOWL"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "data\dict\raw\english\LICENSE-Google-Ngram"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 
 [INI]
 Filename: "{code:GetPayloadDir}\installed.ini"; Section: "Installation"; Key: "Version"; String: "{#MyAppVersion}"

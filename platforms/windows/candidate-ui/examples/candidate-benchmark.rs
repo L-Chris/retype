@@ -7,6 +7,7 @@ fn main() {
     let start = Instant::now();
     let mut surface = Surface::default();
     let mut state = RenderState {
+        status: retype_types::StatusFlags::CHINESE,
         composition: "woui".into(),
         page_size: 8,
         candidates: [

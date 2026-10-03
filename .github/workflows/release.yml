@@ -1,46 +1,37 @@
 name: Release
-
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的 tag（如 v0.1.0），仅手动触发时使用"
+        description: Release tag (e.g. v0.6.4)
         required: true
-
 permissions:
-  contents: write
-
-# 同一个 tag 的重复推送不互相取消：发布是不可重入的，宁可排队也不要半途中断
+  contents: read
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  windows:
-    name: 构建并发布 Windows 产物
-    runs-on: windows-latest
-    timeout-minutes: 90
-
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
-
-      # ── 1. 版本一致性：tag 与 Cargo workspace 版本必须相同 ────────────
-      # 这一步放在最前面，因为它失败时不该浪费任何构建时间。
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: 校验 tag 与版本号一致
         id: version
         shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            tag="${{ inputs.tag }}"
+            tag="$REQUESTED_TAG"
           else
             tag="$GITHUB_REF_NAME"
           fi
@@ -76,210 +67,36 @@ jobs:
           fi
           echo "发布说明: $notes"
 
-      - uses: dtolnay/rust-toolchain@stable
+
+  build:
+    needs: metadata
+    uses: ./.github/workflows/windows.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      register-tip: true
+      source-ref: ${{ needs.metadata.outputs.tag }}
+
+  publish:
+    name: Publish validated installer
+    needs: [metadata, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
         with:
-          targets: x86_64-pc-windows-msvc,i686-pc-windows-msvc
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v8
         with:
-          shared-key: release-windows
-
-      # ── 3. 质量门 ────────────────────────────────────────────────────────
-      - name: rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy (-D warnings)
-        run: cargo clippy --workspace --all-targets --features retype-learning/broker,retype-ai/service -- -D warnings
-
-      - name: 测试
-        run: cargo test --workspace --features retype-learning/broker,retype-ai/service
-
-      # ── 4. 构建产物 ──────────────────────────────────────────────────────
-      # RETYPE_GITHUB_REPO 会被 core/updater 的 option_env! 烘进二进制，
-      # 这样发布出去的 retype-updater.exe 天然知道自己的仓库，用户不需要传 --repo。
-      - name: 构建 release 二进制 (x64)
-        env:
-          RETYPE_GITHUB_REPO: ${{ github.repository }}
-        run: |
-          cargo build --release --target x86_64-pc-windows-msvc `
-            -p retype-tsf -p retype-diag -p retype-updater-cli -p retype-dict-build
-          if ($LASTEXITCODE -ne 0) { throw 'Windows payload build failed' }
-          cargo build --release --target x86_64-pc-windows-msvc -p retype-learning --features broker
-          if ($LASTEXITCODE -ne 0) { throw 'Learning broker build failed' }
-          cargo build --release --target x86_64-pc-windows-msvc -p retype-ai --features service
-          if ($LASTEXITCODE -ne 0) { throw 'AI service build failed' }
-          cargo build --release --target x86_64-pc-windows-msvc -p retype-sync
-          if ($LASTEXITCODE -ne 0) { throw 'Cloud sync service build failed' }
-
-      # 32 位进程只会加载 32 位 TIP（docs/windows-tsf.md）。
-      # 安装器将 x86 DLL 放入 x86 子目录，与 x64 共用词库。
-      - name: 构建并测试 x86 TIP
-        run: |
-          cargo build --release --target i686-pc-windows-msvc -p retype-tsf
-          if ($LASTEXITCODE -ne 0) { throw 'x86 build failed' }
-          cargo test --release --target i686-pc-windows-msvc -p retype-tsf
-
-      - name: 构建词库
-        run: |
-          cargo run --release --target x86_64-pc-windows-msvc -p retype-dict-build -- --out data/dict/retype-dict.tsv
-
-      - name: TSF 自检
-        run: cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf
-
-      - name: TSF 系统注册与卸载验收（临时 Windows runner）
-        shell: pwsh
-        run: |
-          $dll = Join-Path $env:GITHUB_WORKSPACE 'target\x86_64-pc-windows-msvc\release\retype_ime.dll'
-          $regsvr = "$env:SystemRoot\System32\regsvr32.exe"
-          $clsid = '{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}'
-          $classKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$clsid"
-          $tipKey = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\$clsid"
-          if ((Test-Path $classKey) -or (Test-Path $tipKey)) { throw '验收要求干净 runner' }
-          try {
-            # 重复注册也应成功，覆盖升级时再次注册的路径。
-            1..2 | ForEach-Object {
-              $p = Start-Process $regsvr -ArgumentList "/s `"$dll`"" -WindowStyle Hidden -Wait -PassThru
-              if ($p.ExitCode -ne 0) { throw "注册失败: $($p.ExitCode)" }
-            }
-            & .\platforms\windows\installer\user-profile.ps1
-            & .\platforms\windows\installer\user-profile.ps1
-            cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf installed_tip_ -- --ignored --test-threads=1
-            if ($LASTEXITCODE -ne 0) { throw '注册后无法枚举或加载 TIP' }
-          } finally {
-            & .\platforms\windows\installer\user-profile.ps1 -Uninstall
-            $p = Start-Process $regsvr -ArgumentList "/s /u `"$dll`"" -WindowStyle Hidden -Wait -PassThru
-            if ($p.ExitCode -ne 0) { throw "注销失败: $($p.ExitCode)" }
-          }
-          if ((Test-Path $classKey) -or (Test-Path $tipKey)) { throw '注销后仍有注册残留' }
-
-      # 延迟预算是 P1 的量化形式，发布前必须复核一遍（release 构建下的真实数字）
-      - name: 首刷延迟基准
-        run: |
-          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --scheme full --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt
-          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --scheme flypy --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt -Append
-          if (Select-String -Path bench.txt -Pattern 'P99 超预算' -Quiet) {
-            Write-Error '首刷 P99 超出 6ms 预算，发布中止'
-            exit 1
-          }
-
-      - name: 验证更新器已烘入仓库地址
-        env:
-          # runner 发出的匿名 api.github.com 请求经常被限流成 HTTP 403，
-          # 那样这一步就只剩「退出码 2」可看，验不出烘入的仓库对不对。
-          # 更新器会读 GITHUB_TOKEN（见 updater/src/main.rs 的 parse_args）。
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 不带 --repo 也应该能工作（仓库地址来自编译期 option_env!）
-          .\target\x86_64-pc-windows-msvc\release\retype-updater.exe check --json | Tee-Object -FilePath update-check.json
-          $code = $LASTEXITCODE
-          # 0 已是最新 / 10 有可用更新 / 2 网络或 API 问题 —— 都不该阻塞发布
-          # 只有 1（参数错误，含「仓库未配置」）说明烘入失败，必须挡下来
-          if ($code -eq 1) { Write-Error "更新器没能确定仓库地址（退出码 1），RETYPE_GITHUB_REPO 烘入失败"; exit 1 }
-          if ($code -gt 10) { Write-Error "更新器返回意外退出码 $code"; exit 1 }
-          # 再验一层：成功时输出里有 release_page，失败时有 error（含它请求的 URL），
-          # 两者都必须指向本仓库。仓库还没有任何 release 时无从验证，跳过。
-          $result = Get-Content update-check.json -Raw | ConvertFrom-Json
-          $evidence = if ($result.error) { $result.error } else { $result.release_page }
-          if ($evidence -and $evidence -notlike "*${{ github.repository }}*") {
-            Write-Error "更新器指向的不是 ${{ github.repository }}：$evidence"
-            exit 1
-          }
-          Write-Host "更新器自检通过（退出码 $code；证据 $evidence）"
-          # pwsh 步骤结束时 GitHub 会补一句 `exit $LASTEXITCODE`，
-          # 更新器的 2（网络/API 问题）会被当成步骤失败。判定已做完，显式归零。
-          exit 0
-
-      # ── 5. 打包安装器 ────────────────────────────────────────────────────
-      # 用 Inno Setup 出 setup.exe，而不是 zip：
-      # 输入法要写 HKLM 的 CTF 注册表键、要把 8.9MB 词库放进 Program Files、
-      # 还要处理「TIP DLL 正被所有进程占用」—— 让用户手动解压再跑脚本是不负责任的。
-      # Restart Manager 负责占用检测与重启后替换，自动更新因此变成
-      # 「下载 setup.exe → 校验 sha256 → /VERYSILENT 静默升级」。
-      - name: Build Windows settings
-        shell: pwsh
-        run: |
-          cargo build --release --target x86_64-pc-windows-msvc -p retype-settings-egui
-          if ($LASTEXITCODE) { throw 'Settings build failed' }
-          cargo test -p retype-settings-egui
-          if ($LASTEXITCODE) { throw 'Settings tests failed' }
-
-      - name: 安装 Inno Setup
-        shell: pwsh
-        run: |
-          # choco 装到 Program Files (x86)，winget 装到 LOCALAPPDATA\Programs，
-          # 逐个探测而不是硬编码一条路径
-          $candidates = @(
-            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-            "C:\Program Files\Inno Setup 6\ISCC.exe",
-            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-          )
-          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $iscc) {
-            choco install innosetup --no-progress -y
-            if ($LASTEXITCODE -ne 0) { throw "choco 安装 Inno Setup 失败" }
-            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          }
-          if (-not $iscc) { throw "装完仍找不到 ISCC.exe，探测过: $($candidates -join ', ')" }
-          Write-Host "ISCC: $iscc"
-          & $iscc 2>&1 | Select-String -Pattern "Inno Setup" | Select-Object -First 1
-          "ISCC=$iscc" >> $env:GITHUB_ENV
-
-      - name: 构建安装器
-        shell: pwsh
-        run: |
-          # RepoRoot 传绝对路径，BaseDir/OutDir 相对它 —— 见 retype.iss 顶部的路径约定
-          & $env:ISCC `
-            "/DMyAppVersion=$env:RETYPE_VERSION" `
-            "/DRepoRoot=$env:GITHUB_WORKSPACE" `
-            "/DBaseDir=target\x86_64-pc-windows-msvc\release" `
-            "/DOutDir=dist" `
-            "platforms\windows\installer\retype.iss"
-          if ($LASTEXITCODE -ne 0) { throw "ISCC 构建失败，退出码 $LASTEXITCODE" }
-
-      # 校验文件必须是 coreutils 的 `<hex>  <文件名>` 格式，且**不带 BOM** ——
-      # core/updater 的 parse_sha256sum 虽然容忍 BOM，但没必要依赖那份宽容。
-      - name: 生成 sha256
-        shell: pwsh
-        run: |
-          $exe = "dist\retype-$env:RETYPE_VERSION-windows-x64-setup.exe"
-          if (-not (Test-Path $exe)) { throw "安装器没生成: $exe" }
-          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLower()
-          $name = Split-Path $exe -Leaf
-          [System.IO.File]::WriteAllText(
-            "$exe.sha256", "$hash  $name`n", (New-Object System.Text.UTF8Encoding($false)))
-          Write-Host "$hash  $name"
-
-      - name: 列出产物
-        shell: bash
-        run: |
-          ls -la dist/
-          echo "--- sha256 ---"
-          cat dist/*.sha256
-
-      - name: 上传 workflow 产物
-        uses: actions/upload-artifact@v7
+          name: windows-installer
+          path: .
+      - uses: softprops/action-gh-release@v3
         with:
-          name: retype-${{ steps.version.outputs.version }}-windows-x64
-          path: |
-            dist/*-setup.exe
-            dist/*.sha256
-            bench.txt
-            update-check.json
-          if-no-files-found: error
-
-      # ── 6. 发布 GitHub Release ───────────────────────────────────────────
-      # 产物名必须与 core/updater 的 Platform::asset_suffix() 对齐
-      # （-windows-x64-setup.exe），否则更新器挑不到安装包。
-      - name: 发布 Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: ${{ steps.version.outputs.tag }}
-          body_path: docs/releases/${{ steps.version.outputs.tag }}.md
+          tag_name: ${{ needs.metadata.outputs.tag }}
+          name: ${{ needs.metadata.outputs.tag }}
+          body_path: docs/releases/${{ needs.metadata.outputs.tag }}.md
           files: |
             dist/*-setup.exe
             dist/*.sha256
           fail_on_unmatched_files: true
-          # 发布说明由 docs/releases/<tag>.md 手写，不要让 action 再追加一份自动生成的 changelog
           generate_release_notes: false
