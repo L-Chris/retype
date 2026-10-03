@@ -189,13 +189,7 @@ impl Surface {
                         INK,
                     );
                     // Round upwards: pagination must never underestimate the painted width.
-                    ((galley.size().x
-                        + if state.status.contains(retype_types::StatusFlags::CHINESE) {
-                            22.0
-                        } else {
-                            10.0
-                        })
-                        * scale)
+                    ((galley.size().x + 22.0) * scale)
                         .ceil()
                         .max(36.0 * scale)
                         .min(available as f32) as i32
@@ -214,6 +208,10 @@ impl Surface {
     ) -> Bitmap {
         self.initialize(scale);
         let pad = (4.0 * scale).round();
+        let chinese = state.status.contains(retype_types::StatusFlags::CHINESE);
+        // Both modes show candidate numbers. Match measure(), retaining one
+        // point of rounding slack between measured and available widths.
+        let text_padding = 21.0;
         let galleys = self.context.fonts_mut(|fonts| {
             state
                 .visible()
@@ -224,7 +222,7 @@ impl Surface {
                         candidate.text.clone(),
                         FontId::proportional(CANDIDATE_FONT_SIZE),
                         INK,
-                        (*width as f32 / scale - 21.0).max(1.0),
+                        (*width as f32 / scale - text_padding).max(1.0),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -269,7 +267,6 @@ impl Surface {
             );
             for (i, (cell, galley)) in geometry.cells.iter().zip(&galleys).enumerate() {
                 let cell = Rect::from_min_max(cell.min / scale, cell.max / scale);
-                let chinese = state.status.contains(retype_types::StatusFlags::CHINESE);
                 let selected = state.page_start + i == state.selected
                     && (chinese
                         || state
@@ -278,20 +275,15 @@ impl Surface {
                 if selected {
                     painter.rect_filled(cell, 4, ACCENT);
                 }
-                if chinese {
-                    painter.text(
-                        Pos2::new(cell.left() + 4.0, cell.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        (i + 1).to_string(),
-                        FontId::proportional(11.0),
-                        if selected { Color32::WHITE } else { MUTED },
-                    );
-                }
+                painter.text(
+                    Pos2::new(cell.left() + 4.0, cell.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    (i + 1).to_string(),
+                    FontId::proportional(11.0),
+                    if selected { Color32::WHITE } else { MUTED },
+                );
                 painter.galley_with_override_text_color(
-                    Pos2::new(
-                        cell.left() + if chinese { 17.0 } else { 4.0 },
-                        cell.top() + 5.0,
-                    ),
+                    Pos2::new(cell.left() + 17.0, cell.top() + 5.0),
                     Arc::clone(galley),
                     if selected { Color32::WHITE } else { INK },
                 );
@@ -607,6 +599,53 @@ mod tests {
             assert_eq!(bitmap.geometry.hit_test(0.0, 0.0), None);
         }
     }
+    #[test]
+    fn english_completion_words_stay_on_one_row_at_multiple_scales() {
+        let mut surface = Surface::default();
+        let mut state = state(&[
+            "article",
+            "articles",
+            "artist",
+            "artists",
+            "artificial",
+            "artistic",
+            "artillery",
+        ]);
+        state.status = retype_types::StatusFlags::default();
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let widths = surface.measure(&state, (472.0 * scale) as i32, scale);
+            let bitmap = surface.render(
+                &state,
+                &widths,
+                (2.0 * scale) as i32,
+                (480.0 * scale) as i32,
+                scale,
+            );
+            let single_line_height = surface.context.fonts_mut(|fonts| {
+                state
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        let galley = fonts.layout_no_wrap(
+                            candidate.text.clone(),
+                            FontId::proportional(CANDIDATE_FONT_SIZE),
+                            INK,
+                        );
+                        (galley.size().y * scale).ceil() + (10.0 * scale).round()
+                    })
+                    .fold((30.0 * scale).round(), f32::max)
+            });
+            let expected_height = single_line_height + 2.0 * (4.0 * scale).round();
+            assert_eq!(bitmap.geometry.height, expected_height as usize);
+            for (i, cell) in bitmap.geometry.cells.iter().enumerate() {
+                assert_eq!(
+                    bitmap.geometry.hit_test(cell.center().x, cell.center().y),
+                    Some(i)
+                );
+            }
+        }
+    }
+
     #[test]
     fn long_phrase_wraps_without_ellipsis_and_atlas_survives_updates() {
         let mut surface = Surface::default();

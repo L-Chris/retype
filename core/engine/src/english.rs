@@ -65,6 +65,13 @@ impl Kernel {
                 self.refresh_english(actions);
             }
             Key::Escape if self.has_composition() => self.commit_english(None, "", actions),
+            Key::Char(d @ '1'..='8')
+                if (d as usize - '1' as usize) < self.current_page_size()
+                    && self.page_start + (d as usize - '1' as usize) < self.candidates.len() =>
+            {
+                let index = self.page_start + (d as usize - '1' as usize);
+                self.commit_english(Some(index), " ", actions);
+            }
             Key::Tab if !mods.contains(Modifiers::SHIFT) && !self.candidates.is_empty() => {
                 self.commit_english(Some(self.selected), " ", actions)
             }

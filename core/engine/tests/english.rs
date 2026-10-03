@@ -121,7 +121,7 @@ fn case_apostrophes_punctuation_and_shortcuts_preserve_text() {
         commits(&key(&mut k, Key::Space, Modifiers::NONE)),
         ["don't "]
     );
-    for ending in [Key::Char('4'), Key::Char('-'), Key::Left] {
+    for ending in [Key::Char('0'), Key::Char('9'), Key::Char('-'), Key::Left] {
         type_word(&mut k, "test");
         let actions = key(&mut k, ending, Modifiers::NONE);
         assert_eq!(commits(&actions), ["test"]);
@@ -131,6 +131,72 @@ fn case_apostrophes_punctuation_and_shortcuts_preserve_text() {
     let actions = key(&mut k, Key::Char('a'), Modifiers::CTRL);
     assert_eq!(commits(&actions), ["word"]);
     assert!(actions.contains(&KernelAction::PassThrough));
+}
+#[test]
+fn digit_selects_visible_candidate_and_learns_without_the_space() {
+    let mut k = kernel();
+    type_word(&mut k, "art");
+    let word = k.render_state().candidates[1].text.clone();
+    let actions = key(&mut k, Key::Char('2'), Modifiers::NONE);
+    assert_eq!(commits(&actions), [format!("{word} ")]);
+    assert!(!actions.contains(&KernelAction::PassThrough));
+    assert!(actions.iter().any(|a| matches!(a,
+        KernelAction::Side(SideEffect::Learn(LearningEvent::EnglishWord { text })) if text == &word)));
+    assert!(!k.has_composition());
+}
+
+#[test]
+fn digit_selects_current_page_and_cannot_select_hidden_candidate() {
+    let mut k = kernel();
+    type_word(&mut k, "art");
+    let count = k.render_state().candidates.len();
+    assert!(count > 4);
+    k.layout_candidates(&vec![100; count], 202, 2);
+    key(&mut k, Key::Down, Modifiers::NONE);
+    key(&mut k, Key::PageDown, Modifiers::NONE);
+    let state = k.render_state();
+    assert_eq!(state.page_start, 2);
+    let word = state.visible()[1].text.clone();
+    assert_eq!(
+        commits(&key(&mut k, Key::Char('2'), Modifiers::NONE)),
+        [format!("{word} ")]
+    );
+
+    type_word(&mut k, "art");
+    let count = k.render_state().candidates.len();
+    k.layout_candidates(&vec![100; count], 202, 2);
+    let actions = key(&mut k, Key::Char('3'), Modifiers::NONE);
+    assert_eq!(commits(&actions), ["art"]);
+    assert!(actions.contains(&KernelAction::PassThrough));
+}
+
+#[test]
+fn digits_remain_literal_without_candidates_or_with_a_shortcut_modifier() {
+    let mut k = kernel();
+    for text in ["", "zzzzzzzzzz"] {
+        type_word(&mut k, text);
+        assert!(k.render_state().candidates.is_empty());
+        let actions = key(&mut k, Key::Char('2'), Modifiers::NONE);
+        assert!(actions.contains(&KernelAction::PassThrough));
+        assert_eq!(
+            commits(&actions),
+            if text.is_empty() {
+                vec![]
+            } else {
+                vec![text.to_string()]
+            }
+        );
+    }
+    type_word(&mut k, "art");
+    let actions = key(&mut k, Key::Char('2'), Modifiers::CTRL);
+    assert_eq!(commits(&actions), ["art"]);
+    assert!(actions.contains(&KernelAction::PassThrough));
+    type_word(&mut k, "python");
+    assert_eq!(
+        commits(&key(&mut k, Key::Escape, Modifiers::NONE)),
+        ["python"]
+    );
+    assert!(key(&mut k, Key::Char('3'), Modifiers::NONE).contains(&KernelAction::PassThrough));
 }
 #[test]
 fn escape_keeps_text_reset_clears_and_late_spelling_is_ignored() {
