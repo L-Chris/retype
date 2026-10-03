@@ -220,7 +220,9 @@ mod tests {
             let _language = InputLanguage(profiles.clone(), profiles.GetCurrentLanguage()?);
             // CI starts with an English input language. Enabling a Chinese
             // profile alone does not switch the host's input language to it.
-            profiles.ChangeCurrentLanguage(LANGID_ZH_CN)?;
+            profiles
+                .ChangeCurrentLanguage(LANGID_ZH_CN)
+                .inspect_err(|error| eprintln!("switching CI host to Chinese failed: {error}"))?;
             assert_eq!(profiles.GetCurrentLanguage()?, LANGID_ZH_CN);
             manager
                 .ActivateProfile(
