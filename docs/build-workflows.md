@@ -22,4 +22,6 @@ pwsh -File tools/ci/windows-payload.ps1 -Target x86_64-pc-windows-msvc
 
 Only use `-RegisterTip` on a disposable CI machine: it writes and removes machine/user input-method registration.
 
-The installed-DLL check verifies profile enumeration, loading, activation, and the selected profile in a private TSF host. It initializes the host's Chinese input language before selecting the Chinese profile, then restores the process's input language and deactivates TSF during cleanup.
+The service runner verifies machine registration/unregistration, current-user enablement, profile enumeration, category registration, and loading of the installed DLL. It cannot switch to a Chinese desktop input language, so it does not run the interactive profile-activation probe. Ordinary TSF host tests still cover composition, commits, and key routing.
+
+On a desktop with retype installed and Chinese input configured, run `cargo test -p retype-tsf --lib installed_tip_can_activate_in_test_process -- --ignored --test-threads=1` to verify profile activation. The probe initializes its private TSF host, selects Chinese within its process, and restores the input language during cleanup.

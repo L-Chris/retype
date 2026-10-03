@@ -34,15 +34,6 @@ if ($LASTEXITCODE) { throw 'TIP tests failed' }
 
 if ($RegisterTip) {
     if ($arch -ne 'x64') { throw 'Machine registration requires the x64 runner payload' }
-    # Hosted runners start with an English-only language list. Registering a
-    # Chinese TIP does not provision its host input language. Prepare the same
-    # language environment as a Chinese desktop before testing activation.
-    $languages = Get-WinUserLanguageList
-    if (-not ($languages | Where-Object LanguageTag -eq 'zh-Hans-CN')) {
-        $languages.Add('zh-Hans-CN')
-        Set-WinUserLanguageList -LanguageList $languages -Force
-    }
-    Start-Process "$env:SystemRoot\System32\ctfmon.exe" -WindowStyle Hidden
     $dll = Join-Path $PWD "$stage\retype_ime.dll"
     $regsvr = "$env:SystemRoot\System32\regsvr32.exe"
     $clsid = '{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}'
@@ -56,7 +47,10 @@ if ($RegisterTip) {
         }
         & .\platforms\windows\installer\user-profile.ps1
         & .\platforms\windows\installer\user-profile.ps1
-        & $testExe installed_tip_ --ignored --test-threads=1
+        # The service runner has no switchable Chinese desktop input language.
+        # Keep registration/enumeration/load coverage here; profile switching
+        # is exercised by installed_tip_can_activate_in_test_process on a desktop.
+        & $testExe installed_tip_is_discoverable_and_loadable --ignored --test-threads=1
         if ($LASTEXITCODE) { throw 'Installed TIP enumeration/loading failed' }
     } finally {
         & .\platforms\windows\installer\user-profile.ps1 -Uninstall
