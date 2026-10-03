@@ -3,6 +3,14 @@
 use std::fs::File;
 use std::{fs::OpenOptions, io, path::Path};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileIdentity {
+    #[cfg(windows)]
+    Windows(u64, u64),
+    #[cfg(not(windows))]
+    Snapshot([u8; 32]),
+}
+
 #[derive(Debug)]
 pub struct ReadOnlyFile {
     // Keep the no-write-sharing handle alive until after the view is unmapped.
@@ -12,7 +20,7 @@ pub struct ReadOnlyFile {
     data: Box<[u8]>,
     #[cfg(windows)]
     _file: File,
-    identity: (u64, u64),
+    identity: FileIdentity,
 }
 impl ReadOnlyFile {
     #[allow(unsafe_code)]
@@ -42,7 +50,7 @@ impl ReadOnlyFile {
             if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
                 return Err(io::Error::last_os_error());
             }
-            let identity = (
+            let identity = FileIdentity::Windows(
                 info.dwVolumeSerialNumber as u64,
                 ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
             );
@@ -58,25 +66,24 @@ impl ReadOnlyFile {
         }
         #[cfg(not(windows))]
         {
+            use sha2::{Digest, Sha256};
             use std::io::Read;
-            let modified = file
-                .metadata()?
-                .modified()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as u64);
             let mut data = Vec::new();
             file.take(maximum.saturating_add(1))
                 .read_to_end(&mut data)?;
             if data.len() as u64 > maximum {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
+            // Snapshot bytes, rather than size/timestamps, identify the loaded
+            // generation: replacement or in-place writes can preserve both.
+            let identity = FileIdentity::Snapshot(Sha256::digest(&data).into());
             Ok(Self {
                 data: data.into_boxed_slice(),
-                identity: (size, modified),
+                identity,
             })
         }
     }
-    pub fn identity(&self) -> (u64, u64) {
+    pub fn identity(&self) -> FileIdentity {
         self.identity
     }
 }

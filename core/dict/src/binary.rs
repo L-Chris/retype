@@ -99,7 +99,7 @@ pub fn load(reader: impl Read) -> Result<(Dictionary, LoadStats), DictError> {
     let stats = stats(&dict);
     Ok((dict, stats))
 }
-type CacheKey = (PathBuf, u64, u64);
+type CacheKey = (PathBuf, retype_file_map::FileIdentity);
 /// Background-thread load: weak ownership shares validated images without
 /// keeping obsolete dictionary generations alive after the last session exits.
 pub fn open_shared(path: &Path) -> Result<Arc<Dictionary>, DictError> {
@@ -109,8 +109,7 @@ pub fn open_shared(path: &Path) -> Result<Arc<Dictionary>, DictError> {
         path,
         crate::compact::MAX_BYTES,
     )?);
-    let (volume, file) = image.identity();
-    let key = (std::fs::canonicalize(path)?, volume, file);
+    let key = (std::fs::canonicalize(path)?, image.identity());
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
@@ -309,6 +308,13 @@ mod tests {
         bytes.clear();
         compile("泥\tni\t100\n".as_bytes(), &mut bytes)?;
         std::fs::write(&replacement, bytes)?;
+        // Replacements may have the same size and filesystem timestamp.
+        // Snapshot identity must still distinguish their contents.
+        #[cfg(not(windows))]
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)?
+            .set_times(std::fs::FileTimes::new().set_modified(path.metadata()?.modified()?))?;
         std::fs::rename(replacement, &path)?;
         let c = open_shared(&path)?;
         assert!(!Arc::ptr_eq(&a, &c));
