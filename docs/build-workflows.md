@@ -21,3 +21,5 @@ pwsh -File tools/ci/windows-payload.ps1 -Target x86_64-pc-windows-msvc
 ```
 
 Only use `-RegisterTip` on a disposable CI machine: it writes and removes machine/user input-method registration.
+
+The installed-DLL check verifies profile enumeration, loading, activation against a private TSF thread manager, language-bar attachment, and deactivation cleanup. It does not assert the service runner's selected desktop profile; interactive input-method switching still needs a desktop host.
