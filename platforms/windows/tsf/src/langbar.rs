@@ -85,6 +85,55 @@ use windows::Win32::{
 };
 use windows_core::{implement, w, Interface, Ref, Result, BOOL, BSTR, GUID};
 
+struct MenuOwner {
+    window: HWND,
+    owned: bool,
+}
+impl MenuOwner {
+    fn for_window(window: HWND) -> Result<Self> {
+        // SAFETY: Read-only ownership query. A fallback window is hidden and
+        // created on the calling TSF apartment; no host window is modified.
+        unsafe {
+            if !window.is_invalid()
+                && GetWindowThreadProcessId(window, None)
+                    == windows::Win32::System::Threading::GetCurrentThreadId()
+            {
+                return Ok(Self {
+                    window,
+                    owned: false,
+                });
+            }
+            Ok(Self {
+                window: CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    w!("STATIC"),
+                    w!("retype menu owner"),
+                    WS_POPUP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?,
+                owned: true,
+            })
+        }
+    }
+}
+impl Drop for MenuOwner {
+    fn drop(&mut self) {
+        if self.owned {
+            // SAFETY: Only the fallback created on this apartment is destroyed.
+            unsafe {
+                let _ = DestroyWindow(self.window);
+            }
+        }
+    }
+}
+
 pub(crate) struct LanguageBar {
     manager: ITfLangBarItemMgr,
     item: ITfLangBarItemButton,
@@ -234,21 +283,49 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
             self.action(edit::Work::Toggle)
         } else if click == TF_LBI_CLK_RIGHT {
             guarded(|| {
-                // SAFETY: Modal menu belongs to the foreground host; Windows returns a command ID.
+                crate::settings_log::event("launcher", "menu_open_requested", 0, "right click");
+                // SAFETY: Menu owner belongs to this apartment; Windows returns a command ID.
                 unsafe {
+                    let foreground = GetForegroundWindow();
+                    let owner = MenuOwner::for_window(foreground)?;
+                    crate::settings_log::event(
+                        "launcher",
+                        "menu_owner",
+                        0,
+                        format!(
+                            "fallback={} caller_tid={} foreground_tid={}",
+                            owner.owned,
+                            windows::Win32::System::Threading::GetCurrentThreadId(),
+                            GetWindowThreadProcessId(foreground, None)
+                        ),
+                    );
                     let menu = CreatePopupMenu()?;
                     let result = (|| -> Result<u32> {
                         AppendMenuW(menu, MF_STRING, 1, w!("设置"))?;
-                        Ok(TrackPopupMenu(
+                        SetLastError(ERROR_SUCCESS);
+                        let id = TrackPopupMenu(
                             menu,
                             TPM_RETURNCMD | TPM_NONOTIFY,
                             point.x,
                             point.y,
                             None,
-                            GetForegroundWindow(),
+                            owner.window,
                             None,
                         )
-                        .0 as u32)
+                        .0 as u32;
+                        let error = if id == 0 { GetLastError().0 } else { 0 };
+                        crate::settings_log::event(
+                            "launcher",
+                            "menu_return",
+                            0,
+                            format!("command={id} win32={error}"),
+                        );
+                        if id == 0 && error != 0 {
+                            return Err(windows_core::Error::from_hresult(
+                                windows_core::HRESULT::from_win32(error),
+                            ));
+                        }
+                        Ok(id)
                     })();
                     let _ = DestroyMenu(menu);
                     let id = result?;
@@ -263,6 +340,7 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
         }
     }
     fn InitMenu(&self, menu: Ref<'_, ITfMenu>) -> Result<()> {
+        crate::settings_log::event("launcher", "menu_init", 0, "TSF menu");
         // SAFETY: Text slice stays alive during the synchronous call.
         unsafe {
             menu.ok()?.AddMenuItem(
@@ -277,6 +355,7 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
         Ok(())
     }
     fn OnMenuSelect(&self, id: u32) -> Result<()> {
+        crate::settings_log::event("launcher", "menu_selected", 0, format!("command={id}"));
         match id {
             1 => crate::preferences::open_settings(),
             _ => Err(E_INVALIDARG.into()),
@@ -408,6 +487,44 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn menu_owner_rejects_foreign_threads_and_only_destroys_its_fallback() -> Result<()> {
+        let (ready, receive) = std::sync::mpsc::channel();
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let foreign = MenuOwner::for_window(HWND::default())?;
+            ready.send(foreign.window.0 as usize).map_err(|_| E_FAIL)?;
+            let _ = stopped.recv();
+            Ok(())
+        });
+        let result = (|| -> Result<()> {
+            let foreign = HWND(receive.recv().map_err(|_| E_FAIL)? as *mut _);
+            let fallback = MenuOwner::for_window(foreign)?;
+            let local = fallback.window;
+            assert!(fallback.owned);
+            assert_ne!(local, foreign);
+            // SAFETY: Both hidden fixture windows remain alive during queries.
+            unsafe {
+                assert_eq!(
+                    GetWindowThreadProcessId(local, None),
+                    windows::Win32::System::Threading::GetCurrentThreadId()
+                );
+                assert!(!IsWindowVisible(local).as_bool());
+                let borrowed = MenuOwner::for_window(local)?;
+                assert!(!borrowed.owned);
+                drop(borrowed);
+                assert!(IsWindow(Some(local)).as_bool());
+                drop(fallback);
+                assert!(!IsWindow(Some(local)).as_bool());
+                assert!(IsWindow(Some(foreign)).as_bool());
+            }
+            Ok(())
+        })();
+        drop(stop);
+        worker.join().map_err(|_| E_FAIL)??;
+        result
+    }
 
     #[test]
     fn mode_icons_leave_the_background_transparent() -> Result<()> {

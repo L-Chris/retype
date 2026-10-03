@@ -5,7 +5,8 @@ single `settings/retype.exe`; no Flutter engine is loaded. Input, Dictionary,
 Statistics and About are migrated, and existing registry preferences, downloaded
 packs and statistics logs are retained. See [settings development](../apps/settings-egui/README.md).
 
-The custom close button hides the window for ten minutes; native close exits
+The custom close button saves preferences and exits by default; it remains hidden
+only while pending dictionary downloads or updates finish. Native close exits
 for upgrade scripts. Hidden windows stop statistics polling. Each install path
 has its own single-instance lock and native message window. Both direct launches
 and the input method route `--updates` to About in an existing same-version

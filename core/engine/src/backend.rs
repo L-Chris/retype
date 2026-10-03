@@ -24,7 +24,7 @@ use std::time::Duration;
 pub trait KernelBackend: Send + Sync {
     /// 同步处理事件，返回**必须立即执行**的动作（渲染 / 上屏）。
     ///
-    /// 实现必须保证耗时只包含首刷（预算 < 5ms）；二刷、学习落盘一律转 worker。
+    /// 实现必须保证耗时只包含首刷（按键 P99 预算 ≤ 6ms）；二刷、学习落盘一律转 worker。
     /// 这条约束就是 P1（输入主线程绝不阻塞）的可执行形式。
     fn submit(&self, ev: InputEvent) -> Vec<KernelAction>;
 

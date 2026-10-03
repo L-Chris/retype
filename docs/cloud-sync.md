@@ -6,6 +6,8 @@ Presets include Jianguoyun, cstcloud, InfiniCLOUD, Koofr, HiDrive and Yandex Dis
 
 ## Behavior
 
+- cstcloud requests include its Zotero compatibility identifier, store logical JSON files as `.json.prop`, and use checked uploads instead of conditional creates; other WebDAV providers retain standard JSON names and conditional creates.
+
 - The per-user `retype-sync-host.exe` runs independently of Settings and input host applications. The learning broker starts it at login if sync is enabled; enabling sync or selecting **Sync now** also launches it.
 - Automatic sync runs immediately on startup and every five minutes thereafter. Failed requests retry after 30 seconds, two minutes and then ten minutes. Each HTTP request has a 30-second timeout.
 - Disabling sync stops the helper without deleting local or remote data. Uninstallation requests helper shutdown while retaining connection metadata and user data.

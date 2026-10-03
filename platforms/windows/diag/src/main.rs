@@ -183,9 +183,17 @@ fn load_dict(path: &str) -> Arc<AsyncDict> {
         }
     };
     let loaded = if p.extension().is_some_and(|ext| ext == "bin") {
-        retype_dict::binary::load(f)
+        retype_dict::binary::open_shared(p).map(|d| {
+            let stats = retype_dict::LoadStats {
+                lines: d.len(),
+                accepted: d.len(),
+                ..Default::default()
+            };
+            (d, stats)
+        })
     } else {
         retype_dict::load_annotated(std::io::BufReader::with_capacity(1 << 16, f))
+            .map(|(d, stats)| (Arc::new(retype_dict::binary::Dictionary::from(d)), stats))
     };
     match loaded {
         Ok((d, stats)) => {
@@ -196,7 +204,7 @@ fn load_dict(path: &str) -> Arc<AsyncDict> {
                 d.node_count(),
                 started.elapsed()
             );
-            holder.install(Arc::new(d));
+            holder.install_binary(d);
         }
         Err(e) => {
             eprintln!("[警告] 词库解析失败: {e}，降级为单字模式");
@@ -565,6 +573,7 @@ fn key_ev(k: Key) -> InputEvent {
 /// 首刷延迟基准。这条线是 P1 的量化形式：
 /// 按键 → 候选上屏的本地路径必须远小于一帧（16.7ms）。
 fn bench(cli: &Cli) {
+    const P99_BUDGET: Duration = Duration::from_millis(6);
     let inputs: &[&str] = match cli.scheme {
         PinyinScheme::Full => &[
             "nihao",
@@ -635,9 +644,9 @@ fn bench(cli: &Cli) {
     println!("  P95  {:?}", pct(0.95));
     println!("  P99  {:?}", pct(0.99));
     println!("  max  {:?}", samples.last().copied().unwrap_or_default());
-    println!("  预算 5ms/次（一帧 16.7ms 的三分之一）");
+    println!("  本地按键 P99 预算 {}ms/次", P99_BUDGET.as_millis());
     let p99 = pct(0.99);
-    if p99 > Duration::from_millis(5) {
+    if p99 > P99_BUDGET {
         println!("  ✗ P99 超预算，需要优化词格构建或词库索引");
     } else {
         println!("  ✓ P99 在预算内");

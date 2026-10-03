@@ -12,10 +12,14 @@ retype-types = { workspace = true }
 retype-pinyin = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+retype-file-map = { path = "../file-map" }
 
 [build-dependencies]
 pinyin = { workspace = true }
 retype-pinyin = { workspace = true }
+
+[features]
+memory-profile = []
 
 [lints]
 workspace = true

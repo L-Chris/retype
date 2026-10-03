@@ -16,16 +16,23 @@ struct Mock {
     files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
+    cstcloud: bool,
+    requests: Arc<Mutex<Vec<String>>>,
 }
 impl Mock {
     fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::with_cstcloud(false)
+    }
+    fn with_cstcloud(cstcloud: bool) -> Self {
+        let listener = TcpListener::bind(if cstcloud { "[::1]:0" } else { "127.0.0.1:0" }).unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}/dav/", listener.local_addr().unwrap());
         let files = Arc::new(Mutex::new(BTreeMap::<String, Vec<u8>>::new()));
         let copy = Arc::clone(&files);
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = Arc::clone(&stop);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
         let worker = thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -62,8 +69,24 @@ impl Mock {
                 let mut parts = header.lines().next().unwrap_or_default().split_whitespace();
                 let method = parts.next().unwrap_or_default();
                 let path = parts.next().unwrap_or_default().to_owned();
+                captured.lock().unwrap().push(header.to_string());
                 let mut files = copy.lock().unwrap();
+                let lower = header.to_ascii_lowercase();
                 let (code, body) = match method {
+                    _ if cstcloud
+                        && !lower.contains(&format!(
+                            "user-agent: retype/{} zotero/7.0",
+                            env!("CARGO_PKG_VERSION")
+                        )) =>
+                    {
+                        (403, vec![])
+                    }
+                    "PUT"
+                        if cstcloud
+                            && (!path.ends_with(".prop") || lower.contains("if-none-match:")) =>
+                    {
+                        (400, vec![])
+                    }
                     "MKCOL" => (201, vec![]),
                     "PUT"
                         if header.to_lowercase().contains("if-none-match: *")
@@ -116,6 +139,8 @@ impl Mock {
             files,
             stop,
             worker: Some(worker),
+            cstcloud,
+            requests,
         }
     }
     fn cloud(&self) -> WebDav {
@@ -123,6 +148,12 @@ impl Mock {
             &Config {
                 url: self.url.clone(),
                 username: "fixture".into(),
+                provider: if self.cstcloud {
+                    "cstcloud"
+                } else {
+                    "自定义"
+                }
+                .into(),
                 ..Default::default()
             },
             "not-a-user-password",
@@ -130,8 +161,81 @@ impl Mock {
         .unwrap()
     }
 }
+
+#[test]
+fn cstcloud_maps_all_operations_and_uses_checked_unconditional_creates() {
+    let mock = Mock::with_cstcloud(true);
+    let cloud = mock.cloud();
+    cloud.test().unwrap();
+    // The connection probe is deleted using the same physical file mapping.
+    assert!(mock.files.lock().unwrap().is_empty());
+    let device = "b".repeat(32);
+    for revision in 1..=5 {
+        cloud
+            .publish(
+                &device,
+                &serde_json::json!({"device":device,"revision":revision}),
+            )
+            .unwrap();
+    }
+    assert_eq!(cloud.devices().unwrap(), vec![device.clone()]);
+    let loaded: serde_json::Value = cloud.download(&device).unwrap();
+    assert_eq!(loaded["revision"], 5);
+    let files = mock.files.lock().unwrap();
+    assert!(files.keys().all(|path| path.ends_with(".json.prop")));
+    // Current object, three previous objects, and the device index remain.
+    assert_eq!(files.len(), 5);
+    drop(files);
+
+    let path = "objects/fixture.json";
+    cloud.put(path, b"original", true).unwrap();
+    let before = mock.requests.lock().unwrap().len();
+    cloud.put(path, b"original", true).unwrap();
+    assert!(cloud.put(path, b"different", true).is_err());
+    let requests = mock.requests.lock().unwrap();
+    assert!(requests[before..].iter().all(|r| r.starts_with("GET ")));
+    assert!(requests
+        .iter()
+        .all(|r| !r.to_ascii_lowercase().contains("if-none-match:")));
+    let put = requests
+        .iter()
+        .position(|r| r.starts_with("PUT /dav/retype/v1/objects/fixture.json.prop "))
+        .unwrap();
+    assert!(requests[put - 1].starts_with("GET /dav/retype/v1/objects/fixture.json.prop "));
+    assert!(requests[put + 1].starts_with("GET /dav/retype/v1/objects/fixture.json.prop "));
+    drop(requests);
+    assert_eq!(cloud.get(path).unwrap().unwrap(), b"original");
+}
+
+#[test]
+fn custom_cstcloud_host_also_enables_compatibility() {
+    let cloud = WebDav::new(
+        &Config {
+            provider: "自定义".into(),
+            url: "https://data.cstcloud.cn/dav/".into(),
+            username: "fixture".into(),
+            ..Default::default()
+        },
+        "not-a-user-password",
+    )
+    .unwrap();
+    assert!(cloud.cstcloud);
+    assert!(!Mock::new().cloud().cstcloud);
+}
 impl Drop for Mock {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            for header in self.requests.lock().unwrap().iter() {
+                eprintln!(
+                    "fixture request: {} ; {}",
+                    header.lines().next().unwrap_or("empty"),
+                    header
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("user-agent:"))
+                        .unwrap_or("no user-agent")
+                );
+            }
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();

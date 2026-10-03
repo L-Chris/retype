@@ -11,6 +11,7 @@ Launcher and Settings records share a numeric `request` identifier. Each record 
 ## Reading the sequence
 
 - `open_requested`, `active_dir_lookup`, `target_ready`: the input method received the command and resolved the installed Settings executable.
+- `menu_open_requested`, `menu_owner`, `menu_return`, `menu_selected`: the custom language-bar menu opened with a same-thread owner and returned a selection or a Win32 error; `menu_init` identifies the TSF-managed menu route.
 - `reuse_post`, `show_received`, `show_dispatch`: a retained Settings process was asked to show its window and handled the request.
 - `spawn_begin`, `spawn_ok`, `process_start`: a new Settings process was launched.
 - `fonts_ready`, `preferences_ready`, `ai_preferences_ready`, `ui_frame_complete`: initialization and the first UI frame completed.

@@ -2,7 +2,24 @@
 //! No event loop, GPU device, keyboard interception, or platform calls live here.
 use egui::{epaint, Color32, FontId, Pos2, Rect, Vec2};
 use retype_types::RenderState;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
+
+fn shared_cjk_font() -> Option<&'static [u8]> {
+    static FONT: OnceLock<Option<retype_file_map::ReadOnlyFile>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        let directory = std::path::PathBuf::from(std::env::var_os("WINDIR")?).join("Fonts");
+        ["msyh.ttc", "msjh.ttc", "simhei.ttf", "simsun.ttc"]
+            .iter()
+            .find_map(|name| {
+                retype_file_map::ReadOnlyFile::open(&directory.join(name), 64 * 1024 * 1024).ok()
+            })
+    })
+    .as_ref()
+    .map(AsRef::as_ref)
+}
 
 const BACKGROUND: Color32 = Color32::from_rgb(252, 252, 253);
 const ACCENT: Color32 = Color32::from_rgb(19, 143, 150);
@@ -35,6 +52,7 @@ pub struct Bitmap {
 struct Texture {
     size: [usize; 2],
     pixels: Vec<Color32>,
+    alpha: Option<Vec<u8>>,
     monochrome: bool,
 }
 
@@ -53,22 +71,16 @@ impl Default for Surface {
         // artificially thicken the edges of black-on-white candidate text.
         context.set_theme(egui::Theme::Light);
         let mut fonts = egui::FontDefinitions::default();
-        if let Some(directory) = std::env::var_os("WINDIR") {
-            let directory = std::path::PathBuf::from(directory).join("Fonts");
-            for name in ["msyh.ttc", "msjh.ttc", "simhei.ttf", "simsun.ttc"] {
-                if let Ok(data) = std::fs::read(directory.join(name)) {
-                    fonts.font_data.insert(
-                        "candidate-cjk".into(),
-                        Arc::new(egui::FontData::from_owned(data)),
-                    );
-                    fonts
-                        .families
-                        .entry(egui::FontFamily::Proportional)
-                        .or_default()
-                        .insert(0, "candidate-cjk".into());
-                    break;
-                }
-            }
+        if let Some(data) = shared_cjk_font() {
+            fonts.font_data.insert(
+                "candidate-cjk".into(),
+                Arc::new(egui::FontData::from_static(data)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "candidate-cjk".into());
         }
         context.set_fonts(fonts);
         Self {
@@ -100,10 +112,29 @@ impl Surface {
                 });
                 if let Some([x, y]) = change.pos {
                     if let Some(texture) = self.textures.get_mut(id) {
+                        if !monochrome {
+                            if let Some(alpha) = texture.alpha.take() {
+                                texture.pixels = alpha
+                                    .into_iter()
+                                    .map(|a| Color32::from_rgba_premultiplied(a, a, a, a))
+                                    .collect();
+                            }
+                        }
                         texture.monochrome &= monochrome;
                         for row in 0..size[1] {
                             let start = (y + row) * texture.size[0] + x;
-                            if let Some(target) = texture.pixels.get_mut(start..start + size[0]) {
+                            if let Some(alpha) = &mut texture.alpha {
+                                if let Some(target) = alpha.get_mut(start..start + size[0]) {
+                                    for (to, from) in target
+                                        .iter_mut()
+                                        .zip(&pixels[row * size[0]..(row + 1) * size[0]])
+                                    {
+                                        *to = from.a();
+                                    }
+                                }
+                            } else if let Some(target) =
+                                texture.pixels.get_mut(start..start + size[0])
+                            {
                                 target.copy_from_slice(&pixels[row * size[0]..(row + 1) * size[0]]);
                             }
                         }
@@ -113,7 +144,12 @@ impl Surface {
                         *id,
                         Texture {
                             size,
-                            pixels: pixels.clone(),
+                            pixels: if monochrome {
+                                Vec::new()
+                            } else {
+                                pixels.clone()
+                            },
+                            alpha: monochrome.then(|| pixels.iter().map(Color32::a).collect()),
                             monochrome,
                         },
                     );
@@ -425,7 +461,13 @@ fn sample(texture: &Texture, uv: Vec2) -> [f32; 4] {
     let tx = x - x0 as f32;
     let ty = y - y0 as f32;
     if texture.monochrome {
-        let at = |x: usize, y: usize| texture.pixels[y * texture.size[0] + x].a() as f32;
+        let at = |x: usize, y: usize| {
+            let index = y * texture.size[0] + x;
+            texture
+                .alpha
+                .as_ref()
+                .map_or_else(|| texture.pixels[index].a(), |a| a[index]) as f32
+        };
         let alpha = (at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx) * (1.0 - ty)
             + (at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx) * ty;
         return [alpha; 4];
@@ -444,6 +486,57 @@ fn sample(texture: &Texture, uv: Vec2) -> [f32; 4] {
 mod tests {
     use super::*;
     use retype_types::{Candidate, CandidateSource};
+    #[test]
+    fn coverage_texture_preserves_every_sample_and_promotes_colored_updates() {
+        let mut surface = Surface::default();
+        let id = egui::TextureId::Managed(123);
+        let colors: Vec<_> = [0, 64, 128, 255]
+            .into_iter()
+            .map(|a| Color32::from_rgba_premultiplied(a, a, a, a))
+            .collect();
+        let rgba = Texture {
+            size: [2, 2],
+            pixels: colors.clone(),
+            alpha: None,
+            monochrome: true,
+        };
+        let mut delta = epaint::textures::TexturesDelta::default();
+        delta.set.insert(
+            id,
+            vec![epaint::ImageDelta::full(
+                egui::ColorImage::new([2, 2], colors),
+                egui::TextureOptions::LINEAR,
+            )]
+            .into(),
+        );
+        surface.apply_textures(&mut delta);
+        let stored = &surface.textures[&id];
+        assert!(stored.pixels.is_empty());
+        for x in 0..=10 {
+            for y in 0..=10 {
+                let uv = Vec2::new(x as f32 / 10.0, y as f32 / 10.0);
+                assert_eq!(sample(&rgba, uv), sample(stored, uv));
+            }
+        }
+        delta.set.insert(
+            id,
+            vec![epaint::ImageDelta::partial(
+                [1, 1],
+                egui::ColorImage::new([1, 1], vec![Color32::RED]),
+                egui::TextureOptions::LINEAR,
+            )]
+            .into(),
+        );
+        surface.apply_textures(&mut delta);
+        let stored = &surface.textures[&id];
+        assert!(stored.alpha.is_none());
+        assert!(!stored.monochrome);
+        assert_eq!(stored.pixels[3], Color32::RED);
+        assert_eq!(
+            stored.pixels[1],
+            Color32::from_rgba_premultiplied(64, 64, 64, 64)
+        );
+    }
     fn state(texts: &[&str]) -> RenderState {
         RenderState {
             composition: "nihao".into(),
@@ -538,6 +631,7 @@ mod tests {
         let texture = Texture {
             size: [1, 1],
             pixels: vec![Color32::WHITE],
+            alpha: None,
             monochrome: true,
         };
         let mut mesh = epaint::Mesh::default();

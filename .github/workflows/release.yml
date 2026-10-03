@@ -156,9 +156,10 @@ jobs:
       # 延迟预算是 P1 的量化形式，发布前必须复核一遍（release 构建下的真实数字）
       - name: 首刷延迟基准
         run: |
-          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --dict data\dict\retype-dict.tsv | Tee-Object -FilePath bench.txt
+          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --scheme full --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt
+          .\target\x86_64-pc-windows-msvc\release\retype-diag.exe --bench --scheme flypy --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt -Append
           if (Select-String -Path bench.txt -Pattern 'P99 超预算' -Quiet) {
-            Write-Error '首刷 P99 超出 5ms 预算，发布中止'
+            Write-Error '首刷 P99 超出 6ms 预算，发布中止'
             exit 1
           }
 

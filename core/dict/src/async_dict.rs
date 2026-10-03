@@ -60,6 +60,13 @@ impl AsyncDict {
         self.install(Arc::new(dict));
     }
 
+    pub fn install_binary(&self, dict: Arc<crate::binary::Dictionary>) {
+        if let Ok(mut total) = self.total_frequency.write() {
+            *total = dict.total_frequency();
+        }
+        self.install(dict);
+    }
+
     pub fn total_frequency(&self) -> f64 {
         self.total_frequency.read().map_or(1.0, |value| *value)
     }
@@ -125,26 +132,27 @@ pub fn spawn_loader<P: AsRef<Path>>(
         .name("retype-dict-load".into())
         .spawn(move || {
             let started = std::time::Instant::now();
-            let loaded = std::fs::File::open(&path)
-                .map_err(|e| format!("打不开词库 {}: {e}", path.display()))
-                .and_then(|f| {
-                    let reader = std::io::BufReader::with_capacity(1 << 16, f);
-                    if path.extension().is_some_and(|ext| ext == "bin") {
-                        crate::binary::load(reader)
-                    } else {
+            let loaded = if path.extension().is_some_and(|ext| ext == "bin") {
+                crate::binary::open_shared(&path).map_err(|e| e.to_string())
+            } else {
+                std::fs::File::open(&path)
+                    .map_err(|e| format!("打不开词库 {}: {e}", path.display()))
+                    .and_then(|f| {
+                        let reader = std::io::BufReader::with_capacity(1 << 16, f);
                         crate::memory::load_annotated(reader)
-                    }
-                    .map_err(|e| e.to_string())
-                });
+                            .map(|(d, _)| Arc::new(crate::binary::Dictionary::from(d)))
+                            .map_err(|e| e.to_string())
+                    })
+            };
             match loaded {
-                Ok((dict, stats)) => {
+                Ok(dict) => {
                     tracing::info!(
                         "词库加载完成: {} 词条 / {} 行，耗时 {:?}",
                         dict.len(),
-                        stats.lines,
+                        dict.len(),
                         started.elapsed()
                     );
-                    target.install_memory(dict);
+                    target.install_binary(dict);
                 }
                 Err(e) => {
                     tracing::error!("词库加载失败，降级: {e}");

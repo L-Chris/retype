@@ -237,10 +237,10 @@ fn build(args: &Args) -> Result<Stats, String> {
     let output = std::fs::File::create(&binary_path).map_err(|e| e.to_string())?;
     let count = retype_dict::binary::compile(BufReader::new(input), BufWriter::new(output))
         .map_err(|e| e.to_string())?;
-    let (binary, _) =
-        retype_dict::binary::load(std::fs::File::open(&binary_path).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    if retype_pinyin::Lexicon::len(&binary) == 0 || retype_pinyin::Lexicon::len(&binary) > count {
+    let binary = retype_dict::binary::open_shared(&binary_path).map_err(|e| e.to_string())?;
+    if retype_pinyin::Lexicon::len(binary.as_ref()) == 0
+        || retype_pinyin::Lexicon::len(binary.as_ref()) > count
+    {
         return Err("二进制词库回读数量无效".into());
     }
     eprintln!(

@@ -137,10 +137,26 @@ impl CloudPage {
         }
         changed
     }
-    pub fn flush(&mut self, ctx: &egui::Context) {
-        if self.config != self.saved || self.password != self.saved_password {
-            self.start(ctx, 0, None);
+    pub fn flush_for_close(&mut self) -> Result<(), String> {
+        if let Some(job) = self.job.as_ref().filter(|job| job.saving) {
+            let result = job
+                .receiver
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| "云同步设置仍在保存，请稍后关闭".to_string())?;
+            if let Some(job) = self.job.take() {
+                result?;
+                self.saved = job.config;
+                self.saved_password = job.password;
+            }
         }
+        if self.config != self.saved || self.password != self.saved_password {
+            // Local credentials/configuration only; network sync runs in its helper.
+            runtime::save(&self.config, &self.password)?;
+            self.saved = self.config.clone();
+            self.saved_password = self.password.clone();
+            self.dirty = None;
+        }
+        Ok(())
     }
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         super::app::card(ui, |ui| {

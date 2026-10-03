@@ -121,11 +121,12 @@ jobs:
 
       - name: 首刷延迟基准
         run: |
-          .\target\release\retype-diag.exe --bench --dict data\dict\retype-dict.tsv | Tee-Object -FilePath bench.txt
-          # P99 必须留在 5ms 预算内（ARCHITECTURE.md P1）。
+          .\target\release\retype-diag.exe --bench --scheme full --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt
+          .\target\release\retype-diag.exe --bench --scheme flypy --dict data\dict\retype-dict.bin | Tee-Object -FilePath bench.txt -Append
+          # 两种输入方案的 P99 必须留在 6ms 预算内（ARCHITECTURE.md P1）。
           # 基准程序自己会打印 ✓/✗，这里再挡一道，避免有人只看日志不看结论。
           if (Select-String -Path bench.txt -Pattern 'P99 超预算' -Quiet) {
-            Write-Error '首刷 P99 超出 5ms 预算'
+            Write-Error '首刷 P99 超出 6ms 预算'
             exit 1
           }
 

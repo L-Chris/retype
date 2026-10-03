@@ -22,7 +22,8 @@ The original `apps/settings` sources remain as a reference and asset source.
   synchronize together; credentials remain local. See [cloud sync](../../docs/cloud-sync.md).
 - Borderless, centered, draggable window with no header row and a close button
   at the top right of the content area. Closing
-  with that button retains a hidden window for ten minutes; native close exits
+  with that button saves preferences and exits by default; pending dictionary
+  downloads or updates finish while hidden before exit. Native close exits
   so upgrade scripts can stop an obsolete instance. Hidden windows do not poll
   statistics. Executable-path-specific instance routing keeps versions separate.
 

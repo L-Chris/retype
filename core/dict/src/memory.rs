@@ -23,8 +23,8 @@ pub struct Entry {
 /// 只读系统词库。构建完成后不可变，因此可以安全地被多个线程共享。
 #[derive(Debug, Default)]
 pub struct MemoryDict {
-    entries: Vec<Entry>,
-    trie: Trie,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) trie: Trie,
     total_frequency: f64,
 }
 
@@ -45,6 +45,27 @@ impl MemoryDict {
     /// trie 节点数，用于评估内存占用。
     pub fn node_count(&self) -> usize {
         self.trie.node_count()
+    }
+
+    #[cfg(feature = "memory-profile")]
+    pub fn allocation_stats(&self) -> [usize; 7] {
+        let [capacity, nodes, used_nodes, edges, terminals] = self.trie.allocation_stats();
+        [
+            self.entries.capacity() * std::mem::size_of::<Entry>(),
+            // Arc<str>: two reference counters, UTF-8 bytes and alignment padding.
+            self.entries
+                .iter()
+                .map(|e| {
+                    (2 * std::mem::size_of::<usize>() + e.text.len())
+                        .next_multiple_of(std::mem::align_of::<usize>())
+                })
+                .sum(),
+            capacity,
+            nodes,
+            used_nodes,
+            edges,
+            terminals,
+        ]
     }
 }
 

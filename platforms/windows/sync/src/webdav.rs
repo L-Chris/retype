@@ -51,7 +51,7 @@ impl WebDav {
                 "Basic {}",
                 STANDARD.encode(format!("{}:{password}", config.username.trim()))
             ),
-            cstcloud: base.host_str() == Some("data.cstcloud.cn"),
+            cstcloud: config.provider == "cstcloud" || base.host_str() == Some("data.cstcloud.cn"),
         })
     }
     fn request(
@@ -61,6 +61,15 @@ impl WebDav {
         bytes: &[u8],
         headers: &[(&str, &str)],
     ) -> Result<(u16, Vec<u8>)> {
+        // cstcloud only accepts Zotero-compatible file extensions. Keep the
+        // logical JSON paths throughout sync and map every HTTP operation here.
+        let mapped;
+        let path = if self.cstcloud && path.ends_with(".json") {
+            mapped = format!("{path}.prop");
+            mapped.as_str()
+        } else {
+            path
+        };
         let url = self.root.join(path).map_err(|_| "云盘路径无效")?;
         if url.origin() != self.root.origin() {
             return Err("云盘请求地址超出配置范围".into());
@@ -72,7 +81,7 @@ impl WebDav {
             .header(
                 "User-Agent",
                 if self.cstcloud {
-                    "retype Zotero/7.0"
+                    concat!("retype/", env!("CARGO_PKG_VERSION"), " Zotero/7.0")
                 } else {
                     concat!("retype/", env!("CARGO_PKG_VERSION"))
                 },
@@ -81,10 +90,13 @@ impl WebDav {
             request = request.header(*k, *v);
         }
         let request = request.body(bytes).map_err(|_| "无法构造云盘请求")?;
-        let mut response = self
-            .agent
-            .run(request)
-            .map_err(|_| "云盘请求失败，请检查网络连接")?;
+        let mut response = self.agent.run(request).map_err(|error| {
+            #[cfg(test)]
+            eprintln!("fixture transport error: {error:?}");
+            #[cfg(not(test))]
+            let _ = error;
+            "云盘请求失败，请检查网络连接"
+        })?;
         let code = response.status().as_u16();
         if matches!(code, 401 | 403) {
             return Err("云盘鉴权失败，请检查用户名、应用密码和目录权限".into());
@@ -118,8 +130,19 @@ impl WebDav {
         }
     }
     pub fn put(&self, path: &str, bytes: &[u8], immutable: bool) -> Result<()> {
+        // cstcloud does not support conditional creates. These objects are
+        // content-addressed, so check an existing object without overwriting it.
+        if immutable && self.cstcloud {
+            if let Some(existing) = self.get(path)? {
+                return if existing == bytes {
+                    Ok(())
+                } else {
+                    Err("云端同名版本的校验值不一致".into())
+                };
+            }
+        }
         let mut headers = vec![("Content-Type", "application/json")];
-        if immutable {
+        if immutable && !self.cstcloud {
             headers.push(("If-None-Match", "*"));
         }
         let (status, _) = self.request("PUT", path, bytes, &headers)?;
@@ -131,6 +154,9 @@ impl WebDav {
         }
         if !matches!(status, 200 | 201 | 204) {
             return Err(format!("上传同步数据失败（HTTP {status}）"));
+        }
+        if immutable && self.cstcloud && self.get(path)?.is_none_or(|existing| existing != bytes) {
+            return Err("云端版本上传后校验失败".into());
         }
         Ok(())
     }
@@ -159,6 +185,11 @@ impl WebDav {
                     let devices = self.root.join("devices/").map_err(|_| "云端目录无效")?;
                     if target.origin() == devices.origin() {
                         if let Some(file) = target.path().strip_prefix(devices.path()) {
+                            let file = if self.cstcloud {
+                                file.strip_suffix(".prop").unwrap_or(file)
+                            } else {
+                                file
+                            };
                             if let Some(id) =
                                 file.strip_suffix(".json").filter(|id| config::valid_id(id))
                             {

@@ -259,7 +259,7 @@ TIP DLL 被注入到**每一个**应用进程里。如果每个进程都持有�
 ```rust
 // core/engine/src/backend.rs
 pub trait KernelBackend: Send + Sync {
-    fn submit(&self, ev: InputEvent) -> Vec<KernelAction>; // 只含首刷，< 5ms
+    fn submit(&self, ev: InputEvent) -> Vec<KernelAction>; // 只含首刷，按键 P99 ≤ 6ms
     fn poll_action(&self) -> Option<KernelAction>;         // 非阻塞取异步结果
     fn render(&self) -> RenderState;                       // 当前快照
 }
@@ -405,7 +405,7 @@ pub trait StreamingAsr: Send + Sync {
 
 ```rust
 pub trait KernelBackend: Send + Sync {
-    /// 同步处理事件，返回必须立即执行的动作。耗时只含首刷（< 5ms）
+    /// 同步处理事件，返回必须立即执行的动作。耗时只含首刷（按键 P99 ≤ 6ms）
     fn submit(&self, ev: InputEvent) -> Vec<KernelAction>;
     /// 非阻塞取出异步产生的动作（二刷完成后的重渲染）
     fn poll_action(&self) -> Option<KernelAction>;

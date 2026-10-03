@@ -1,0 +1,21 @@
+[package]
+name = "retype-memory-profile"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+retype-dict = { path = "../../core/dict", features = ["memory-profile"] }
+retype-pinyin = { path = "../../core/pinyin" }
+retype-types = { path = "../../core/types" }
+retype-candidate-ui = { path = "../../platforms/windows/candidate-ui", features = ["egui"] }
+retype-learning = { path = "../../platforms/windows/learning", features = ["broker"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled"] }
+serde_json = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+
+[profile.release]
+opt-level = "s"
+debug = false

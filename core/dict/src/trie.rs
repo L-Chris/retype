@@ -16,7 +16,7 @@ pub(crate) struct Node {
 
 #[derive(Debug, Default, Clone)]
 pub struct Trie {
-    nodes: Vec<Node>,
+    pub(crate) nodes: Vec<Node>,
 }
 
 impl Trie {
@@ -84,6 +84,24 @@ impl Trie {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Allocation sizes for the isolated profiler; absent from normal builds.
+    #[cfg(feature = "memory-profile")]
+    pub fn allocation_stats(&self) -> [usize; 5] {
+        [
+            self.nodes.capacity(),
+            self.nodes.capacity() * std::mem::size_of::<Node>(),
+            self.nodes.len() * std::mem::size_of::<Node>(),
+            self.nodes
+                .iter()
+                .map(|n| n.children.capacity() * std::mem::size_of::<(SyllableId, u32)>())
+                .sum(),
+            self.nodes
+                .iter()
+                .map(|n| n.entries.capacity() * std::mem::size_of::<u32>())
+                .sum(),
+        ]
     }
 }
 

@@ -1,5 +1,7 @@
 # Performance notes
 
+The current local key-processing P99 budget is **6 ms** for both Full Pinyin and Xiaohe Shuangpin. CI measures the compiled binary dictionary. Current memory measurements and optimization results are in [the memory profile](memory-profile.md); the historical figures below retain their original budget.
+
 These are historical measurements from the 0.1.3 M1 desktop preview, not promises for later releases. They were measured with a release x86_64 build and a dictionary of 352,357 entries. The local input-engine benchmark excludes TSF host scheduling and candidate-window drawing.
 
 | Measurement | 0.1.3 result | Target or context |

@@ -45,7 +45,7 @@ impl Options {
             exit_after: None,
             updates: false,
             page: Page::Input,
-            idle_exit: Duration::from_secs(600),
+            idle_exit: Duration::ZERO,
             hide_after: None,
         };
         for argument in std::env::args().skip(1) {
@@ -233,11 +233,29 @@ impl SettingsApp {
             self.error = Some(error);
             return;
         }
-        self.hidden_since = Some(Instant::now());
         if let Some(cloud) = &mut self.cloud {
-            cloud.flush(ctx);
+            if let Err(error) = cloud.flush_for_close() {
+                self.error = Some(error);
+                return;
+            }
         }
-        self.instance.idle_timer(self.options.idle_exit);
+        if self.options.idle_exit.is_zero()
+            && self.busy_pack.is_none()
+            && !self.updating
+            && !self.installing
+        {
+            crate::settings_log::event(
+                "app",
+                "close_exit_requested",
+                self.open_request,
+                "preferences saved; no pending download or update",
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.hidden_since = Some(Instant::now());
+        self.instance
+            .idle_timer(self.options.idle_exit.max(Duration::from_secs(1)));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         crate::settings_log::event(
             "app",
@@ -245,7 +263,7 @@ impl SettingsApp {
             self.open_request,
             format!("idle_exit_ms={}", self.options.idle_exit.as_millis()),
         );
-        ctx.request_repaint_after(Duration::from_secs(600));
+        ctx.request_repaint_after(Duration::from_secs(1));
     }
 
     fn lifecycle(&mut self, ctx: &egui::Context) {
@@ -369,7 +387,7 @@ impl SettingsApp {
             }
         }
         if let Some(hidden) = self.hidden_since {
-            if hidden.elapsed() >= Duration::from_secs(600)
+            if hidden.elapsed() >= self.options.idle_exit
                 && self.busy_pack.is_none()
                 && !self.updating
                 && !self.installing

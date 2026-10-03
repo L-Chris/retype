@@ -1,7 +1,6 @@
 //! Optional category dictionaries. File IO stays off the TSF/input thread.
 use retype_dict::{binary, Layer, LayeredDict};
 use std::path::Path;
-use std::sync::Arc;
 
 pub const IDS: [&str; 7] = [
     "mingren", "renming", "yiren", "diming", "yixue", "yaopin", "huaxue",
@@ -14,17 +13,15 @@ pub fn load_enabled(root: &Path, enabled: u32, base_total: f64) -> LayeredDict {
             continue;
         }
         let path = root.join(format!("{id}.bin"));
-        let loaded = std::fs::File::open(&path)
-            .map_err(retype_dict::DictError::from)
-            .and_then(binary::load);
+        let loaded = binary::open_shared(&path);
         match loaded {
-            Ok((dict, _)) => {
+            Ok(dict) => {
                 // Each .bin is normalized by its own weight sum. Translate its
                 // log probabilities to the base dictionary's denominator.
                 let boost = (dict.total_frequency() / base_total.max(1.0)).ln() as f32;
                 merged.push(Layer {
                     name: id,
-                    dict: Arc::new(dict),
+                    dict,
                     boost,
                 });
             }

@@ -10,9 +10,10 @@ publish.workspace = true
 [dependencies]
 retype-types = { workspace = true }
 egui = { version = "=0.36.2", optional = true }
+retype-file-map = { path = "../../../core/file-map", optional = true }
 
 [features]
-egui = ["dep:egui"]
+egui = ["dep:egui", "dep:retype-file-map"]
 
 [dev-dependencies]
 png = "0.17"

@@ -7,6 +7,7 @@ pub mod adaptive;
 pub mod annotate;
 pub mod async_dict;
 pub mod binary;
+mod compact;
 pub mod learn;
 pub mod memory;
 pub mod trie;
