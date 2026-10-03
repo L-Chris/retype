@@ -171,10 +171,28 @@ mod tests {
     #[ignore = "requires installed and user-enabled retype; affects only this test process"]
     fn installed_tip_can_activate_in_test_process() -> Result<()> {
         use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+        };
         let _apartment = ComApartment::new()?;
+        struct ActiveThread(ITfThreadMgr);
+        impl Drop for ActiveThread {
+            fn drop(&mut self) {
+                // SAFETY: This guard stays on the thread it activated.
+                let _ = unsafe { self.0.Deactivate() };
+            }
+        }
         // SAFETY: All COM interfaces are local to this initialized thread. FORPROCESS
         // leaves the user's desktop/session selection unchanged.
         unsafe {
+            // Profile activation needs an active TSF host on the calling thread.
+            // A console test process does not get one from Windows automatically.
+            let thread: ITfThreadMgr =
+                CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+            thread.Activate()?;
+            let _active_thread = ActiveThread(thread.clone());
+            let document = thread.CreateDocumentMgr()?;
+            thread.SetFocus(&document)?;
             let manager: ITfInputProcessorProfileMgr =
                 CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
             let profiles: ITfInputProcessorProfiles =
@@ -203,7 +221,26 @@ mod tests {
                 )
                 .inspect_err(|error| eprintln!("activating installed TIP failed: {error}"))?;
             let mut active = TF_INPUTPROCESSORPROFILE::default();
-            let result = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let result = loop {
+                if let Err(error) = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
+                {
+                    break Err(error);
+                }
+                if (active.clsid == CLSID_RETYPE_TIP && active.guidProfile == GUID_PROFILE_RETYPE)
+                    || std::time::Instant::now() >= deadline
+                {
+                    break Ok(());
+                }
+                // Deliver TSF notifications on this STA instead of assuming that
+                // an asynchronous profile change is already visible.
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
             let cleanup = manager.DeactivateProfile(
                 TF_PROFILETYPE_INPUTPROCESSOR,
                 LANGID_ZH_CN,
