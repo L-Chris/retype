@@ -142,7 +142,7 @@ rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --locked
 cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
 RUSTFLAGS='-C link-arg=-Wl,-z,max-page-size=16384' \
-  cargo ndk -t arm64-v8a -t x86_64 -p 26 -o platforms/android/build/native \
+  cargo ndk -t arm64-v8a -t x86_64 --platform 26 -o platforms/android/build/native \
   build --locked --release -p retype-android
 cd platforms/android
 ./gradlew :app:assembleDebug :app:lintDebug

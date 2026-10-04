@@ -36,7 +36,7 @@ jobs:
       - name: SDK and native tooling
         run: |
           sdkmanager 'platforms;android-35' 'build-tools;36.0.0' 'ndk;28.2.13676358'
-          cargo install cargo-ndk --locked
+          cargo install cargo-ndk --version 4.1.2 --locked
       - name: Session regression tests and offline dictionary
         run: |
           cargo test --locked -p retype-android -p retype-ai -p retype-dict-build --features retype-ai/service
@@ -44,9 +44,11 @@ jobs:
       - name: JNI libraries
         env:
           RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'
+          CARGO_NDK_PLATFORM: '26'
         run: |
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
-          cargo ndk -t arm64-v8a -t x86_64 -p 26 -o platforms/android/build/native build --locked --release -p retype-android
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          cargo ndk -t arm64-v8a -t x86_64 -o platforms/android/build/native build --locked --release -p retype-android
       - name: Build and lint
         working-directory: platforms/android
         run: bash gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
