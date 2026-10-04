@@ -4,13 +4,14 @@
 
 This project was developed by Qwen3.8 Max.
 
-A Chinese input method built around a shared Rust input engine. Windows desktop input is available as an early preview; Android support is planned.
+A Chinese input method for Windows and [Android](docs/android.md), built around a shared Rust input engine.
 
 [简体中文](README.zh-CN.md) · [Latest release](https://github.com/L-Chris/retype/releases/latest) · [Roadmap](docs/roadmap.md)
 
 ## Features
 
 - Windows TSF input method for 64-bit and 32-bit desktop applications.
+- An Android keyboard with offline input, personal learning, optional dictionaries, typing statistics, AI translation and WebDAV sync; see [Android](docs/android.md).
 - Full Pinyin and Xiaohe Shuangpin, selectable from the language bar; incomplete Shuangpin codes preview matching characters and phrases.
 - A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
 - A compact horizontal candidate window with keyboard and mouse selection.
@@ -27,6 +28,8 @@ The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility
 ## Install and use
 
 Download the Windows installer from the [latest release](https://github.com/L-Chris/retype/releases/latest). It includes both 64-bit and 32-bit input components. If an earlier installer has a pending restart, complete that restart before upgrading.
+
+For Android, download the APK from the same release and enable retype in the system keyboard settings. Signed release APKs use a different certificate from development previews; remove the preview app before switching to the release channel.
 
 Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme, view typing statistics, or check for updates. Reopen applications that were already running after an update so they load the new input component.
 
@@ -56,7 +59,7 @@ Provider configuration, translation shortcuts, and editor compatibility boundari
 | M2 | Context and personal dictionary | Persistent shared learning available; context learning planned |
 | M3 | Cloud-assisted candidate refinement | Planned |
 | M4 | Streaming voice input | Planned |
-| M5 | Product polish and Android input method | In progress; installer, updater, and Xiaohe Shuangpin are available |
+| M5 | Product polish and Android input method | In progress; Windows distribution and the Android keyboard preview are available |
 
 Detailed acceptance criteria and current gaps are in the [roadmap](docs/roadmap.md). Historical measurements are in [performance notes](docs/performance.md).
 

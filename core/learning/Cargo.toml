@@ -1,0 +1,24 @@
+[package]
+name = "retype-learning-store"
+description = "Portable SQLite learning store and synchronization format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+retype-dict.workspace = true
+retype-pinyin.workspace = true
+retype-types.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite = { version = "0.40", features = ["bundled", "backup"], optional = true }
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+
+[lints]
+workspace = true

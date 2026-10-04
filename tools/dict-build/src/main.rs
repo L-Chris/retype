@@ -114,42 +114,7 @@ struct Stats {
     skipped_no_pinyin: usize,
 }
 
-fn unaccent(c: char) -> Option<char> {
-    match c {
-        'ā' | 'á' | 'ǎ' | 'à' => Some('a'),
-        'ē' | 'é' | 'ě' | 'è' | 'ê' => Some('e'),
-        'ī' | 'í' | 'ǐ' | 'ì' => Some('i'),
-        'ō' | 'ó' | 'ǒ' | 'ò' => Some('o'),
-        'ū' | 'ú' | 'ǔ' | 'ù' => Some('u'),
-        'ü' | 'ǖ' | 'ǘ' | 'ǚ' | 'ǜ' => Some('v'),
-        'ń' | 'ň' | 'ǹ' => Some('n'),
-        'ḿ' => Some('m'),
-        c if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
-        _ => None,
-    }
-}
-
-/// Base 词库保留逐词带调拼音；当前引擎使用去声调后的音节。
-fn plain_pinyin(raw: &str, word_len: usize) -> Option<String> {
-    let mut out = String::new();
-    let mut count = 0;
-    for item in raw.split_whitespace() {
-        if count > 0 {
-            out.push(' ');
-        }
-        for c in item.chars() {
-            if matches!(c, '\u{0300}'..='\u{036f}') {
-                continue;
-            }
-            out.push(unaccent(c)?);
-        }
-        count += 1;
-    }
-    if count != word_len || annotate::parse_pinyin(&out)?.len() != count {
-        return None;
-    }
-    Some(out)
-}
+use retype_dict::rime::plain_pinyin;
 
 fn build(args: &Args) -> Result<Stats, String> {
     let started = Instant::now();

@@ -1,0 +1,3 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="io.github.retype.ime.SettingsActivity" android:supportsSwitchingToNextInputMethod="true">
+    <subtype android:label="@string/ime_subtype" android:imeSubtypeLocale="zh_CN" android:imeSubtypeMode="keyboard" android:isAsciiCapable="true" />
+</input-method>

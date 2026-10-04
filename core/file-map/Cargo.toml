@@ -10,6 +10,9 @@ publish.workspace = true
 memmap2 = "0.9"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+memmap2 = "0.9"
+
 [target.'cfg(not(windows))'.dependencies]
 sha2.workspace = true
 

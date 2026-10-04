@@ -1,0 +1,90 @@
+name: Android release
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source-ref:
+        required: true
+        type: string
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: true
+      ANDROID_STORE_PASSWORD:
+        required: true
+      ANDROID_KEY_ALIAS:
+        required: true
+      ANDROID_KEY_PASSWORD:
+        required: true
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref }}
+      - name: Require stable signing credentials
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" || { echo 'Configure all four Android signing secrets before publishing.' >&2; exit 1; }
+          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/retype-release.jks"
+          chmod 600 "$RUNNER_TEMP/retype-release.jks"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: 'platforms/android/**/*.gradle.kts'
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: android
+      - name: SDK and native tooling
+        run: |
+          sdkmanager 'platforms;android-35' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          cargo install cargo-ndk --locked
+      - name: Offline dictionary and JNI
+        env:
+          RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'
+        run: |
+          cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          cargo ndk -t arm64-v8a -t x86_64 -p 26 -o platforms/android/build/native build --locked --release -p retype-android
+      - name: Build signed APK
+        working-directory: platforms/android
+        env:
+          RETYPE_ANDROID_KEYSTORE: ${{ runner.temp }}/retype-release.jks
+          RETYPE_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          RETYPE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          RETYPE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash gradlew --no-daemon :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
+      - name: Verify and prepare release files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify platforms/android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 platforms/android/app/build/outputs/apk/release/app-release.apk
+          mkdir -p dist/android
+          cp platforms/android/app/build/outputs/apk/release/app-release.apk "dist/android/retype-$VERSION-android.apk"
+          cd dist/android
+          sha256sum "retype-$VERSION-android.apk" > "retype-$VERSION-android.apk.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-installer
+          path: dist/android/*
+          if-no-files-found: error
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/retype-release.jks"

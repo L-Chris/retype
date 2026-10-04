@@ -304,6 +304,7 @@ core/
   context/     retype-context    ContextSnapshot 模型 + 隐私闸门（采集实现在平台层）
   cloud/       retype-cloud      CloudPinyin/LlmReranker/StreamingAsr traits + Mock + 熔断
   engine/      retype-engine     统一内核：会话状态机、首刷/二刷编排、合并、降级、KernelBackend
+  learning/    retype-learning-store  跨平台 SQLite 学习存储与同步数据格式
   updater/     retype-updater    自动更新：semver 比较、release 解析、sha256 校验（HTTP 抽象成 trait）
   ffi/         retype-ffi        C ABI 导出（Android JNI / 外部诊断）
 
@@ -314,8 +315,9 @@ platforms/windows/
   updater/       retype-updater      独立更新器 exe（TIP DLL 绝不做网络 IO）
   installer/                         build.ps1 / package.ps1 / register.ps1
 
-platforms/android/               占位（Kotlin IME + JNI → retype-ffi）
-apps/settings/                   Flutter 设置界面（Windows/Android 共用）
+platforms/android/               Kotlin IME + Compose 键盘／设置 + retype-android JNI 会话
+apps/settings-egui/              Windows 设置界面
+apps/settings/                   早期 Flutter 设置原型（未用于 Android 预览）
 tools/dict-build/                词库构建：词频表 + 拼音 → dict.bin
 data/dict/                       词库源数据
 ```
@@ -443,4 +445,4 @@ object」正是 M3 能无痛换成 `RemoteBackend` 的前提。需要直接摸�
 - **候选窗渲染**：Direct2D 自绘 vs 复用 TSF 原生 `ITfCandidateListUIElement`。MVP 先用原生（省事、兼容性由系统保证），M2 换自绘以拿到豆包那种视觉。
 - **简拼/双拼**：MVP 只做全拼 + 简拼，双拼（自然码/小鹤/微软）在 M4 以「键位映射层」形式插入，不改内核。
 - **词库授权**：`data/dict/raw/` 使用 jieba 词频表（MIT），需保留署名，见 [docs/dict.md](./docs/dict.md)。
-- **Android 端 UI**：Flutter vs Jetpack Compose。IME 的键盘视图对首帧延迟极敏感，倾向 Compose；设置界面仍用 Flutter 复用。
+- **Android 端 UI（已决定）**：键盘和设置均用 Jetpack Compose，JNI 复用 Rust 内核与共享学习存储；生命周期、编辑器权限和上屏确认由 Kotlin 适配层负责，详见 [Android](docs/android.md)。

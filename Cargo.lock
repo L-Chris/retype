@@ -44,7 +44,7 @@ dependencies = [
  "android-properties",
  "bitflags 2.13.2",
  "cc",
- "jni",
+ "jni 0.22.4",
  "libc",
  "log",
  "ndk",
@@ -270,6 +270,12 @@ dependencies = [
  "libc",
  "shlex",
 ]
+
+[[package]]
+name = "cesu8"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
 name = "cfg-if"
@@ -1340,6 +1346,22 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jni"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a87aa2bb7d2af34197c04845522473242e1aa17c12f4935d5856491a7fb8c97"
+dependencies = [
+ "cesu8",
+ "cfg-if",
+ "combine",
+ "jni-sys 0.3.1",
+ "log",
+ "thiserror 1.0.69",
+ "walkdir",
+ "windows-sys 0.45.0",
+]
+
+[[package]]
+name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
@@ -2335,7 +2357,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "retype-ai"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-learning",
  "serde",
@@ -2345,8 +2367,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "retype-android"
+version = "0.6.7"
+dependencies = [
+ "jni 0.21.1",
+ "retype-ai",
+ "retype-dict",
+ "retype-engine",
+ "retype-english",
+ "retype-learning-store",
+ "retype-pinyin",
+ "retype-sync",
+ "retype-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "retype-candidate-ui"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "egui",
  "png 0.17.16",
@@ -2356,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "retype-cloud"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "futures",
  "retype-types",
@@ -2366,14 +2405,14 @@ dependencies = [
 
 [[package]]
 name = "retype-context"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-diag"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-candidate-ui",
  "retype-cloud",
@@ -2386,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "pinyin",
  "retype-file-map",
@@ -2398,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict-build"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2407,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "retype-engine"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "crossbeam-channel",
  "futures",
@@ -2422,14 +2461,14 @@ dependencies = [
 
 [[package]]
 name = "retype-english"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-ffi"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-dict",
  "retype-engine",
@@ -2439,7 +2478,7 @@ dependencies = [
 
 [[package]]
 name = "retype-file-map"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "memmap2",
  "sha2",
@@ -2448,9 +2487,10 @@ dependencies = [
 
 [[package]]
 name = "retype-learning"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-dict",
+ "retype-learning-store",
  "retype-pinyin",
  "retype-types",
  "rusqlite",
@@ -2461,8 +2501,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "retype-learning-store"
+version = "0.6.7"
+dependencies = [
+ "retype-dict",
+ "retype-pinyin",
+ "retype-types",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "retype-pinyin"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "pinyin",
  "retype-types",
@@ -2470,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "retype-settings-egui"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "chrono",
  "eframe",
@@ -2490,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "retype-sync"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "base64 0.22.1",
  "retype-ai",
@@ -2507,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "retype-tsf"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-ai",
  "retype-candidate-ui",
@@ -2527,11 +2580,11 @@ dependencies = [
 
 [[package]]
 name = "retype-types"
-version = "0.6.6"
+version = "0.6.7"
 
 [[package]]
 name = "retype-updater"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "serde_json",
  "sha2",
@@ -2541,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "retype-updater-cli"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "retype-updater",
  "serde_json",
@@ -3800,6 +3853,15 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75283be5efb2831d37ea142365f009c02ec203cd29a3ebecbc093d52315b66d0"
+dependencies = [
+ "windows-targets 0.42.2",
+]
+
+[[package]]
+name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
@@ -3832,6 +3894,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-targets"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e5180c00cd44c9b1c88adb3693291f1cd93605ded80c250a75d472756b4d071"
+dependencies = [
+ "windows_aarch64_gnullvm 0.42.2",
+ "windows_aarch64_msvc 0.42.2",
+ "windows_i686_gnu 0.42.2",
+ "windows_i686_msvc 0.42.2",
+ "windows_x86_64_gnu 0.42.2",
+ "windows_x86_64_gnullvm 0.42.2",
+ "windows_x86_64_msvc 0.42.2",
 ]
 
 [[package]]
@@ -3878,6 +3955,12 @@ dependencies = [
 
 [[package]]
 name = "windows_aarch64_gnullvm"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "597a5118570b68bc08d8d59125332c54f1ba9d9adeedeef5b99b02ba2b0698f8"
+
+[[package]]
+name = "windows_aarch64_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
@@ -3890,6 +3973,12 @@ checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
 
 [[package]]
 name = "windows_aarch64_msvc"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e08e8864a60f06ef0d0ff4ba04124db8b0fb3be5776a5cd47641e942e58c4d43"
+
+[[package]]
+name = "windows_aarch64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
@@ -3899,6 +3988,12 @@ name = "windows_aarch64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
+
+[[package]]
+name = "windows_i686_gnu"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c61d927d8da41da96a81f029489353e68739737d3beca43145c8afec9a31a84f"
 
 [[package]]
 name = "windows_i686_gnu"
@@ -3926,6 +4021,12 @@ checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
 
 [[package]]
 name = "windows_i686_msvc"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44d840b6ec649f480a41c8d80f9c65108b92d89345dd94027bfe06ac444d1060"
+
+[[package]]
+name = "windows_i686_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
@@ -3935,6 +4036,12 @@ name = "windows_i686_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
+
+[[package]]
+name = "windows_x86_64_gnu"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8de912b8b8feb55c064867cf047dda097f92d51efad5b491dfb98f6bbb70cb36"
 
 [[package]]
 name = "windows_x86_64_gnu"
@@ -3950,6 +4057,12 @@ checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
 
 [[package]]
 name = "windows_x86_64_gnullvm"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d41b46a36d453748aedef1486d5c7a85db22e56aff34643984ea85514e94a3"
+
+[[package]]
+name = "windows_x86_64_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
@@ -3959,6 +4072,12 @@ name = "windows_x86_64_gnullvm"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
+
+[[package]]
+name = "windows_x86_64_msvc"
+version = "0.42.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9aec5da331524158c6d1a4ac0ab1541149c0b9505fde06423b02f5ef0106b9f0"
 
 [[package]]
 name = "windows_x86_64_msvc"

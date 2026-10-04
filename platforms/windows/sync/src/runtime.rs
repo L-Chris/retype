@@ -240,6 +240,8 @@ fn known_key(key: &str) -> bool {
     matches!(
         key,
         "input.scheme"
+            | "input.english"
+            | "input.english_spelling"
             | "dictionary.enabled"
             | "updates.auto_check"
             | "shortcuts"
@@ -253,6 +255,7 @@ fn known_key(key: &str) -> bool {
         .strip_prefix("providers/")
         .is_some_and(|s| !s.is_empty() && s.len() <= 128 && !s.contains(['/', '\\']))
 }
+
 fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
     let mut ai = retype_ai::config::Config::load().map_err(|_| "无法读取本机 AI 设置")?;
     let shortcuts: retype_ai::config::Shortcuts =
@@ -603,5 +606,72 @@ pub fn serve() -> Result<()> {
             next = Instant::now() + Duration::from_secs(delay);
         }
         std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn android_snapshot_with_english_preferences_is_accepted() {
+        let mut state = State::default();
+        state.capture(
+            &"a".repeat(32),
+            &BTreeMap::from([
+                ("input.scheme".into(), json!(1)),
+                ("input.english".into(), json!(true)),
+                ("input.english_spelling".into(), json!(false)),
+            ]),
+        );
+        let mut snapshot = Snapshot {
+            version: 1,
+            device: "a".repeat(32),
+            name: "Android".into(),
+            fields: state.fields,
+            learning: Default::default(),
+            statistics: Vec::new(),
+        };
+        assert!(validate_snapshot(&snapshot).is_ok());
+        if let Some(field) = snapshot.fields.get_mut("input.english") {
+            field.stamp.device = "invalid".into();
+        }
+        assert!(validate_snapshot(&snapshot).is_err());
+    }
+
+    /// Opt-in readback using the saved account. Never applies or publishes settings.
+    #[test]
+    #[ignore = "requires explicit permission to use the saved cloud account"]
+    fn saved_cloud_connection_and_mobile_snapshot_readback() -> Result<()> {
+        let root = config::root()?;
+        let cfg = Config::load_at(&root)?;
+        let cloud = WebDav::new(&cfg, &password(&cfg)?)?;
+        cloud.test()?;
+        let local = portable()?;
+        let devices = cloud.devices()?;
+        println!(
+            "Saved desktop connection succeeded; cloud devices={}",
+            devices.len()
+        );
+        for id in devices {
+            let snapshot: Snapshot =
+                cloud.download_cached(&id, &account_root(&root, &cfg).join("cache"))?;
+            validate_snapshot(&snapshot)?;
+            let different: Vec<_> = local
+                .iter()
+                .filter(|(key, value)| {
+                    snapshot
+                        .fields
+                        .get(*key)
+                        .is_none_or(|field| field.value != **value)
+                })
+                .map(|(key, _)| key.as_str())
+                .collect();
+            println!(
+                "Snapshot accepted; fields={}; differing setting keys={different:?}",
+                snapshot.fields.len()
+            );
+        }
+        Ok(())
     }
 }

@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">retype 输入法</string>
+    <string name="ime_subtype">中文 / English</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#11939B</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#EDF2F3</item>
+    </style>
+</resources>

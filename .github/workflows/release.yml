@@ -18,6 +18,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      android-signing: ${{ steps.android-signing.outputs.ready }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,6 +55,21 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "RETYPE_VERSION=$cargo_version" >> "$GITHUB_ENV"
 
+      - name: Check Android signing availability
+        id: android-signing
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -n "$KEYSTORE" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'ready=false' >> "$GITHUB_OUTPUT"
+            echo 'Android APK publishing is skipped until signing secrets are configured.'
+          fi
+
       # ── 2. 发布说明必须存在（缺了就失败，不要发一个空说明的 release）──────
       - name: 校验发布说明存在
         shell: bash
@@ -76,9 +92,19 @@ jobs:
       register-tip: true
       source-ref: ${{ needs.metadata.outputs.tag }}
 
+  android:
+    needs: metadata
+    if: needs.metadata.outputs.android-signing == 'true'
+    uses: ./.github/workflows/android-release.yml
+    with:
+      version: ${{ needs.metadata.outputs.version }}
+      source-ref: ${{ needs.metadata.outputs.tag }}
+    secrets: inherit
+
   publish:
     name: Publish validated installer
-    needs: [metadata, build]
+    needs: [metadata, build, android]
+    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -90,7 +116,13 @@ jobs:
         with:
           name: windows-installer
           path: .
+      - uses: actions/download-artifact@v8
+        if: needs.android.result == 'success'
+        with:
+          name: android-installer
+          path: dist/android
       - uses: softprops/action-gh-release@v3
+        # Include Android when stable signing credentials have been configured.
         with:
           tag_name: ${{ needs.metadata.outputs.tag }}
           name: ${{ needs.metadata.outputs.tag }}
@@ -98,5 +130,7 @@ jobs:
           files: |
             dist/*-setup.exe
             dist/*.sha256
+            ${{ needs.android.result == 'success' && 'dist/android/*.apk' || '' }}
+            ${{ needs.android.result == 'success' && 'dist/android/*.sha256' || '' }}
           fail_on_unmatched_files: true
           generate_release_notes: false

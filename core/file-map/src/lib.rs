@@ -1,5 +1,5 @@
 //! Read-only file images. Windows handles disallow writes for the mapping lifetime.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android"))]
 use std::fs::File;
 use std::{fs::OpenOptions, io, path::Path};
 
@@ -7,18 +7,20 @@ use std::{fs::OpenOptions, io, path::Path};
 pub enum FileIdentity {
     #[cfg(windows)]
     Windows(u64, u64),
-    #[cfg(not(windows))]
+    #[cfg(target_os = "android")]
+    Android(u64, u64, u64, i64, i64),
+    #[cfg(not(any(windows, target_os = "android")))]
     Snapshot([u8; 32]),
 }
 
 #[derive(Debug)]
 pub struct ReadOnlyFile {
     // Keep the no-write-sharing handle alive until after the view is unmapped.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "android"))]
     data: memmap2::Mmap,
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "android")))]
     data: Box<[u8]>,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "android"))]
     _file: File,
     identity: FileIdentity,
 }
@@ -64,7 +66,34 @@ impl ReadOnlyFile {
                 identity,
             })
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "android")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = file.metadata()?;
+            if meta.mode() & 0o222 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Android dictionary images must be read-only and replaced atomically",
+                ));
+            }
+            let identity = FileIdentity::Android(
+                meta.dev(),
+                meta.ino(),
+                size,
+                meta.mtime(),
+                meta.mtime_nsec(),
+            );
+            // SAFETY: Android images are app-private, chmod read-only before opening,
+            // and our installer only publishes new inodes via atomic rename. No writer
+            // truncates or overwrites a mapped image. Other Unix callers use snapshots.
+            let data = unsafe { memmap2::MmapOptions::new().map(&file)? };
+            Ok(Self {
+                data,
+                _file: file,
+                identity,
+            })
+        }
+        #[cfg(not(any(windows, target_os = "android")))]
         {
             use sha2::{Digest, Sha256};
             use std::io::Read;

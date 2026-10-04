@@ -131,7 +131,9 @@
 - [ ] 崩溃上报与延迟打点
 - [x] 小鹤双拼：按原始按键构建音节词格，支持部分选词、退格、零声母、全拼切换
 - [ ] 其他双拼方案（自然码/微软）
-- [ ] Android 端启动：Kotlin IME + JNI → `retype-ffi`；更新逻辑复用 `core/updater`
+- [x] Android A1/A2：Kotlin IME + Compose 键盘／设置 + JNI → 共享 Rust 内核，离线全拼、小鹤、英文与持久学习；见 [Android 预览](android.md)
+- [x] Android A3：可选词库下载、AI 提供商／翻译、快捷键、统计与 WebDAV 云同步；与桌面共享词库读音、翻译适配和同步格式
+- [ ] Android A4：平板适配与正式签名发布
 
 ---
 

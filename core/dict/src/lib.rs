@@ -10,6 +10,7 @@ pub mod binary;
 mod compact;
 pub mod learn;
 pub mod memory;
+pub mod rime;
 pub mod trie;
 pub mod user;
 

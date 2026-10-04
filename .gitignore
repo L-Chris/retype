@@ -37,5 +37,7 @@ Cargo.lock.bak
 !.env.example
 *.pem
 secrets.*
+*.jks
+*.keystore
 # Temporary payload staging for the Windows workflow.
 /.ci/

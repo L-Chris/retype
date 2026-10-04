@@ -9,7 +9,7 @@ publish.workspace = true
 
 [features]
 default = []
-broker = ["dep:rusqlite"]
+broker = ["dep:rusqlite", "retype-learning-store/sqlite"]
 
 [[bin]]
 name = "retype-learning-host"
@@ -17,6 +17,7 @@ path = "src/main.rs"
 required-features = ["broker"]
 
 [dependencies]
+retype-learning-store = { path = "../../../core/learning" }
 retype-dict.workspace = true
 retype-pinyin.workspace = true
 retype-types.workspace = true

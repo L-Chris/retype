@@ -246,6 +246,10 @@ impl Store {
             if let Ok(rows) = serde_json::from_slice::<Vec<retype_sync::statistics::Bucket>>(&bytes)
             {
                 for row in rows {
+                    // Preserve Android rows in sync storage, excluding them from desktop totals.
+                    if row.stream == "android.log" {
+                        continue;
+                    }
                     let Some(seconds) = row
                         .minute
                         .checked_mul(60)
@@ -320,6 +324,63 @@ mod tests {
         assert_eq!(snapshot.history(today, Period::Month).len(), 12);
         assert_eq!(snapshot.history(today, Period::Year).len(), 5);
         assert_eq!(speed(9, 60_000), None);
+    }
+    #[test]
+    fn synced_mobile_counts_do_not_enter_desktop_statistics() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "retype-statistics-platform-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let now = Local::now().timestamp_millis();
+        fs::write(
+            root.join("local.log"),
+            format!("{},20,10,10000,10000\n", now / 1000),
+        )?;
+        let rows = [("android.log", 1000, 2000), ("remote-desktop.log", 30, 40)].map(
+            |(stream, chinese, english)| retype_sync::statistics::Bucket {
+                device: "a".repeat(32),
+                stream: stream.into(),
+                minute: (now / 60000) as u64,
+                counts: retype_sync::statistics::Counts {
+                    chinese,
+                    english,
+                    chinese_ms: 60000,
+                    english_ms: 60000,
+                },
+            },
+        );
+        fs::write(root.join("cloud-history.json"), serde_json::to_vec(&rows)?)?;
+        let mut store = Store::new(root.clone());
+        for _ in 0..2 {
+            let snapshot = store.load(now)?;
+            assert_eq!(
+                snapshot.total,
+                Counts {
+                    chinese: 50,
+                    english: 50,
+                    chinese_ms: 70000,
+                    english_ms: 70000,
+                }
+            );
+            assert_eq!(snapshot.today, snapshot.total);
+            assert_eq!(
+                snapshot
+                    .history(Local::now().date_naive(), Period::Day)
+                    .last()
+                    .map(|(_, counts)| *counts),
+                Some(snapshot.total)
+            );
+        }
+        assert_eq!(
+            serde_json::from_slice::<Vec<retype_sync::statistics::Bucket>>(&fs::read(
+                root.join("cloud-history.json")
+            )?)?
+            .len(),
+            2
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
     #[test]
     fn append_partial_reset_and_idle_are_compatible_with_tsf_logs() -> std::io::Result<()> {

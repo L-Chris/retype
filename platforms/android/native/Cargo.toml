@@ -1,0 +1,29 @@
+[package]
+name = "retype-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "retype_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+retype-engine.workspace = true
+retype-dict.workspace = true
+retype-pinyin.workspace = true
+retype-types.workspace = true
+retype-english.workspace = true
+retype-learning-store = { path = "../../../core/learning", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+retype-ai = { path = "../../windows/ai", features = ["service"] }
+retype-sync = { path = "../../windows/sync" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
+[lints]
+workspace = true

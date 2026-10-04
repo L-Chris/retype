@@ -526,6 +526,8 @@ impl SettingsApp {
             ui.label("正在读取统计…");
             return;
         };
+        ui.label(RichText::new("桌面端统计").color(MUTED));
+        ui.add_space(8.0);
         ui.columns(2, |columns| {
             for (column, title, counts) in [
                 (0, "今日输入", snapshot.today),

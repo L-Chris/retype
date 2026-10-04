@@ -4,13 +4,14 @@
 
 本项目由 Qwen3.8 Max 开发。
 
-基于共享 Rust 输入内核的中文输入法。Windows 桌面输入已有预览版，Android 输入法仍在规划中。
+基于共享 Rust 输入内核的中文输入法，支持 Windows 和 [Android](docs/android.md)。
 
 [English](README.md) · [最新版本](https://github.com/L-Chris/retype/releases/latest) · [路线图](docs/roadmap.md)
 
 ## 当前功能
 
 - 支持 Windows 64 位和 32 位桌面应用的 TSF 输入法。
+- Android 键盘支持离线输入、个人学习、可选词库、打字统计、AI 翻译和 WebDAV 云同步；见 [Android 文档](docs/android.md)。
 - 全拼和小鹤双拼，可在语言栏切换；双拼未完成的音节也会预览匹配的字词。
 - 内置万象 Base 词库，使用逐词注音和词组权重。
 - 紧凑横排候选窗，支持键盘和鼠标选词。
@@ -27,6 +28,8 @@ M1 桌面预览已通过独立 RichEdit 输入测试。常用应用及现代 Win
 ## 安装与使用
 
 从 [最新发布页面](https://github.com/L-Chris/retype/releases/latest)下载安装包，内含 64 位和 32 位输入组件。如果旧安装器留下待重启操作，请先完成重启再升级。
+
+Android 用户可从同一页面下载 APK，并在系统键盘设置中启用 retype。正式 APK 与开发测试版签名不同，从测试版切换到正式版前需要卸载测试版。
 
 按 `Win+Space` 选择 **retype**。全拼输入 `nihao`，或用小鹤双拼输入 `nihc`，再按空格上屏“你好”。单按 Shift，或点击品牌图标左侧的模式图标，可切换中英文；组字时按 `-`、`=` 翻候选页，按 `1`–`8` 选择当前页候选。右键模式图标选择“设置”，即可切换拼音方案、查看输入统计或检查更新。更新后重新打开正在使用输入法的应用，即可加载新版组件。
 
@@ -56,7 +59,7 @@ cargo test --workspace --features retype-learning/broker,retype-ai/service
 | M2 | 上下文和个人词库 | 已实现持久化与共享学习，上下文学习仍在规划中 |
 | M3 | 云端辅助候选优化 | 计划中 |
 | M4 | 流式语音输入 | 计划中 |
-| M5 | 产品完善与 Android 输入法 | 进行中；安装器、更新器和小鹤双拼已可用 |
+| M5 | 产品完善与 Android 输入法 | 进行中；Windows 安装发布和 Android 键盘预览已可用 |
 
 详细验收标准和未完成项见 [路线图](docs/roadmap.md)，历史测量数据见 [性能记录](docs/performance.md)。
 
