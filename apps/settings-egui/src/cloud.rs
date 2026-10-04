@@ -24,6 +24,7 @@ pub struct CloudPage {
     job: Option<Job>,
     dirty: Option<Instant>,
     poll: Instant,
+    resume_pending: bool,
 }
 impl CloudPage {
     pub fn new() -> Self {
@@ -34,6 +35,7 @@ impl CloudPage {
             error = Some(e);
             String::new()
         });
+        let resume_pending = config.enabled && error.is_none();
         Self {
             saved: config.clone(),
             config,
@@ -44,6 +46,7 @@ impl CloudPage {
             job: None,
             dirty: None,
             poll: Instant::now() - Duration::from_secs(2),
+            resume_pending,
         }
     }
     fn start(&mut self, ctx: &egui::Context, operation: u8, command: Option<Command>) {
@@ -60,6 +63,12 @@ impl CloudPage {
             .name("retype-cloud-settings".into())
             .spawn(move || {
                 let result = (|| {
+                    if operation == 2 {
+                        // Resume a saved enabled account after upgrade/restart without
+                        // rewriting its credentials or confirming its initial merge.
+                        runtime::command(&c, Command::Sync)?;
+                        return Ok("同步中…".into());
+                    }
                     if operation == 1 {
                         WebDav::new(&c, &p)?.test()?;
                         return Ok("连接成功，云盘支持同步读写".into());
@@ -83,7 +92,7 @@ impl CloudPage {
                 self.job = Some(Job {
                     config,
                     password,
-                    saving: operation != 1,
+                    saving: operation == 0,
                     receiver: rx,
                 })
             }
@@ -91,6 +100,10 @@ impl CloudPage {
         }
     }
     pub fn tick(&mut self, ctx: &egui::Context) -> bool {
+        if self.resume_pending && self.job.is_none() {
+            self.resume_pending = false;
+            self.start(ctx, 2, None);
+        }
         if let Some(result) = self.job.as_ref().and_then(|j| j.receiver.try_recv().ok()) {
             if let Some(job) = self.job.take() {
                 match result {
@@ -371,6 +384,7 @@ mod tests {
                 job: None,
                 dirty: None,
                 poll: Instant::now(),
+                resume_pending: false,
             };
             let ctx = egui::Context::default();
             assert!(crate::app::chinese_fonts(&ctx).is_ok());

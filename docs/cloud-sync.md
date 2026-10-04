@@ -10,7 +10,7 @@ Presets include Jianguoyun, cstcloud, InfiniCLOUD, Koofr, HiDrive and Yandex Dis
 
 - The per-user `retype-sync-host.exe` runs independently of Settings and input host applications. The learning broker starts it at login if sync is enabled; enabling sync or selecting **Sync now** also launches it.
 - Automatic sync runs immediately on startup and every five minutes thereafter. Failed requests retry after 30 seconds, two minutes and then ten minutes. Each HTTP request has a 30-second timeout.
-- Disabling sync stops the helper without deleting local or remote data. Uninstallation requests helper shutdown while retaining connection metadata and user data.
+- Disabling cloud sync stops its tasks without deleting local or remote data. If LAN clipboard sync is enabled, the shared helper continues serving that independent feature. Uninstallation requests helper shutdown while retaining connection metadata and user data.
 - On first connection to an existing cloud folder, the page shows an initial summary and asks to merge. The first merge adopts cloud settings, retains local learning and statistics, and adds their evidence to the cloud.
 - Concurrent edits to the same setting appear in the page with **Keep local** / **Use cloud** actions. Related shortcut bindings are one field and validated together; translation provider/model selection is also one field. Removed AI providers retain a deletion marker so another device does not resurrect them.
 - After a successful sync, Settings refreshes saved preferences without replacing an active AI configuration draft. Enabled optional dictionaries are downloaded separately by the existing dictionary downloader; they are not uploaded or bundled in cloud snapshots.

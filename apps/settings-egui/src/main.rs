@@ -11,6 +11,8 @@ mod cloud;
 #[cfg(windows)]
 mod instance;
 #[cfg(windows)]
+mod lan;
+#[cfg(windows)]
 #[path = "../../../platforms/windows/common/settings_log.rs"]
 mod settings_log;
 #[cfg(windows)]

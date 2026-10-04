@@ -22,6 +22,7 @@ A Chinese input method for Windows and [Android](docs/android.md), built around 
 - Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.
 - Update controls in Settings > About, with daily checks, version skipping, verified downloads, and installation after user confirmation.
 - Optional [WebDAV cloud sync](docs/cloud-sync.md) for settings, personal learning, and typing history across computers.
+- Paired [LAN clipboard sync](docs/lan-clipboard.md) for plain text between Windows and Android, with a quick paste preview in the mobile keyboard.
 
 The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility across common applications and modern Windows app environments is still being evaluated; see the [validation record](docs/m1-validation.md).
 

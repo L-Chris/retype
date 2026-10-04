@@ -22,6 +22,7 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 }
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "pairBegin" | "pairFinish" | "pairCancel" => retype_sync::pairing::mobile(&v),
         "models" => {
             let p: Provider =
                 serde_json::from_value(v["provider"].clone()).map_err(|e| e.to_string())?;

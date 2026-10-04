@@ -78,6 +78,7 @@ impl Options {
                     "translation" => Page::Translation,
                     "shortcuts" => Page::Shortcuts,
                     "cloud" => Page::Cloud,
+                    "lan" => Page::Lan,
                     "about" => Page::About,
                     _ => return Err("Unknown settings page".into()),
                 };
@@ -158,6 +159,7 @@ enum Page {
     Shortcuts,
     Statistics,
     Cloud,
+    Lan,
     About,
 }
 
@@ -167,6 +169,7 @@ struct SettingsApp {
     frame_logged: bool,
     ai: crate::ai::AiPages,
     cloud: Option<crate::cloud::CloudPage>,
+    lan: Option<crate::lan::LanPage>,
     options: Options,
     started: Instant,
     scheme: PinyinScheme,
@@ -206,6 +209,11 @@ impl SettingsApp {
             Page::Cloud => {
                 if self.cloud.is_none() {
                     self.cloud = Some(crate::cloud::CloudPage::new());
+                }
+            }
+            Page::Lan => {
+                if self.lan.is_none() {
+                    self.lan = Some(crate::lan::LanPage::new());
                 }
             }
             Page::Statistics if !self.statistics_pending => {
@@ -875,6 +883,7 @@ impl SettingsApp {
             open_started: started,
             frame_logged: false,
             ai,
+            lan: None,
             cloud: (page == Page::Cloud
                 || retype_sync::config::root()
                     .and_then(|root| retype_sync::config::Config::load_at(&root))
@@ -1110,6 +1119,20 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
                 color,
             );
         }
+        Page::Lan => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(origin + Vec2::new(-3.0, -2.0), Vec2::new(15.0, 12.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_center_size(origin + Vec2::new(6.0, 4.0), Vec2::new(7.0, 12.0)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
         Page::Cloud => {
             for (x, y, radius) in [(-5.0, 1.0, 5.0), (0.0, -3.0, 6.0), (6.0, 1.0, 4.0)] {
                 painter.circle_stroke(origin + Vec2::new(x, y), radius, stroke);
@@ -1160,7 +1183,7 @@ pub(crate) fn switch_row(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bo
     });
     changed
 }
-fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
+pub(crate) fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(42.0, 24.0), egui::Sense::click());
     if response.clicked() {
         *value = !*value;
@@ -1346,6 +1369,7 @@ impl eframe::App for SettingsApp {
                             (Page::Shortcuts, "快捷键"),
                             (Page::Statistics, "统计"),
                             (Page::Cloud, "云同步"),
+                            (Page::Lan, "跨设备"),
                             (Page::About, "关于"),
                         ] {
                             if navigation(ui, page, title, self.page == page) {
@@ -1367,6 +1391,7 @@ impl eframe::App for SettingsApp {
                         Page::Shortcuts => "快捷键",
                         Page::Statistics => "统计",
                         Page::Cloud => "云同步",
+                        Page::Lan => "跨设备",
                         Page::About => "关于",
                     },
                 );
@@ -1413,6 +1438,7 @@ impl eframe::App for SettingsApp {
                             Page::Shortcuts => "shortcuts-content",
                             Page::Statistics => "statistics-content",
                             Page::Cloud => "cloud-content",
+                            Page::Lan => "lan-content",
                             Page::About => "about-content",
                         })
                         .auto_shrink([false, false])
@@ -1439,6 +1465,9 @@ impl eframe::App for SettingsApp {
                                     if let Some(cloud) = &mut self.cloud {
                                         cloud.ui(ui);
                                     }
+                                }
+                                Page::Lan => {
+                                    self.lan.get_or_insert_with(crate::lan::LanPage::new).ui(ui);
                                 }
                                 Page::About => self.about_page(ui),
                             }

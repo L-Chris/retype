@@ -17,6 +17,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -60,6 +62,9 @@ fun Keyboard(
     onSettings: () -> Unit,
     onTranslate: () -> Unit,
 ) {
+  val context = LocalContext.current
+  val clipboard = remember { LanClipboard.get(context) }
+  val lan by clipboard.state.collectAsState()
   var uppercase by remember { mutableStateOf(false) }
   var symbols by remember { mutableStateOf(false) }
   var expanded by remember { mutableStateOf(false) }
@@ -90,31 +95,54 @@ fun Keyboard(
               Modifier.fillMaxWidth().height(44.dp),
               verticalAlignment = Alignment.CenterVertically,
           ) {
-            if (expanded) {
-              Text(state.composition, Modifier.weight(1f).padding(start = 12.dp), fontSize = 15.sp)
-            } else if (state.candidates.isEmpty()) {
+            if (state.translation != null || (!expanded && state.candidates.isEmpty())) {
               Row(
-                  Modifier.weight(1f).padding(start = 8.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Image(painterResource(R.drawable.ic_retype), "retype", Modifier.size(30.dp))
-                    val status =
-                        when {
-                          state.password -> "安全输入"
-                          state.error != null -> state.error
-                          !state.ready -> "加载词库…"
-                          else -> null
-                        }
-                    if (status != null)
-                        Text(
-                            status,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Modifier.weight(1f).padding(start = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                Image(painterResource(R.drawable.ic_retype), "retype", Modifier.size(30.dp))
+                val status =
+                  when {
+                    state.translation != null -> state.translation
+                    state.password -> "安全输入"
+                    state.error != null -> state.error
+                    !state.ready -> "加载词库…"
+                    else -> null
                   }
+                if (state.translating)
+                  CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                if (
+                  status == null && !state.password && state.composition.isEmpty() && lan.text != null
+                )
+                  Text(
+                    lan.text!!.replace('\n', ' '),
+                    Modifier.weight(1f)
+                      .clickable {
+                        clipboard.pasteText()?.let(onLiteral)
+                      }
+                      .padding(vertical = 8.dp),
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                else if (status != null)
+                  Text(
+                    status,
+                    modifier = Modifier.weight(1f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  )
+              }
+            } else if (expanded) {
+              Text(state.composition, Modifier.weight(1f).padding(start = 12.dp), fontSize = 15.sp)
             } else {
               Row(
-                  Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                  verticalAlignment = Alignment.CenterVertically,
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                verticalAlignment = Alignment.CenterVertically,
               ) {
                 state.candidates.drop(state.pageStart).take(8).forEachIndexed { index, text ->
                   Candidate(text, index, state.pageStart + index == state.selected) {
@@ -139,20 +167,6 @@ fun Keyboard(
               ToolbarButton("设置", 7, true, onSettings)
             }
           }
-          if (state.translation != null)
-              Row(
-                  Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(8.dp),
-              ) {
-                if (state.translating)
-                    CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
-                Text(
-                    state.translation,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-              }
           if (expanded) {
             Box(Modifier.fillMaxWidth().height(205.dp)) {
               LazyVerticalGrid(

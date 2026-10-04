@@ -112,6 +112,7 @@ class RetypeImeService :
 
   override fun onWindowShown() {
     super.onWindowShown()
+    LanClipboard.get(this).resume()
     registry.currentState = Lifecycle.State.RESUMED
   }
 

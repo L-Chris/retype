@@ -33,7 +33,7 @@ fun SettingsScreen() {
   var revision by remember { mutableIntStateOf(0) }
   var busy by remember { mutableStateOf(false) }
   var message by remember { mutableStateOf<String?>(null) }
-  val pages = listOf("输入", "词库", "统计", "AI 提供商", "翻译", "云同步", "关于")
+  val pages = listOf("输入", "词库", "统计", "AI 提供商", "翻译", "云同步", "关于", "跨设备")
   val descriptions =
       listOf(
           "全拼、双拼、英文补全",
@@ -42,7 +42,7 @@ fun SettingsScreen() {
           "模型、接口与凭据",
           "目标语言与思考等级",
           "跨设备同步设置与数据",
-          "版本与开源许可")
+          "版本与开源许可", "局域网文字剪贴板同步")
   BackHandler(page >= 0) {
     page = -1
     message = null
@@ -131,7 +131,7 @@ fun SettingsScreen() {
                             Column(
                                 Modifier.fillMaxWidth().padding(18.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                  SettingsGlyph(index)
+                                  SettingsGlyph(if (index == 7) 8 else index)
                                   Spacer(Modifier.height(8.dp))
                                   Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
@@ -161,6 +161,7 @@ fun SettingsScreen() {
                     3 -> ProvidersPage(store, busy, ::work)
                     4 -> TranslationPage(store)
                     5 -> CloudPage(store, busy, ::work)
+                    7 -> LanPage()
                     else -> AboutPage()
                   }
               Spacer(Modifier.height(24.dp))
@@ -267,6 +268,12 @@ internal fun SettingsGlyph(index: Int, modifier: Modifier = Modifier.size(30.dp)
         line(10f, 19f, 13f, 16f)
         line(13f, 16f, 16f, 19f)
       }
+      8 -> {
+        box(2f, 3f, 17f, 15f)
+        line(5f, 19f, 13f, 19f)
+        line(9f, 15f, 9f, 19f)
+        box(15f, 9f, 22f, 22f)
+      }
       7 -> {
         drawCircle(ink, size.width * .3f, style = Stroke(stroke))
         drawCircle(ink, size.width * .11f, style = Stroke(stroke))
@@ -274,12 +281,8 @@ internal fun SettingsGlyph(index: Int, modifier: Modifier = Modifier.size(30.dp)
           val a = i * Math.PI / 4
           val x = kotlin.math.cos(a).toFloat()
           val y = kotlin.math.sin(a).toFloat()
-          drawLine(
-              ink,
-              center + Offset(x, y) * size.width * .3f,
-              center + Offset(x, y) * size.width * .43f,
-              stroke,
-              StrokeCap.Round)
+          drawLine(ink, center + Offset(x, y) * size.width * .3f,
+              center + Offset(x, y) * size.width * .43f, stroke, StrokeCap.Round)
         }
       }
       else -> {

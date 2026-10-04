@@ -65,6 +65,11 @@ impl Mock {
                         }
                     }
                 }
+                // A closed/speculatively opened socket is not an HTTP request.
+                // Do not turn an empty connection into a bogus 403/405 response.
+                if split == 0 {
+                    continue;
+                }
                 let header = String::from_utf8_lossy(&input[..split]);
                 let mut parts = header.lines().next().unwrap_or_default().split_whitespace();
                 let method = parts.next().unwrap_or_default();

@@ -1,5 +1,9 @@
+pub mod clipboard_protocol;
 pub mod config;
+#[cfg(windows)]
+pub mod lan;
 pub mod model;
+pub mod pairing;
 #[cfg(windows)]
 pub mod runtime;
 pub mod statistics;
