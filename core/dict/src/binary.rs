@@ -4,7 +4,7 @@ use retype_pinyin::{LexEntry, Lexicon};
 use retype_types::SyllableId;
 use std::io::{BufRead, Read, Write};
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 const MAGIC: &[u8; 8] = b"RTDICT01";
@@ -99,7 +99,7 @@ pub fn load(reader: impl Read) -> Result<(Dictionary, LoadStats), DictError> {
     let stats = stats(&dict);
     Ok((dict, stats))
 }
-type CacheKey = (PathBuf, retype_file_map::FileIdentity);
+type CacheKey = retype_file_map::FileIdentity;
 /// Background-thread load: weak ownership shares validated images without
 /// keeping obsolete dictionary generations alive after the last session exits.
 pub fn open_shared(path: &Path) -> Result<Arc<Dictionary>, DictError> {
@@ -109,7 +109,10 @@ pub fn open_shared(path: &Path) -> Result<Arc<Dictionary>, DictError> {
         path,
         crate::compact::MAX_BYTES,
     )?);
-    let key = (std::fs::canonicalize(path)?, image.identity());
+    // The opened file already supplies a stable volume/file identity. Windows
+    // AppContainers can read/map it while GetFinalPathNameByHandleW (used by
+    // canonicalize) is denied. A path query must not invalidate a readable image.
+    let key = image.identity();
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
@@ -302,6 +305,12 @@ mod tests {
         let a = open_shared(&path)?;
         let b = open_shared(&path)?;
         assert!(Arc::ptr_eq(&a, &b));
+        let alias = root.join("alias.bin");
+        std::fs::hard_link(&path, &alias)?;
+        let aliased = open_shared(&alias)?;
+        assert!(Arc::ptr_eq(&a, &aliased));
+        drop(aliased);
+        std::fs::remove_file(alias)?;
         #[cfg(windows)]
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
         let replacement = root.join("next.bin");

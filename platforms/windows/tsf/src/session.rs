@@ -6,9 +6,7 @@
 //! 加载完成前用户敲字会得到原样字母 —— 这是 §7 降级矩阵里最低的一档，
 //! 但键盘始终是活的。
 
-use retype_dict::{
-    spawn_loader, AsyncDict, FallbackPolicy, LayeredDict, UserDict, DEFAULT_USER_BOOST,
-};
+use retype_dict::{AsyncDict, FallbackPolicy, LayeredDict, UserDict, DEFAULT_USER_BOOST};
 use retype_engine::{
     offline_cloud, BackendOptions, Kernel, KernelBackend, KernelConfig, LocalBackend,
 };
@@ -16,10 +14,10 @@ use retype_pinyin::Lexicon;
 use retype_types::{InputEvent, KernelAction, LearningStore};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 #[cfg(not(test))]
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// 词库文件位置的环境变量覆盖（开发/诊断时最常用）。
 pub const ENV_DICT: &str = "RETYPE_DICT";
@@ -126,6 +124,7 @@ pub struct Session {
     /// 影子模式：喂内核但不吃按键
     pub shadow: bool,
     pub dict_path: PathBuf,
+    dict_attempt: Mutex<Instant>,
 }
 
 impl std::fmt::Debug for Session {
@@ -148,7 +147,7 @@ impl Session {
         let dict = AsyncDict::empty();
         let packs = AsyncDict::empty();
         // 词库不存在/损坏 → 单字模式兜底（§7）
-        let _ = spawn_loader(&dict_path, Arc::clone(&dict), FallbackPolicy::SingleChar);
+        start_dictionary(&dict_path, Arc::clone(&dict));
 
         let mut base = LayeredDict::new();
         base.push(retype_dict::Layer {
@@ -195,6 +194,7 @@ impl Session {
             user,
             shadow: env_flag(ENV_SHADOW),
             dict_path,
+            dict_attempt: Mutex::new(Instant::now()),
         });
         session.sync_packs();
         session
@@ -202,6 +202,17 @@ impl Session {
 
     /// Refresh on focus only; loading and parsing always run on a worker thread.
     pub fn sync_packs(self: &Arc<Self>) {
+        // A transient startup failure must not pin SearchHost to the fallback
+        // for its entire lifetime. Retrying is bounded and all IO stays off-thread.
+        if self.dict.load_failed() {
+            let mut attempted = self.dict_attempt.lock().unwrap_or_else(|p| p.into_inner());
+            if attempted.elapsed() >= Duration::from_secs(5) {
+                *attempted = Instant::now();
+                start_dictionary(&self.dict_path, Arc::clone(&self.dict));
+                // Optional packs need the recovered base frequency denominator.
+                self.pack_generation.store(u32::MAX, Ordering::SeqCst);
+            }
+        }
         let generation = crate::preferences::pack_generation();
         if self.pack_generation.swap(generation, Ordering::SeqCst) == generation {
             return;
@@ -217,10 +228,15 @@ impl Session {
             .spawn(move || {
                 // Base loading starts first, and supplies the shared score denominator.
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while !session.dict.is_loaded() && std::time::Instant::now() < deadline {
+                while (session.dict.is_loading() || !session.dict.is_loaded())
+                    && std::time::Instant::now() < deadline
+                {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                if !session.dict.is_loaded() {
+                if session.dict.is_loading()
+                    || session.dict.load_failed()
+                    || !session.dict.is_loaded()
+                {
                     tracing::warn!(
                         "base dictionary did not finish loading; optional packs skipped"
                     );
@@ -257,6 +273,38 @@ impl Session {
     /// 词库是否已就绪。用于决定是否显示「降级」状态。
     pub fn dict_ready(&self) -> bool {
         self.dict.is_loaded()
+    }
+}
+
+fn start_dictionary(path: &std::path::Path, target: Arc<AsyncDict>) {
+    let logged_path = path.to_path_buf();
+    let result = retype_dict::async_dict::spawn_loader_with_report(
+        path,
+        target,
+        FallbackPolicy::SingleChar,
+        move |report| {
+            crate::settings_log::event(
+                "launcher",
+                "dictionary_load",
+                0,
+                format!(
+                    "path={} loaded={} entries={} elapsed_ms={} error={}",
+                    logged_path.display(),
+                    report.loaded,
+                    report.entries,
+                    report.elapsed_ms,
+                    report.error.as_deref().unwrap_or("none")
+                ),
+            );
+        },
+    );
+    if let Err(error) = result {
+        crate::settings_log::event(
+            "launcher",
+            "dictionary_worker_failed",
+            0,
+            format!("win32={}", error.raw_os_error().unwrap_or(0)),
+        );
     }
 }
 
@@ -321,6 +369,58 @@ mod tests {
         }
         assert!(s.dict_ready(), "加载失败也必须装上单字兜底词库");
         assert!(s.dict.len() > 10000);
+    }
+
+    #[test]
+    fn focus_retries_a_failed_dictionary_with_a_cooldown() {
+        let root = std::env::temp_dir().join(format!(
+            "retype-focus-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("dictionary.bin");
+        let session = Session::start_with(path.clone());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !session.dict.load_failed() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(session.dict.load_failed());
+        let mut bytes = Vec::new();
+        retype_dict::binary::compile("软\truan\t11461\n壖\truan\t105\n".as_bytes(), &mut bytes)
+            .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        session.sync_packs();
+        assert!(
+            session.dict.load_failed(),
+            "focus must respect the retry cooldown"
+        );
+        *session.dict_attempt.lock().unwrap() = Instant::now() - Duration::from_secs(6);
+        session.sync_packs();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (session.dict.is_loading() || session.dict.load_failed()) && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!session.dict.load_failed());
+        assert_eq!(session.dict.len(), 2);
+        assert_eq!(
+            retype_pinyin::shuangpin::decode("rr", session.dict.as_ref(), &Default::default())
+                .candidates[0]
+                .text,
+            "软"
+        );
+        // Background pack workers may still hold the read-only mapping briefly.
+        drop(session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::fs::remove_file(&path).is_err() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

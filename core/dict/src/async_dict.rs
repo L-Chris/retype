@@ -12,12 +12,17 @@
 use retype_pinyin::lexicon::{LexEntry, Lexicon};
 use retype_types::SyllableId;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 
 #[derive(Default)]
 pub struct AsyncDict {
     inner: RwLock<Option<Arc<dyn Lexicon>>>,
     total_frequency: RwLock<f64>,
+    loading: AtomicBool,
+    load_failed: AtomicBool,
 }
 
 // `Arc<dyn Lexicon>` 没有 Debug，手写一个带加载状态的版本
@@ -39,11 +44,22 @@ impl AsyncDict {
         Arc::new(Self {
             inner: RwLock::new(Some(dict)),
             total_frequency: RwLock::new(1.0),
+            loading: AtomicBool::new(false),
+            load_failed: AtomicBool::new(false),
         })
     }
 
     pub fn is_loaded(&self) -> bool {
         self.read().is_some()
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading.load(Ordering::Acquire)
+    }
+
+    /// A completed failed attempt (possibly using the single-character fallback).
+    pub fn load_failed(&self) -> bool {
+        !self.loading.load(Ordering::Acquire) && self.load_failed.load(Ordering::Acquire)
     }
 
     /// 热替换底层词库。已解码的候选不会回溯更新，下一次按键自然生效。
@@ -127,10 +143,40 @@ pub fn spawn_loader<P: AsRef<Path>>(
     target: Arc<AsyncDict>,
     fallback: FallbackPolicy,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    spawn_loader_with_report(path, target, fallback, |_| {})
+}
+
+/// Startup-only metadata. The callback executes on the loader, not the input thread.
+pub struct LoadReport {
+    pub loaded: bool,
+    pub entries: usize,
+    pub elapsed_ms: u128,
+    pub error: Option<String>,
+}
+
+pub fn spawn_loader_with_report<P: AsRef<Path>>(
+    path: P,
+    target: Arc<AsyncDict>,
+    fallback: FallbackPolicy,
+    report: impl FnOnce(LoadReport) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    if target.loading.swap(true, Ordering::AcqRel) {
+        return Err(std::io::ErrorKind::WouldBlock.into());
+    }
+    target.load_failed.store(true, Ordering::Release);
+    struct Attempt(Arc<AsyncDict>);
+    impl Drop for Attempt {
+        fn drop(&mut self) {
+            self.0.loading.store(false, Ordering::Release);
+        }
+    }
+    // The guard also resets the state if spawning fails or the loader panics.
+    let attempt = Attempt(Arc::clone(&target));
     let path = path.as_ref().to_path_buf();
     std::thread::Builder::new()
         .name("retype-dict-load".into())
         .spawn(move || {
+            let _attempt = attempt;
             let started = std::time::Instant::now();
             let loaded = if path.extension().is_some_and(|ext| ext == "bin") {
                 crate::binary::open_shared(&path).map_err(|e| e.to_string())
@@ -152,7 +198,15 @@ pub fn spawn_loader<P: AsRef<Path>>(
                         dict.len(),
                         started.elapsed()
                     );
+                    let entries = dict.len();
                     target.install_binary(dict);
+                    target.load_failed.store(false, Ordering::Release);
+                    report(LoadReport {
+                        loaded: true,
+                        entries,
+                        elapsed_ms: started.elapsed().as_millis(),
+                        error: None,
+                    });
                 }
                 Err(e) => {
                     tracing::error!("词库加载失败，降级: {e}");
@@ -162,6 +216,12 @@ pub fn spawn_loader<P: AsRef<Path>>(
                         }
                         FallbackPolicy::Empty => {}
                     }
+                    report(LoadReport {
+                        loaded: false,
+                        entries: target.len(),
+                        elapsed_ms: started.elapsed().as_millis(),
+                        error: Some(e),
+                    });
                 }
             }
         })
@@ -187,6 +247,62 @@ mod tests {
         assert!(!d.has_prefix(&ids("ni")));
         assert_eq!(d.len(), 0);
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn failed_dictionary_recovers_without_overlapping_loads() {
+        let root = std::env::temp_dir().join(format!(
+            "retype-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("fixture.bin");
+        let dict = AsyncDict::empty();
+        spawn_loader(&path, Arc::clone(&dict), FallbackPolicy::Empty)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(dict.load_failed());
+        let mut bytes = Vec::new();
+        crate::binary::compile("软\truan\t11461\n壖\truan\t105\n".as_bytes(), &mut bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker = spawn_loader_with_report(
+            &path,
+            Arc::clone(&dict),
+            FallbackPolicy::Empty,
+            move |report| {
+                assert!(report.loaded);
+                assert_eq!(report.entries, 2);
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+            },
+        )
+        .unwrap();
+        ready.recv().unwrap();
+        assert_eq!(
+            spawn_loader(&path, Arc::clone(&dict), FallbackPolicy::Empty)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(!dict.load_failed());
+        assert_eq!(
+            retype_pinyin::shuangpin::decode("rr", dict.as_ref(), &Default::default()).candidates
+                [0]
+            .text,
+            "软"
+        );
+        drop(dict);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

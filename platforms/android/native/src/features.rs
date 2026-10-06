@@ -22,6 +22,20 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 }
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "countWords" => {
+            let state: Vec<u8> = serde_json::from_value(v["state"].clone())
+                .map_err(|_| "Invalid word counter state")?;
+            let mut counter = retype_types::statistics::WordCounter::restore(&state)
+                .ok_or("Invalid word counter state")?;
+            let mut words = counter.feed(v["text"].as_str().unwrap_or(""));
+            if v["backspace"].as_bool().unwrap_or(false) {
+                counter.backspace();
+            }
+            if v["boundary"].as_bool().unwrap_or(false) {
+                words = words.saturating_add(counter.finish());
+            }
+            Ok(json!({"words":words,"state":counter.checkpoint()}))
+        }
         "pairBegin" | "pairFinish" | "pairCancel" => retype_sync::pairing::mobile(&v),
         "models" => {
             let p: Provider =

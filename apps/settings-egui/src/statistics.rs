@@ -14,6 +14,8 @@ pub struct Counts {
     pub english: u64,
     pub chinese_ms: u64,
     pub english_ms: u64,
+    pub english_words: u64,
+    pub english_word_ms: u64,
 }
 impl Counts {
     fn add(&mut self, other: Self) {
@@ -21,7 +23,10 @@ impl Counts {
         self.english = self.english.saturating_add(other.english);
         self.chinese_ms = self.chinese_ms.saturating_add(other.chinese_ms);
         self.english_ms = self.english_ms.saturating_add(other.english_ms);
+        self.english_words = self.english_words.saturating_add(other.english_words);
+        self.english_word_ms = self.english_word_ms.saturating_add(other.english_word_ms);
     }
+    #[cfg(test)]
     pub fn total(self) -> u64 {
         self.chinese.saturating_add(self.english)
     }
@@ -29,7 +34,9 @@ impl Counts {
         speed(self.chinese, self.chinese_ms)
     }
     pub fn english_speed(self) -> Option<u64> {
-        speed(self.english, self.english_ms)
+        (self.english_words >= 5 && self.english_word_ms >= 10_000).then(|| {
+            (self.english_words as f64 * 60_000.0 / self.english_word_ms as f64).round() as u64
+        })
     }
 }
 pub fn speed(count: u64, active_ms: u64) -> Option<u64> {
@@ -187,7 +194,7 @@ impl Store {
                         let text = String::from_utf8_lossy(&line);
                         let values: Option<Vec<u64>> =
                             text.trim().split(',').map(|v| v.parse().ok()).collect();
-                        let Some(values) = values.filter(|v| v.len() == 5) else {
+                        let Some(values) = values.filter(|v| v.len() == 5 || v.len() == 7) else {
                             continue;
                         };
                         let Some(time) = values[0]
@@ -211,6 +218,8 @@ impl Store {
                             english: values[2],
                             chinese_ms: values[3],
                             english_ms: values[4],
+                            english_words: values.get(5).copied().unwrap_or(0),
+                            english_word_ms: values.get(6).copied().unwrap_or(0),
                         };
                         cache.days.entry(date).or_default().add(counts);
                         if time >= now - 300_000 {
@@ -237,7 +246,7 @@ impl Store {
                 if counts.chinese > 0 {
                     last_chinese = last_chinese.max(*time);
                 }
-                if counts.english > 0 {
+                if counts.english_words > 0 {
                     last_english = last_english.max(*time);
                 }
             }
@@ -270,6 +279,8 @@ impl Store {
                             english: row.counts.english,
                             chinese_ms: row.counts.chinese_ms,
                             english_ms: row.counts.english_ms,
+                            english_words: row.counts.english_words,
+                            english_word_ms: row.counts.english_word_ms,
                         });
                     }
                 }
@@ -298,6 +309,52 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn word_speed_uses_only_new_metric_time_and_weighted_period_totals() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("retype-word-statistics-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let now = Local::now().timestamp_millis();
+        fs::write(
+            root.join("legacy.log"),
+            format!("{},0,5000,0,600000\n", now / 1000),
+        )?;
+        fs::write(
+            root.join("words.log"),
+            format!(
+                "{},0,100,0,10000,5,10000\n{},0,100,0,20000,5,20000\n",
+                now / 1000,
+                now / 1000
+            ),
+        )?;
+        let mut store = Store::new(root.clone());
+        let snapshot = store.load(now)?;
+        assert_eq!(snapshot.total.english, 5200);
+        assert_eq!(snapshot.total.english_words, 10);
+        assert_eq!(snapshot.english_speed, Some(20));
+        assert_eq!(snapshot.total.english_speed(), Some(20));
+        assert_eq!(
+            Counts {
+                english_words: 4,
+                english_word_ms: 60000,
+                ..Default::default()
+            }
+            .english_speed(),
+            None
+        );
+        assert_eq!(
+            Counts {
+                english_words: 5,
+                english_word_ms: 9999,
+                ..Default::default()
+            }
+            .english_speed(),
+            None
+        );
+        assert_eq!(store.load(now + 31000)?.english_speed, None);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn history_weights_activity_and_handles_calendar_boundaries() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap_or_default();
@@ -347,6 +404,7 @@ mod tests {
                     english,
                     chinese_ms: 60000,
                     english_ms: 60000,
+                    ..Default::default()
                 },
             },
         );
@@ -361,6 +419,7 @@ mod tests {
                     english: 50,
                     chinese_ms: 70000,
                     english_ms: 70000,
+                    ..Default::default()
                 }
             );
             assert_eq!(snapshot.today, snapshot.total);

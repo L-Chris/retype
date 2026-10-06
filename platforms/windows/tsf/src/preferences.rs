@@ -99,8 +99,59 @@ pub fn open_settings() -> Result<()> {
         request,
         format!("host={host}"),
     );
+    // Process creation and authenticated pipe IO belong on a worker, never in
+    // SearchHost's TSF callback. Queueing also keeps the menu responsive.
+    std::thread::Builder::new()
+        .name("retype-settings-open".into())
+        .spawn(move || finish_open_settings(request))
+        .map(|_| ())
+        .map_err(|error| {
+            windows_core::Error::from_hresult(windows_core::HRESULT::from_win32(
+                error.raw_os_error().unwrap_or(8) as u32,
+            ))
+        })
+}
+
+fn finish_open_settings(request: u32) {
     let started = std::time::Instant::now();
-    let result = open_settings_inner(request);
+    // A restricted child can sometimes be created successfully but inherit the
+    // sandbox and then fail to initialize Settings. Delegate before attempting
+    // either process creation or cross-integrity window reuse in that case.
+    let restricted = retype_learning::transport::is_app_container().unwrap_or(true);
+    crate::settings_log::event(
+        "launcher",
+        "launch_context",
+        request,
+        format!("app_container={restricted}"),
+    );
+    let direct = if restricted {
+        Err(windows::Win32::Foundation::E_ACCESSDENIED.into())
+    } else {
+        open_settings_inner(request)
+    };
+    let result = direct.or_else(|direct_error| {
+        crate::settings_log::event(
+            "launcher",
+            "broker_open_begin",
+            request,
+            format!("direct_hresult={}", direct_error.code().0),
+        );
+        retype_learning::settings::open(request).map_err(|error| {
+            crate::settings_log::event(
+                "launcher",
+                "broker_open_failed",
+                request,
+                format!(
+                    "kind={:?} win32={}",
+                    error.kind(),
+                    error.raw_os_error().unwrap_or(0)
+                ),
+            );
+            windows_core::Error::from_hresult(windows_core::HRESULT::from_win32(
+                error.raw_os_error().unwrap_or(5) as u32,
+            ))
+        })
+    });
     crate::settings_log::event(
         "launcher",
         "open_return",
@@ -112,7 +163,7 @@ pub fn open_settings() -> Result<()> {
             started.elapsed().as_millis()
         ),
     );
-    result
+    crate::settings_log::flush();
 }
 fn open_settings_inner(request: u32) -> Result<()> {
     let mut buffer = [0u16; 32768];
@@ -244,7 +295,9 @@ fn open_settings_inner(request: u32) -> Result<()> {
                     error.raw_os_error().unwrap_or(0)
                 ),
             );
-            windows_core::Error::from(windows::Win32::Foundation::E_FAIL)
+            windows_core::Error::from_hresult(windows_core::HRESULT::from_win32(
+                error.raw_os_error().unwrap_or(1) as u32,
+            ))
         })?;
     crate::settings_log::event(
         "launcher",

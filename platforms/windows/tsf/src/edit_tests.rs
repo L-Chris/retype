@@ -732,6 +732,7 @@ fn run_host() -> Result<()> {
         );
         request(&state, &context, Work::Toggle)?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        let _ = stats::take_test_words();
         for ch in "hel".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
@@ -742,6 +743,11 @@ fn run_host() -> Result<()> {
             .any(|c| c.text == "hello")));
         request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
         assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("hel "));
+        assert_eq!(
+            stats::take_test_words(),
+            1,
+            "literal word + space counts once"
+        );
         for ch in "hel".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
@@ -750,6 +756,11 @@ fn run_host() -> Result<()> {
             .with_kernel(|k| k.render_state().candidates[0].text.clone());
         request(&state, &context, Work::Key(Key::Tab, Modifiers::NONE))?;
         assert!(String::from_utf16_lossy(&lock(&data).text).ends_with(&format!("{first} ")));
+        assert_eq!(
+            stats::take_test_words(),
+            1,
+            "candidate's trailing space must not duplicate a word"
+        );
         lock(&seen_candidates).clear();
         for ch in "hellp".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
@@ -782,6 +793,20 @@ fn run_host() -> Result<()> {
         )?;
         assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("word"));
         assert!(lock(&state.composition).is_none());
+        assert_eq!(
+            stats::take_test_words(),
+            2,
+            "spelling and Enter commits both count words"
+        );
+        for ch in "cancel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        request(&state, &context, Work::Key(Key::Escape, Modifiers::NONE))?;
+        assert_eq!(
+            stats::take_test_words(),
+            0,
+            "cancelled composition contributes no word"
+        );
         lock(&data).input_scope = Some(IS_PASSWORD);
         request(&state, &context, Work::Key(Key::Char('s'), Modifiers::NONE))?;
         assert!(lock(&state.composition).is_none());

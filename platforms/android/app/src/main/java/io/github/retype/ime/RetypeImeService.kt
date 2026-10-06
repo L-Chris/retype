@@ -65,6 +65,18 @@ class RetypeImeService :
   private var modifierTap = 0
   private var modifierUsed = false
 
+  private fun finishStatistics() {
+    TypingStatistics.get(applicationContext).record(activityClock.boundary())
+  }
+  private fun finishEditorStatistics() {
+    if (composing && connection?.finishComposingText() == true &&
+        !state.chinese && !policy.password && !policy.literal) {
+      TypingStatistics.get(applicationContext).record(activityClock.commit(state.composition, false))
+    }
+    finishStatistics()
+    composing = false
+  }
+
   override fun onCreate() {
     super.onCreate()
     saved.performAttach()
@@ -104,6 +116,7 @@ class RetypeImeService :
               ::literal,
               ::openSettings,
               ::translate,
+              ::paste,
           )
         }
       }
@@ -125,6 +138,7 @@ class RetypeImeService :
 
   override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
     super.onStartInput(attribute, restarting)
+    finishEditorStatistics()
     connection?.finishComposingText()
     connection = currentInputConnection
     composing = false
@@ -195,6 +209,7 @@ class RetypeImeService :
     ++epoch
     translationJob?.cancel()
     noticeJob?.cancel()
+    finishEditorStatistics()
     activityClock.reset()
     connection?.finishComposingText()
     connection = null
@@ -249,13 +264,8 @@ class RetypeImeService :
             val committed = ic.commitText(text, 1)
             accepted = committed && accepted
             if (committed && !policy.password && !policy.literal) {
-              val count =
-                  text
-                      .codePoints()
-                      .filter { !Character.isWhitespace(it) && !Character.isISOControl(it) }
-                      .count()
               TypingStatistics.get(applicationContext)
-                  .record(activityClock.commit(count, committedLanguage))
+                  .record(activityClock.commit(text, committedLanguage))
             }
           }
           val composition = update.getString("composition")
@@ -269,6 +279,12 @@ class RetypeImeService :
           }
           if (update.getBoolean("passThrough")) {
             passthrough?.invoke()
+          }
+          val key = json.optString("value")
+          if (!policy.password && !policy.literal && accepted &&
+              (switching || json.optString("type") == "choose" ||
+               key in setOf("space", "enter", "tab", "left", "right", "up", "down"))) {
+            finishStatistics()
           }
           val candidates = update.getJSONArray("candidates")
           state =
@@ -311,18 +327,12 @@ class RetypeImeService :
     fun commit(text: String): Boolean {
       val accepted = ic.commitText(text, 1)
       if (accepted && !policy.password && !policy.literal) {
-        val count =
-            text
-                .codePoints()
-                .filter { !Character.isWhitespace(it) && !Character.isISOControl(it) }
-                .count()
-        if (count > 0)
-            TypingStatistics.get(applicationContext)
-                .record(activityClock.commit(count, state.chinese))
+        TypingStatistics.get(applicationContext)
+            .record(activityClock.commit(text, state.chinese))
       }
       return accepted
     }
-    return when (value) {
+    val accepted = when (value) {
       "backspace" -> {
         if (policy.password) sendHostKey(ic, KeyEvent.KEYCODE_DEL)
         else {
@@ -352,6 +362,11 @@ class RetypeImeService :
       "escape" -> sendHostKey(ic, KeyEvent.KEYCODE_ESCAPE)
       else -> commit(value)
     }
+    if (accepted && !policy.password && !policy.literal) {
+      if (value == "backspace") activityClock.backspace()
+      else if (value in setOf("enter", "tab", "left", "right", "up", "down", "escape")) finishStatistics()
+    }
+    return accepted
   }
 
   private fun sendHostKey(ic: InputConnection, code: Int): Boolean {
@@ -377,6 +392,21 @@ class RetypeImeService :
       return
     }
     command(JSONObject().put("type", "literal").put("text", value)) { direct(value) }
+  }
+
+  private fun paste(value: String) {
+    val current = epoch
+    val ic = connection ?: return
+    jobs.trySend {
+      if (epoch != current) return@trySend
+      if (handle != 0L) NativeBridge.dispatch(handle, JSONObject().put("type", "reset").toString())
+      withContext(Dispatchers.Main) {
+        if (epoch != current || connection !== ic) return@withContext
+        finishEditorStatistics()
+        ic.commitText(value, 1)
+        state = state.copy(composition = "", candidates = emptyList())
+      }
+    }
   }
 
   private fun choose(index: Int, generation: Long) {
@@ -411,6 +441,7 @@ class RetypeImeService :
       return
     }
     if (state.translating) return
+    finishEditorStatistics()
     val current = epoch
     val ic = connection ?: return
     noticeJob?.cancel()
@@ -482,7 +513,7 @@ class RetypeImeService :
       Log.d(
           "retype",
           "composition reset by editor selection epoch=$epoch selection=$newSelStart:$newSelEnd composing=$candidatesStart:$candidatesEnd")
-      connection?.finishComposingText()
+      finishEditorStatistics()
       composing = false
       state = state.copy(composition = "", candidates = emptyList())
       command(JSONObject().put("type", "reset"))
@@ -514,6 +545,7 @@ class RetypeImeService :
       return super.onKeyDown(keyCode, event)
     }
     if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed) {
+      finishEditorStatistics()
       connection?.finishComposingText()
       composing = false
       command(JSONObject().put("type", "reset"))
@@ -557,6 +589,7 @@ class RetypeImeService :
   }
 
   override fun onDestroy() {
+    finishEditorStatistics()
     ++epoch
     view?.disposeComposition()
     registry.currentState = Lifecycle.State.DESTROYED

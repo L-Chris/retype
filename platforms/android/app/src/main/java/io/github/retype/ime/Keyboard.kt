@@ -61,6 +61,7 @@ fun Keyboard(
     onLiteral: (String) -> Unit,
     onSettings: () -> Unit,
     onTranslate: () -> Unit,
+    onPaste: (String) -> Unit,
 ) {
   val context = LocalContext.current
   val clipboard = remember { LanClipboard.get(context) }
@@ -119,7 +120,7 @@ fun Keyboard(
                     lan.text!!.replace('\n', ' '),
                     Modifier.weight(1f)
                       .clickable {
-                        clipboard.pasteText()?.let(onLiteral)
+                        clipboard.pasteText()?.let(onPaste)
                       }
                       .padding(vertical = 8.dp),
                     fontSize = 13.sp,

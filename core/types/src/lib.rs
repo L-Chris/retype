@@ -9,6 +9,7 @@ pub mod context;
 pub mod event;
 pub mod learning;
 pub mod render;
+pub mod statistics;
 
 pub use context::{AppInfo, ContextSnapshot, FieldInfo, FieldKind, PrivacyLevel};
 pub use event::{AsrEvent, InputEvent, InputSource, Key, Modifiers, PinyinScheme, VoiceEvent};

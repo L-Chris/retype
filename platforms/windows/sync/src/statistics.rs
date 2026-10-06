@@ -11,6 +11,10 @@ pub struct Counts {
     pub english: u64,
     pub chinese_ms: u64,
     pub english_ms: u64,
+    #[serde(default)]
+    pub english_words: u64,
+    #[serde(default)]
+    pub english_word_ms: u64,
 }
 impl Counts {
     pub fn add(&mut self, other: &Self) {
@@ -18,6 +22,8 @@ impl Counts {
         self.english = self.english.saturating_add(other.english);
         self.chinese_ms = self.chinese_ms.saturating_add(other.chinese_ms);
         self.english_ms = self.english_ms.saturating_add(other.english_ms);
+        self.english_words = self.english_words.saturating_add(other.english_words);
+        self.english_word_ms = self.english_word_ms.saturating_add(other.english_word_ms);
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +67,7 @@ pub fn capture(root: &Path, device: &str) -> Result<Vec<Bucket>> {
                 break;
             }
             let values: Option<Vec<u64>> = line.trim().split(',').map(|v| v.parse().ok()).collect();
-            let Some(v) = values.filter(|v| v.len() == 5) else {
+            let Some(v) = values.filter(|v| v.len() == 5 || v.len() == 7) else {
                 continue;
             };
             if v[0].saturating_mul(1000) < reset {
@@ -72,6 +78,8 @@ pub fn capture(root: &Path, device: &str) -> Result<Vec<Bucket>> {
                 english: v[2],
                 chinese_ms: v[3],
                 english_ms: v[4],
+                english_words: v.get(5).copied().unwrap_or(0),
+                english_word_ms: v.get(6).copied().unwrap_or(0),
             });
         }
         let stream = path
@@ -101,6 +109,16 @@ pub fn merge(existing: &mut Vec<Bucket>, incoming: &[Bucket]) -> Result<()> {
             || row.stream.len() > 128
             || !row.stream.ends_with(".log")
             || row.minute > 50_000_000
+            || [
+                row.counts.chinese,
+                row.counts.english,
+                row.counts.chinese_ms,
+                row.counts.english_ms,
+                row.counts.english_words,
+                row.counts.english_word_ms,
+            ]
+            .iter()
+            .any(|v| *v > 1_000_000_000_000_000)
         {
             return Err("云端统计记录无效".into());
         }
@@ -111,6 +129,8 @@ pub fn merge(existing: &mut Vec<Bucket>, incoming: &[Bucket]) -> Result<()> {
         entry.counts.english = entry.counts.english.max(row.counts.english);
         entry.counts.chinese_ms = entry.counts.chinese_ms.max(row.counts.chinese_ms);
         entry.counts.english_ms = entry.counts.english_ms.max(row.counts.english_ms);
+        entry.counts.english_words = entry.counts.english_words.max(row.counts.english_words);
+        entry.counts.english_word_ms = entry.counts.english_word_ms.max(row.counts.english_word_ms);
     }
     *existing = all.into_values().collect();
     Ok(())
@@ -136,6 +156,14 @@ pub fn history(imported: &[Bucket], local: &[Bucket], device: &str) -> Vec<Bucke
                     missing.counts.chinese_ms.saturating_sub(counts.chinese_ms);
                 missing.counts.english_ms =
                     missing.counts.english_ms.saturating_sub(counts.english_ms);
+                missing.counts.english_words = missing
+                    .counts
+                    .english_words
+                    .saturating_sub(counts.english_words);
+                missing.counts.english_word_ms = missing
+                    .counts
+                    .english_word_ms
+                    .saturating_sub(counts.english_word_ms);
             }
             (missing.counts != Counts::default()).then_some(missing)
         })
@@ -144,6 +172,32 @@ pub fn history(imported: &[Bucket], local: &[Bucket], device: &str) -> Vec<Bucke
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn word_fields_survive_legacy_merges_and_local_restore() -> Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("retype-sync-word-stats-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        std::fs::write(
+            root.join("typing.log"),
+            "3600,2,100,400,60000\n3601,0,10,0,500,2,500\n",
+        )
+        .map_err(|e| e.to_string())?;
+        let local = capture(&root, &"a".repeat(32))?;
+        assert_eq!(local[0].counts.english_words, 2);
+        assert_eq!(local[0].counts.english_word_ms, 500);
+        let old: Vec<Bucket> = serde_json::from_str(&format!(r#"[{{"device":"{}","stream":"typing.log","minute":60,"counts":{{"chinese":2,"english":110,"chinese_ms":400,"english_ms":60500}}}}]"#, "a".repeat(32))).map_err(|e| e.to_string())?;
+        let mut combined = local.clone();
+        merge(&mut combined, &old)?;
+        merge(&mut combined, &local)?;
+        assert_eq!(combined, local);
+        assert!(history(&combined, &local, &"a".repeat(32)).is_empty());
+        let restored = history(&combined, &old, &"a".repeat(32));
+        assert_eq!(restored[0].counts.english_words, 2);
+        assert_eq!(restored[0].counts.english_word_ms, 500);
+        assert_eq!(restored[0].counts.english, 0);
+        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+        Ok(())
+    }
     #[test]
     fn repeated_downloads_use_absolute_counts_and_partial_lines_wait() -> Result<()> {
         let root = std::env::temp_dir().join(format!("retype-sync-stats-{}", uuid::Uuid::new_v4()));

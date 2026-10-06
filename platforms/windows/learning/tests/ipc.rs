@@ -197,6 +197,7 @@ fn appcontainer_child_probe() {
     let Ok(pipe) = std::env::var("RETYPE_TEST_PIPE") else {
         return;
     };
+    assert!(transport::is_app_container().unwrap());
     let mut request = Broker::poll("appcontainer");
     request.events.push(SequencedEvent {
         sequence: 1,
@@ -212,6 +213,32 @@ fn appcontainer_child_probe() {
     };
     let response: Response = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(response.acknowledged, 1);
+    let dictionary = PathBuf::from(std::env::var("RETYPE_TEST_DICT").unwrap());
+    // SearchHost can read the image even when normalized path lookup is denied.
+    let normalized = std::fs::canonicalize(&dictionary);
+    eprintln!(
+        "AppContainer normalized_path_denied={}",
+        normalized.is_err()
+    );
+    let dict = retype_dict::binary::open_shared(&dictionary).unwrap();
+    let candidates = retype_pinyin::shuangpin::decode(
+        "rr",
+        dict.as_ref(),
+        &retype_pinyin::DecodeOptions::default(),
+    )
+    .candidates;
+    assert_eq!(candidates[0].text, "软");
+    assert!(candidates.iter().any(|candidate| candidate.text == "壖"));
+    // Exercise the new foreground-delegation transport in a real AppContainer.
+    // An isolated test broker must never launch the user's installed Settings.
+    let open = retype_learning::settings::Request {
+        start_settings: true,
+        request_id: 42,
+    };
+    let response =
+        transport::exchange_with_foreground(&pipe, &serde_json::to_vec(&open).unwrap()).unwrap();
+    let response: retype_learning::settings::Response = serde_json::from_slice(&response).unwrap();
+    assert!(!response.settings_started);
     assert!(
         std::fs::read(std::env::var("RETYPE_TEST_PRIVATE_DB").unwrap()).is_err(),
         "an AppContainer must not read the broker's word-bearing database"
@@ -330,6 +357,14 @@ fn appcontainer_can_learn_through_pipe_but_cannot_read_database() {
     let sid = transport::user_sid().unwrap();
     let probe = broker.root.join("probe.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    let dictionary = broker.root.join("dictionary.bin");
+    let mut bytes = Vec::new();
+    retype_dict::binary::compile(
+        "软\truan\t11461\n壖\truan\t105\n瑌\truan\t92\n礝\truan\t60\n".as_bytes(),
+        &mut bytes,
+    )
+    .unwrap();
+    std::fs::write(&dictionary, bytes).unwrap();
     let executable_sddl = transport::wide(&format!(
         "D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)(A;OICI;GRGX;;;AC)"
     ));
@@ -363,13 +398,15 @@ fn appcontainer_can_learn_through_pipe_but_cannot_read_database() {
             ),
             0
         );
-        let applied = SetFileSecurityW(
-            transport::wide(&probe.to_string_lossy()).as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            executable_descriptor,
-        );
+        for path in [&probe, &dictionary] {
+            let applied = SetFileSecurityW(
+                transport::wide(&path.to_string_lossy()).as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                executable_descriptor,
+            );
+            assert_ne!(applied, 0);
+        }
         LocalFree(executable_descriptor);
-        assert_ne!(applied, 0);
     }
     let profile_name = transport::wide(&format!(
         "retype.learning.test.{}",
@@ -451,6 +488,7 @@ fn appcontainer_can_learn_through_pipe_but_cannot_read_database() {
         .map(|(name, value)| format!("{name}={value}"))
         .collect();
     environment.push(format!("RETYPE_TEST_PIPE={}", broker.pipe));
+    environment.push(format!("RETYPE_TEST_DICT={}", dictionary.display()));
     environment.push(format!(
         "RETYPE_TEST_PRIVATE_DB={}",
         broker.root.join("learning/user.db").display()

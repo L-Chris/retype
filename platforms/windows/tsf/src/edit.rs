@@ -158,7 +158,7 @@ impl Edit_Impl {
                 state.reset_kernel();
                 if let Some(text) = english {
                     if countable(&self.context) {
-                        stats::commit(&text);
+                        stats::commit(&state.stats_clock, &text, true);
                     }
                     if learnable(&self.context, ec)
                         && text.len() >= 2
@@ -180,7 +180,7 @@ impl Edit_Impl {
             replace(state, &self.context, ec, &text, false)?;
             if countable(&self.context) {
                 stats::activity(&state.stats_clock, Language::English);
-                stats::commit(&text);
+                stats::commit(&state.stats_clock, &text, false);
             }
             return Ok(());
         }
@@ -209,6 +209,7 @@ impl Edit_Impl {
         if matches!(self.work, Work::Translate)
             && !session.backend.with_kernel(|k| k.has_composition())
         {
+            stats::boundary(&state.stats_clock);
             return crate::translation::capture(state, &self.context, ec);
         }
         let existing = lock(&state.composition).clone();
@@ -247,6 +248,7 @@ impl Edit_Impl {
             }
             Work::Direct(_) | Work::Finish(_) | Work::Refresh => return Ok(()),
         };
+        let input_chinese = session.backend.with_kernel(|k| k.is_chinese());
         let actions = session.submit_in_context(event, countable(&self.context));
         if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
@@ -299,9 +301,31 @@ impl Edit_Impl {
             }
         }
         self.refresh(ec)?;
-        if countable(&self.context) && !matches!(self.work, Work::Key(Key::Enter, _)) {
+        if countable(&self.context)
+            && !(input_chinese && matches!(self.work, Work::Key(Key::Enter, _)))
+        {
             for text in committed {
-                stats::commit(&text);
+                stats::commit(&state.stats_clock, &text, false);
+            }
+            if matches!(
+                self.work,
+                Work::Choose(..)
+                    | Work::Toggle
+                    | Work::SetChinese(_)
+                    | Work::Translate
+                    | Work::Boundary(..)
+                    | Work::Key(
+                        Key::Space
+                            | Key::Enter
+                            | Key::Tab
+                            | Key::Left
+                            | Key::Right
+                            | Key::Up
+                            | Key::Down,
+                        _
+                    )
+            ) {
+                stats::boundary(&state.stats_clock);
             }
         }
         if matches!(self.work, Work::Translate) {

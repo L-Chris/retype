@@ -35,7 +35,7 @@ fun StatisticsPage() {
     }
     SettingsCard {
         Text("最近 5 分钟", style = MaterialTheme.typography.titleMedium)
-        Text("中文 ${recent.speed(true) ?: "—"} 字/分钟 · 英文 ${recent.speed(false) ?: "—"} 字符/分钟")
+        Text("中文 ${recent.speed(true) ?: "—"} 字/分钟 · 英文 ${recent.speed(false) ?: "—"} 词/分钟")
     }
     summary?.let { s ->
         SettingsCard {
@@ -43,11 +43,11 @@ fun StatisticsPage() {
             Row {
                 Column(Modifier.weight(1f)) {
                     Text("中文")
-                    Text("${s.current.chinese}", style = MaterialTheme.typography.headlineMedium)
+                    Text("${s.current.chinese} 字", style = MaterialTheme.typography.headlineMedium)
                 }
                 Column(Modifier.weight(1f)) {
                     Text("英文")
-                    Text("${s.current.english}", style = MaterialTheme.typography.headlineMedium)
+                    Text("${s.current.englishWords} 词", style = MaterialTheme.typography.headlineMedium)
                 }
             }
         }
@@ -59,7 +59,7 @@ fun StatisticsPage() {
             }
             if (help)
                 Text(
-                    "均速 = 上屏字符总数 ÷ 有效输入时间；连续按键间隔超过 15 秒不计入时间，样本不足时不显示速度。",
+                    "中文按字数、英文按实际单词数计算均速；连续输入间隔超过 15 秒不计入时间，样本不足时不显示速度。英文单词统计从升级后开始，旧字符记录保留。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             Row {
@@ -71,7 +71,7 @@ fun StatisticsPage() {
                             style = MaterialTheme.typography.headlineMedium,
                         )
                         Text(
-                            if (ch) "字/分钟" else "字符/分钟",
+                            if (ch) "字/分钟" else "词/分钟",
                             style = MaterialTheme.typography.bodySmall,
                         )
                         val old = s.previous.speed(ch)
@@ -122,7 +122,7 @@ fun StatisticsPage() {
             }
             selected?.let {
                 Text(
-                    "${it.first} · 中文 ${it.second.speed(true) ?: "—"} · 英文 ${it.second.speed(false) ?: "—"}",
+                    "${it.first} · 中文 ${it.second.speed(true) ?: "—"} · 英文 ${it.second.speed(false) ?: "—"} 词/分钟",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

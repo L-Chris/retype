@@ -29,6 +29,15 @@ class KeyboardIntegrationTest {
     val prefs = instrumentation.targetContext.getSharedPreferences("settings", 0)
     val oldFlypy = prefs.getBoolean("flypy", false)
     val oldChinese = prefs.getBoolean("chinese", true)
+    val statistics = TypingStatistics.get(instrumentation.targetContext)
+    val initialWords = statistics.summary(0).current.englishWords
+    fun expectWords(words: Long) {
+      val deadline = android.os.SystemClock.uptimeMillis() + 5000
+      while (statistics.summary(0).current.englishWords != words && android.os.SystemClock.uptimeMillis() < deadline) {
+        android.os.SystemClock.sleep(50)
+      }
+      assertEquals(words, statistics.summary(0).current.englishWords)
+    }
     val oldIme = device.executeShellCommand("settings get secure default_input_method").trim()
     val ime = "io.github.retype.ime/.RetypeImeService"
     val wasEnabled =
@@ -80,11 +89,13 @@ class KeyboardIntegrationTest {
       assertNotNull(hello)
       hello!!.click()
       assertEquals("你好hello ", find(By.desc("editor-normal"))!!.text)
+      expectWords(initialWords + 1)
       for (letter in "ni") find(By.text(letter.toString()))!!.click()
       find(By.desc("editor-password"))!!.click()
       assertNotNull(find(By.text("安全输入")))
       assertFalse(device.hasObject(By.desc("candidate-hello")))
       find(By.text("a"))!!.click()
+      expectWords(initialWords + 2)
       find(By.desc("editor-email"))!!.click()
       assertNotNull(find(By.desc("retype"), 10000))
       assertTrue(device.hasObject(By.desc("切换至中文")))

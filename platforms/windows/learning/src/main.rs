@@ -87,6 +87,29 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if let Ok(bytes) = listener.receive(&sid) {
+            if let Ok(request) =
+                serde_json::from_slice::<retype_learning::settings::Request>(&bytes)
+            {
+                let result = if custom_db.is_none() && request.start_settings {
+                    // Resolve the current install again: an upgrade may occur
+                    // while this broker is waiting for a pipe connection.
+                    let active = transport::read_machine_registry("ActiveDir")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| directory.clone());
+                    retype_learning::settings::launch(&active, request.request_id)
+                } else {
+                    Err(std::io::ErrorKind::PermissionDenied.into())
+                };
+                let response = retype_learning::settings::Response {
+                    settings_started: result.is_ok(),
+                    win32: result.err().and_then(|error| error.raw_os_error()),
+                };
+                if let Ok(bytes) = serde_json::to_vec(&response) {
+                    let _ = listener.respond(&bytes);
+                }
+                listener.disconnect();
+                continue;
+            }
             // An authenticated AppContainer client can request this one fixed native
             // helper. No client-controlled executable path, arguments or shell command.
             if serde_json::from_slice::<serde_json::Value>(&bytes)

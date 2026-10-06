@@ -22,6 +22,7 @@ pub(crate) enum Language {
 #[derive(Default)]
 pub(crate) struct ActivityClock {
     last: Option<(Instant, Language)>,
+    words: retype_types::statistics::WordCounter,
 }
 
 impl ActivityClock {
@@ -38,7 +39,18 @@ impl ActivityClock {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.finish_word();
         self.last = None;
+    }
+    fn finish_word(&mut self) {
+        let words = self.words.finish();
+        if words > 0 {
+            enqueue(Delta {
+                timestamp_ms: now_ms(),
+                english_words: words,
+                ..Default::default()
+            });
+        }
     }
 }
 
@@ -49,6 +61,8 @@ struct Delta {
     english: u32,
     chinese_active_ms: u32,
     english_active_ms: u32,
+    english_words: u32,
+    english_word_ms: u32,
 }
 
 impl Delta {
@@ -61,10 +75,20 @@ impl Delta {
         self.english_active_ms = self
             .english_active_ms
             .saturating_add(other.english_active_ms);
+        self.english_words = self.english_words.saturating_add(other.english_words);
+        self.english_word_ms = self.english_word_ms.saturating_add(other.english_word_ms);
     }
 }
 
 static SENDER: OnceLock<Option<SyncSender<Delta>>> = OnceLock::new();
+#[cfg(test)]
+thread_local! {
+    static TEST_WORDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn take_test_words() -> u32 {
+    TEST_WORDS.with(|words| words.replace(0))
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -116,6 +140,8 @@ fn sender() -> Option<&'static SyncSender<Delta>> {
 
 fn enqueue(delta: Delta) {
     if cfg!(test) {
+        #[cfg(test)]
+        TEST_WORDS.with(|words| words.set(words.get().saturating_add(delta.english_words)));
         // TSF integration tests exercise the real edit path without changing
         // the developer's personal statistics.
         return;
@@ -140,21 +166,43 @@ pub(crate) fn activity(clock: &Mutex<ActivityClock>, language: Language) {
     };
     match language {
         Language::Chinese => delta.chinese_active_ms = elapsed,
-        Language::English => delta.english_active_ms = elapsed,
+        Language::English => {
+            delta.english_active_ms = elapsed;
+            delta.english_word_ms = elapsed;
+        }
     }
     enqueue(delta);
 }
 
-pub(crate) fn commit(text: &str) {
+pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
     let (chinese, english) = count(text);
-    if chinese + english > 0 {
+    let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut english_words = clock.words.feed(text);
+    if boundary {
+        english_words = english_words.saturating_add(clock.words.finish());
+    }
+    if chinese + english + english_words > 0 {
         enqueue(Delta {
             timestamp_ms: now_ms(),
             chinese,
             english,
+            english_words,
             ..Delta::default()
         });
     }
+}
+pub(crate) fn boundary(clock: &Mutex<ActivityClock>) {
+    clock
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .finish_word();
+}
+pub(crate) fn backspace(clock: &Mutex<ActivityClock>) {
+    clock
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .words
+        .backspace();
 }
 
 fn count(text: &str) -> (u32, u32) {
@@ -226,8 +274,13 @@ fn flush(path: &PathBuf, pending: &mut BTreeMap<u64, Delta>) {
         use std::fmt::Write as _;
         let _ = writeln!(
             lines,
-            "{second},{},{},{},{}",
-            delta.chinese, delta.english, delta.chinese_active_ms, delta.english_active_ms
+            "{second},{},{},{},{},{},{}",
+            delta.chinese,
+            delta.english,
+            delta.chinese_active_ms,
+            delta.english_active_ms,
+            delta.english_words,
+            delta.english_word_ms
         );
     }
     let original_len = file.metadata().map_or(0, |metadata| metadata.len());
@@ -289,6 +342,8 @@ mod tests {
                 english: 3,
                 chinese_active_ms: 400,
                 english_active_ms: 500,
+                english_words: 1,
+                english_word_ms: 500,
             })
             .expect("statistics receiver");
         drop(sender);
@@ -301,7 +356,7 @@ mod tests {
             .path();
         assert_eq!(
             std::fs::read_to_string(log).expect("statistics data"),
-            "1000,2,3,400,500\n"
+            "1000,2,3,400,500,1,500\n"
         );
         std::fs::remove_dir_all(root).expect("remove test statistics");
     }

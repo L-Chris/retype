@@ -88,6 +88,31 @@ pub fn pipe_name(sid: &str) -> String {
     format!(r"\\.\pipe\retype-learning-{sid}-v1")
 }
 
+pub fn is_app_container() -> io::Result<bool> {
+    let mut token = null_mut();
+    // SAFETY: process pseudo-handle and a valid token out parameter.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = Handle::new(token)?;
+    let mut value = 0u32;
+    let mut bytes = 0;
+    // SAFETY: this token information class returns one DWORD in aligned storage.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenIsAppContainer,
+            (&mut value as *mut u32).cast(),
+            size_of::<u32>() as u32,
+            &mut bytes,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(value != 0)
+}
+
 pub fn private_directory(path: &std::path::Path, sid: &str) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     let text = wide(&format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{sid})"));
@@ -268,6 +293,16 @@ pub fn read_frame(pipe: &Handle) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 pub fn exchange(name: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
+    exchange_inner(name, bytes, false)
+}
+
+/// Explicit user action only: let the authenticated desktop broker bring the
+/// requested settings window forward. All pipe IO still runs on a worker.
+pub fn exchange_with_foreground(name: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
+    exchange_inner(name, bytes, true)
+}
+
+fn exchange_inner(name: &str, bytes: &[u8], foreground: bool) -> io::Result<Vec<u8>> {
     let name = wide(name);
     // Identification only: a server cannot impersonate this client to access its files.
     // SAFETY: valid nul-terminated name; returned handle exclusively owned below.
@@ -301,6 +336,16 @@ pub fn exchange(name: &str, bytes: &[u8]) -> io::Result<Vec<u8>> {
         }
     };
     authenticate_server(&pipe)?;
+    if foreground {
+        let mut pid = 0;
+        // SAFETY: the connected pipe's owner has been authenticated above. Grant
+        // foreground permission to this one server, never to arbitrary processes.
+        unsafe {
+            if GetNamedPipeServerProcessId(pipe.0, &mut pid) != 0 {
+                windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(pid);
+            }
+        }
+    }
     write_frame(&pipe, bytes)?;
     let response = read_frame(&pipe)?;
     write_all(&pipe, &[1])?;

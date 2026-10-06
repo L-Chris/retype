@@ -66,9 +66,9 @@ class MobileFeaturesTest {
         clock.tick(true, 1000)
         clock.tick(true, 2000)
         clock.tick(true, 19000)
-        assertEquals(Counts(chinese = 20, chineseMs = 1000), clock.commit(20, true))
+        assertEquals(Counts(chinese = 20, chineseMs = 1000), clock.commit("字".repeat(20), true))
         clock.tick(false, 20000)
-        assertEquals(Counts(english = 10), clock.commit(10, false))
+        assertEquals(Counts(english = 10), clock.commit("a".repeat(10), false))
         val db = TypingStatistics.get(context)
         val device = "f".repeat(32)
         val minute = ZonedDateTime.parse("2020-01-02T12:00:00Z").toEpochSecond() / 60

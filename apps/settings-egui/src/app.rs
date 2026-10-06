@@ -544,16 +544,11 @@ impl SettingsApp {
                 card(&mut columns[column], |ui| {
                     ui.label(title);
                     ui.label(
-                        RichText::new(counts.total().to_string())
-                            .size(30.0)
-                            .strong(),
-                    );
-                    ui.label(
                         RichText::new(format!(
-                            "中文 {} 字 · 英文 {} 字符",
-                            counts.chinese, counts.english
+                            "中文 {} 字 · 英文 {} 词",
+                            counts.chinese, counts.english_words
                         ))
-                        .size(12.0)
+                        .size(18.0)
                         .color(MUTED),
                     );
                 });
@@ -569,7 +564,7 @@ impl SettingsApp {
             );
             ui.columns(2, |columns| {
                 speed_value(&mut columns[0], "中文", "字/分钟", snapshot.chinese_speed);
-                speed_value(&mut columns[1], "英文", "字符/分钟", snapshot.english_speed);
+                speed_value(&mut columns[1], "英文", "词/分钟", snapshot.english_speed);
             });
         });
         ui.add_space(14.0);
@@ -588,7 +583,7 @@ impl SettingsApp {
                     MUTED,
                 );
                 response
-                    .on_hover_text("均速 = 上屏字符总数 ÷ 有效输入时间；样本不足时不显示速度。");
+                    .on_hover_text("中文按字数、英文按实际单词数计算均速；连续输入间隔超过 15 秒不计入时间，样本不足时不显示速度；英文单词统计从升级后开始，旧字符记录保留。");
             });
             ui.horizontal(|ui| {
                 for period in [Period::Day, Period::Week, Period::Month, Period::Year] {
@@ -613,11 +608,11 @@ impl SettingsApp {
                         (
                             1,
                             "英文",
-                            "字符/分钟",
+                            "词/分钟",
                             current.english_speed(),
                             previous.english_speed(),
-                            current.english,
-                            current.english_ms,
+                            current.english_words,
+                            current.english_word_ms,
                         ),
                     ] {
                         speed_value(&mut columns[index], language, unit, speed);
@@ -633,7 +628,7 @@ impl SettingsApp {
                         columns[index].label(
                             RichText::new(format!(
                                 "{count} {} · 有效 {}",
-                                if index == 0 { "字" } else { "字符" },
+                                if index == 0 { "字" } else { "词" },
                                 active_duration(active)
                             ))
                             .size(11.0)
@@ -671,7 +666,7 @@ impl SettingsApp {
                     (
                         format!("{}/{}", date.month(), date.day()),
                         Some(counts.chinese),
-                        Some(counts.english),
+                        Some(counts.english_words),
                     )
                 })
                 .collect();
@@ -1241,19 +1236,13 @@ fn active_duration(ms: u64) -> String {
         format!("{:.1}小时", ms as f64 / 3_600_000.0)
     }
 }
-fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], stacked: bool) {
+fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], quantity: bool) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 150.0), egui::Sense::hover());
     let painter = ui.painter();
     let max = data
         .iter()
-        .map(|(_, ch, en)| {
-            if stacked {
-                ch.unwrap_or(0) + en.unwrap_or(0)
-            } else {
-                ch.unwrap_or(0).max(en.unwrap_or(0))
-            }
-        })
+        .map(|(_, ch, en)| ch.unwrap_or(0).max(en.unwrap_or(0)))
         .max()
         .unwrap_or(1)
         .max(1) as f32;
@@ -1265,41 +1254,23 @@ fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], stacked
         let h_ch = ch.unwrap_or(0) as f32 / max * 110.0;
         let h_en = en.unwrap_or(0) as f32 / max * 110.0;
         let blue = Color32::from_rgb(115, 185, 210);
-        if stacked {
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x - width, baseline - h_ch),
-                    egui::pos2(x + width, baseline),
-                ),
-                2,
-                ACCENT,
-            );
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x - width, baseline - h_ch - h_en),
-                    egui::pos2(x + width, baseline - h_ch),
-                ),
-                2,
-                blue,
-            );
-        } else {
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x - width - 1.0, baseline - h_ch),
-                    egui::pos2(x - 1.0, baseline),
-                ),
-                2,
-                ACCENT,
-            );
-            painter.rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(x + 1.0, baseline - h_en),
-                    egui::pos2(x + width + 1.0, baseline),
-                ),
-                2,
-                blue,
-            );
-        }
+
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x - width - 1.0, baseline - h_ch),
+                egui::pos2(x - 1.0, baseline),
+            ),
+            2,
+            ACCENT,
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x + 1.0, baseline - h_en),
+                egui::pos2(x + width + 1.0, baseline),
+            ),
+            2,
+            blue,
+        );
         painter.text(
             egui::pos2(x, baseline + 10.0),
             egui::Align2::CENTER_CENTER,
@@ -1315,20 +1286,34 @@ fn chart(ui: &mut egui::Ui, data: &[(String, Option<u64>, Option<u64>)], stacked
         let hover = ui.interact(column, response.id.with(i), egui::Sense::hover());
         if hover.hovered() {
             hover.on_hover_text_at_pointer(format!(
-                "{label}\n中文 {}\n英文 {}",
+                "{label}\n中文 {} {}\n英文 {} {}",
                 ch.map(|v| v.to_string())
                     .unwrap_or_else(|| "样本不足".into()),
+                if quantity { "字" } else { "字/分钟" },
                 en.map(|v| v.to_string())
-                    .unwrap_or_else(|| "样本不足".into())
+                    .unwrap_or_else(|| "样本不足".into()),
+                if quantity { "词" } else { "词/分钟" }
             ));
         }
     }
     ui.horizontal(|ui| {
-        ui.label(RichText::new("● 中文").size(12.0).color(ACCENT));
         ui.label(
-            RichText::new("● 英文")
-                .size(12.0)
-                .color(Color32::from_rgb(115, 185, 210)),
+            RichText::new(if quantity {
+                "● 中文（字）"
+            } else {
+                "● 中文（字/分钟）"
+            })
+            .size(12.0)
+            .color(ACCENT),
+        );
+        ui.label(
+            RichText::new(if quantity {
+                "● 英文（词）"
+            } else {
+                "● 英文（词/分钟）"
+            })
+            .size(12.0)
+            .color(Color32::from_rgb(115, 185, 210)),
         );
     });
 }

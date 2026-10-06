@@ -680,6 +680,21 @@ impl KeyEventSink_Impl {
                 .into());
         }
         if !wanted {
+            if status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0 {
+                if key == Key::Backspace {
+                    stats::backspace(&state.stats_clock);
+                } else if mods.is_plain()
+                    && matches!(key, Key::Char(ch) if ch.is_ascii_digit() || matches!(ch, '\'' | '\u{2019}'))
+                {
+                    if let Key::Char(ch) = key {
+                        // Passthrough connectors have no quantity of their own;
+                        // retain the boundary state for direct English input.
+                        stats::commit(&state.stats_clock, &ch.to_string(), false);
+                    }
+                } else {
+                    stats::boundary(&state.stats_clock);
+                }
+            }
             if english
                 && state
                     .session()
