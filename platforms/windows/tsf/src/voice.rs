@@ -22,6 +22,8 @@ use windows::{
     },
 };
 struct Frame {
+    request: u32,
+    painted: bool,
     state: Weak<TipState>,
     context: ITfContext,
     range: ITfRange,
@@ -49,7 +51,8 @@ impl Drop for Frame {
     }
 }
 pub(crate) fn dismiss(state: &TipState) {
-    if let Some(window) = lock(&state.voice_window).take() {
+    let window = lock(&state.voice_window).take();
+    if let Some(window) = window {
         unsafe {
             let _ = DestroyWindow(HWND(window as *mut _));
         }
@@ -80,6 +83,8 @@ pub(crate) fn capture(
     if active(state) {
         return Ok(());
     }
+    let request = crate::settings_log::request_id();
+    crate::settings_log::event("launcher", "voice_capture", request, format!("held={held}"));
     unsafe {
         if context.GetStatus()?.dwDynamicFlags & TS_SD_READONLY != 0 {
             return Err(E_ACCESSDENIED.into());
@@ -92,6 +97,12 @@ pub(crate) fn capture(
             return Err(E_ACCESSDENIED.into());
         }
         let original = read_range(&range, ec)?;
+        crate::settings_log::event(
+            "launcher",
+            "voice_selection_captured",
+            request,
+            format!("units={}", original.len()),
+        );
         let foreground = GetForegroundWindow();
         let owner = context
             .GetActiveView()
@@ -120,6 +131,12 @@ pub(crate) fn capture(
                     settings,
                 });
                 let failed = result.is_err();
+                crate::settings_log::event(
+                    "launcher",
+                    "voice_helper_start",
+                    request,
+                    format!("success={}", !failed),
+                );
                 let _ = updates.send(result);
                 if failed {
                     return;
@@ -155,6 +172,8 @@ pub(crate) fn capture(
             })
             .map_err(|_| E_FAIL)?;
         let data = Frame {
+            request,
+            painted: false,
             state: Arc::downgrade(state),
             context: context.clone(),
             range,
@@ -177,6 +196,7 @@ pub(crate) fn capture(
         };
         let hwnd = create(data, ec)?;
         *lock(&state.voice_window) = Some(hwnd.0 as usize);
+        crate::settings_log::event("launcher", "voice_window_created", request, "success=true");
         Ok(())
     }
 }
@@ -204,6 +224,7 @@ unsafe fn frame(hwnd: HWND) -> Option<&'static mut Frame> {
 }
 fn finish(f: &mut Frame) {
     if !f.finishing {
+        crate::settings_log::event("launcher", "voice_stop", f.request, "requested=true");
         f.finishing = true;
         f.held = None;
         f.deadline = Instant::now() + Duration::from_secs(90);
@@ -421,8 +442,24 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 }
                 while let Ok(result) = f.updates.try_recv() {
                     match result {
-                        Ok(s) => f.snapshot = s,
+                        Ok(s) => {
+                            if s.phase != f.snapshot.phase {
+                                crate::settings_log::event(
+                                    "launcher",
+                                    "voice_phase",
+                                    f.request,
+                                    format!("phase={:?} has_error={}", s.phase, s.error.is_some()),
+                                );
+                            }
+                            f.snapshot = s;
+                        }
                         Err(e) => {
+                            crate::settings_log::event(
+                                "launcher",
+                                "voice_helper_error",
+                                f.request,
+                                "received=true",
+                            );
                             f.snapshot.phase = Phase::Error;
                             f.snapshot.error = Some(e);
                         }
@@ -493,6 +530,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 let bitmap = CreateCompatibleBitmap(target, bounds.right, bounds.bottom);
                 let old_bitmap = SelectObject(dc, bitmap.into());
                 if let Some(f) = frame(hwnd) {
+                    if !f.painted {
+                        crate::settings_log::event(
+                            "launcher",
+                            "voice_first_paint",
+                            f.request,
+                            format!("preview_units={}", f.snapshot.text.encode_utf16().count()),
+                        );
+                    }
                     let mut rect = RECT::default();
                     let _ = GetClientRect(hwnd, &mut rect);
                     let brush = CreateSolidBrush(COLORREF(0x00fafafa));
@@ -576,40 +621,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         w!("Microsoft YaHei UI"),
                     );
                     SelectObject(dc, text_font.into());
-                    let mut textrect = RECT {
+                    let textrect = RECT {
                         left: 14 * f.scale / 96,
                         top: 38 * f.scale / 96,
                         right: 386 * f.scale / 96,
                         bottom: 94 * f.scale / 96,
                     };
                     SetTextColor(dc, COLORREF(0x00292320));
-                    let mut units = f.snapshot.text.encode_utf16().collect::<Vec<_>>();
-                    let mut measured = textrect;
-                    DrawTextW(
-                        dc,
-                        &mut units,
-                        &mut measured,
-                        DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX,
-                    );
                     f.max_scroll =
-                        (measured.bottom - measured.top - (textrect.bottom - textrect.top)).max(0);
-                    if f.follow_tail {
-                        f.scroll = f.max_scroll;
-                    } else {
-                        f.scroll = f.scroll.clamp(0, f.max_scroll);
-                    }
-                    let saved = SaveDC(dc);
-                    IntersectClipRect(
-                        dc,
-                        textrect.left,
-                        textrect.top,
-                        textrect.right,
-                        textrect.bottom,
-                    );
-                    textrect.top -= f.scroll;
-                    textrect.bottom = measured.bottom - f.scroll;
-                    DrawTextW(dc, &mut units, &mut textrect, DT_WORDBREAK | DT_NOPREFIX);
-                    let _ = RestoreDC(dc, saved);
+                        paint_preview(dc, &f.snapshot.text, textrect, &mut f.scroll, f.follow_tail);
                     SelectObject(dc, font.into());
                     let mut buttons = RECT {
                         left: 14 * f.scale / 96,
@@ -632,6 +652,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     SelectObject(dc, old);
                     let _ = DeleteObject(font.into());
                     let _ = DeleteObject(text_font.into());
+                    if !f.painted {
+                        f.painted = true;
+                        crate::settings_log::event(
+                            "launcher",
+                            "voice_first_paint_complete",
+                            f.request,
+                            "success=true",
+                        );
+                    }
                 }
                 let _ = BitBlt(
                     target,
@@ -655,6 +684,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 if !ptr.is_null() {
                     let data = Box::from_raw(ptr);
+                    crate::settings_log::event(
+                        "launcher",
+                        "voice_window_destroyed",
+                        data.request,
+                        format!("phase={:?}", data.snapshot.phase),
+                    );
                     if let Some(state) = data.state.upgrade() {
                         let mut slot = lock(&state.voice_window);
                         if *slot == Some(hwnd.0 as usize) {
@@ -668,5 +703,74 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }))
-    .unwrap_or(LRESULT(0))
+    .unwrap_or_else(|_| {
+        crate::settings_log::event(
+            "launcher",
+            "voice_window_panic",
+            0,
+            format!("message={msg}"),
+        );
+        LRESULT(0)
+    })
+}
+
+fn paint_preview(dc: HDC, text: &str, mut rect: RECT, scroll: &mut i32, follow_tail: bool) -> i32 {
+    // DrawTextW dereferences the string even when its length is zero. An empty
+    // Vec<u16> supplies dangling address 0x2, so skip both measuring and drawing.
+    let mut units = text.encode_utf16().collect::<Vec<_>>();
+    if units.is_empty() {
+        *scroll = 0;
+        return 0;
+    }
+    // SAFETY: The caller owns a live paint DC; units is nonempty and survives both calls.
+    unsafe {
+        let mut measured = rect;
+        DrawTextW(
+            dc,
+            &mut units,
+            &mut measured,
+            DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX,
+        );
+        let max_scroll = (measured.bottom - measured.top - (rect.bottom - rect.top)).max(0);
+        *scroll = if follow_tail {
+            max_scroll
+        } else {
+            (*scroll).clamp(0, max_scroll)
+        };
+        let saved = SaveDC(dc);
+        IntersectClipRect(dc, rect.left, rect.top, rect.right, rect.bottom);
+        rect.top -= *scroll;
+        rect.bottom = measured.bottom - *scroll;
+        DrawTextW(dc, &mut units, &mut rect, DT_WORDBREAK | DT_NOPREFIX);
+        let _ = RestoreDC(dc, saved);
+        max_scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preview_paints_empty_start_and_error_then_transcript_without_crashing() {
+        // Exercise the real GDI rendering path without recording or accessing a host document.
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            assert!(!dc.is_invalid());
+            let rect = RECT {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 30,
+            };
+            let mut scroll = 42;
+            assert_eq!(paint_preview(dc, "", rect, &mut scroll, true), 0);
+            assert_eq!(scroll, 0);
+            assert!(paint_preview(dc, &"hello world ".repeat(100), rect, &mut scroll, true) > 0);
+            assert!(scroll > 0);
+            assert_eq!(paint_preview(dc, "", rect, &mut scroll, false), 0);
+            assert_eq!(scroll, 0);
+            assert_eq!(paint_preview(dc, "你好", rect, &mut scroll, true), 0);
+            let _ = DeleteDC(dc);
+        }
+    }
 }

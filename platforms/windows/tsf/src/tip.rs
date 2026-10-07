@@ -730,7 +730,27 @@ impl KeyEventSink_Impl {
             if test || lp.0 & (1 << 30) != 0 {
                 return Ok(true.into());
             }
+            if matches!(work, edit::Work::Voice(_)) {
+                crate::settings_log::event(
+                    "launcher",
+                    "voice_shortcut_received",
+                    0,
+                    "preserved=false",
+                );
+            }
             let result = edit::request(&state, ctx, work);
+            if matches!(work, edit::Work::Voice(_)) {
+                crate::settings_log::event(
+                    "launcher",
+                    "voice_shortcut_result",
+                    0,
+                    format!(
+                        "accepted={} hresult={}",
+                        result.is_ok(),
+                        result.as_ref().err().map_or(0, |e| e.code().0)
+                    ),
+                );
+            }
             if matches!(work, edit::Work::Voice(true))
                 && bindings.voice == retype_ai::config::Shortcut::VOICE
                 && result.is_ok()
@@ -965,6 +985,14 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(false.into());
             };
             lock(&state.shift_tap).other_key();
+            if voice {
+                crate::settings_log::event(
+                    "launcher",
+                    "voice_shortcut_received",
+                    0,
+                    "preserved=true",
+                );
+            }
             let result = edit::request(
                 &state,
                 ctx,
@@ -979,7 +1007,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             crate::settings_log::event(
                 "launcher",
-                "translation_preserved_shortcut",
+                if voice {
+                    "voice_preserved_shortcut"
+                } else {
+                    "translation_preserved_shortcut"
+                },
                 0,
                 format!(
                     "accepted={} hresult={}",
