@@ -8,7 +8,30 @@ use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, LPARAM, 
 use windows::Win32::UI::TextServices::*;
 use windows_core::{implement, Interface, Ref, Result, BOOL, GUID};
 
+const VOICE_COMMAND: GUID = GUID::from_u128(0x813e19d9_51f0_4b3f_9d7a_a21ef2e1d652);
 const TRANSLATION_COMMAND: GUID = GUID::from_u128(0x40926c8b_8ca6_4ae0_b17c_706ac447a38d);
+
+fn preserved_voice(binding: retype_ai::config::Shortcut) -> Option<TF_PRESERVEDKEY> {
+    if binding == retype_ai::config::Shortcut::VOICE {
+        Some(TF_PRESERVEDKEY {
+            uVKey: 0x12,
+            uModifiers: TF_MOD_RALT,
+        })
+    } else {
+        preserved_translation(binding)
+    }
+}
+fn right_alt_event(vk: WPARAM, lp: LPARAM) -> bool {
+    vk.0 == 0xa5 || (vk.0 == 0x12 && lp.0 & (1 << 24) != 0)
+}
+fn voice_matches(binding: retype_ai::config::Shortcut, vk: WPARAM, lp: LPARAM, bits: u8) -> bool {
+    if binding == retype_ai::config::Shortcut::VOICE {
+        // Exclude left Alt and AltGr/Ctrl+Alt shortcuts.
+        right_alt_event(vk, lp) && bits == 2
+    } else {
+        binding.vk != 0 && binding.vk == (vk.0 & 0xffff) as u16 && binding.modifiers == bits
+    }
+}
 
 fn preserved_translation(binding: retype_ai::config::Shortcut) -> Option<TF_PRESERVEDKEY> {
     // TSF's preserved-key API has no Windows-key modifier. Keep those bindings
@@ -121,10 +144,13 @@ pub struct TipState {
     focus_cookie: Mutex<Vec<u32>>,
     pub(crate) window: Mutex<Option<CandidateWindow>>,
     pub(crate) translation_window: Mutex<Option<usize>>,
+    pub(crate) voice_window: Mutex<Option<usize>>,
+    voice_alt_down: AtomicBool,
     language_bar: Mutex<Option<crate::langbar::LanguageBar>>,
     shift_tap: Mutex<ShiftTap>,
     shortcuts: Mutex<(std::time::Instant, retype_ai::config::Shortcuts)>,
     preserved_translation: Mutex<Option<retype_ai::config::Shortcut>>,
+    preserved_voice: Mutex<Option<retype_ai::config::Shortcut>>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
     pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }
@@ -144,10 +170,13 @@ impl TipState {
             focus_cookie: Mutex::new(Vec::new()),
             window: Mutex::new(Some(CandidateWindow::default())),
             translation_window: Mutex::new(None),
+            voice_window: Mutex::new(None),
+            voice_alt_down: AtomicBool::new(false),
             language_bar: Mutex::new(None),
             shift_tap: Mutex::new(ShiftTap::default()),
             shortcuts: Mutex::new((std::time::Instant::now(), retype_ai::secrets::shortcuts())),
             preserved_translation: Mutex::new(None),
+            preserved_voice: Mutex::new(None),
             mode_bridge: Mutex::new(None),
             stats_clock: Mutex::new(stats::ActivityClock::default()),
         })
@@ -206,6 +235,8 @@ impl TipState {
         self.activated.store(true, Ordering::SeqCst);
         let translation_binding = lock(&self.shortcuts).1.translate;
         self.sync_translation_key(translation_binding);
+        let voice_binding = lock(&self.shortcuts).1.voice;
+        self.sync_voice_key(voice_binding);
         if let Ok(bridge) = crate::langbar::ModeBridge::attach(self, &mgr) {
             *lock(&self.mode_bridge) = Some(bridge);
         }
@@ -221,6 +252,8 @@ impl TipState {
     }
     pub fn deactivate(self: &Arc<Self>) -> Result<()> {
         crate::translation::dismiss(self);
+        crate::voice::dismiss(self);
+        self.voice_alt_down.store(false, Ordering::Release);
         self.activated.store(false, Ordering::SeqCst);
         *lock(&self.shift_tap) = ShiftTap::default();
         lock(&self.stats_clock).reset();
@@ -236,6 +269,10 @@ impl TipState {
             // SAFETY: Registered sinks belong to this manager and client id.
             unsafe {
                 if let Ok(keys) = mgr.cast::<ITfKeystrokeMgr>() {
+                    let voice_binding = lock(&self.preserved_voice).take();
+                    if let Some(key) = voice_binding.and_then(preserved_voice) {
+                        let _ = keys.UnpreserveKey(&VOICE_COMMAND, &key);
+                    }
                     let translation_binding = lock(&self.preserved_translation).take();
                     if let Some(binding) = translation_binding {
                         if let Some(key) = preserved_translation(binding) {
@@ -258,7 +295,7 @@ impl TipState {
     pub fn is_activated(&self) -> bool {
         self.activated.load(Ordering::SeqCst)
     }
-    fn shortcuts(&self) -> retype_ai::config::Shortcuts {
+    pub(crate) fn shortcuts(&self) -> retype_ai::config::Shortcuts {
         let (bindings, refresh) = {
             let mut cache = lock(&self.shortcuts);
             let refresh = cache.0.elapsed() >= std::time::Duration::from_millis(250);
@@ -269,6 +306,7 @@ impl TipState {
         };
         if refresh && self.is_activated() {
             self.sync_translation_key(bindings.translate);
+            self.sync_voice_key(bindings.voice);
         }
         bindings
     }
@@ -314,6 +352,57 @@ impl TipState {
         crate::settings_log::event(
             "launcher",
             "translation_key_registration",
+            0,
+            format!(
+                "enabled={} success={} hresult={}",
+                desired.is_some(),
+                result.is_ok(),
+                result.as_ref().err().map_or(0, |e| e.code().0)
+            ),
+        );
+    }
+    fn sync_voice_key(&self, binding: retype_ai::config::Shortcut) {
+        let desired = preserved_voice(binding).map(|_| binding);
+        let previous = *lock(&self.preserved_voice);
+        if previous == desired || settings_host() {
+            return;
+        }
+        let manager = lock(&self.thread_mgr).clone();
+        let Some(keys) = manager.and_then(|mgr| mgr.cast::<ITfKeystrokeMgr>().ok()) else {
+            return;
+        };
+        // SAFETY: Registration belongs to this active TSF client and apartment.
+        // Never hold our mutexes across calls that can invoke a TSF callback.
+        let result = unsafe {
+            if let Some(previous) = previous.and_then(preserved_voice) {
+                if let Err(error) = keys.UnpreserveKey(&VOICE_COMMAND, &previous) {
+                    crate::settings_log::event(
+                        "launcher",
+                        "voice_key_unregister_failed",
+                        0,
+                        format!("hresult={}", error.code().0),
+                    );
+                    return;
+                }
+            }
+            *lock(&self.preserved_voice) = None;
+            if let Some(key) = preserved_voice(binding) {
+                keys.PreserveKey(
+                    self.tid.load(Ordering::SeqCst),
+                    &VOICE_COMMAND,
+                    &key,
+                    &"retype voice".encode_utf16().collect::<Vec<_>>(),
+                )
+            } else {
+                Ok(())
+            }
+        };
+        if result.is_ok() {
+            *lock(&self.preserved_voice) = desired;
+        }
+        crate::settings_log::event(
+            "launcher",
+            "voice_key_registration",
             0,
             format!(
                 "enabled={} success={} hresult={}",
@@ -608,6 +697,12 @@ impl KeyEventSink_Impl {
         if status.dwDynamicFlags & TS_SD_READONLY != 0 {
             return Ok(false.into());
         }
+        if crate::voice::active(&state) && vk.0 == 0x1b {
+            if !test {
+                crate::voice::dismiss(&state);
+            }
+            return Ok(true.into());
+        }
         let bindings = state.shortcuts();
         let bits = shortcut_modifiers(keymap::read_modifiers());
         let matches = |binding: retype_ai::config::Shortcut| {
@@ -616,18 +711,32 @@ impl KeyEventSink_Impl {
                 && binding.vk == (vk.0 & 0xffff) as u16
                 && binding.modifiers == bits
         };
-        let work = if matches(bindings.translate) {
+        let work = if voice_matches(bindings.voice, vk, lp, bits) {
+            Some(edit::Work::Voice(true))
+        } else if matches(bindings.translate) {
             Some(edit::Work::Translate)
         } else if matches(bindings.mode) {
             Some(edit::Work::Toggle)
         } else {
             None
         };
+        if !test && work.is_none() && !matches!(vk.0, 0x10 | 0x11 | 0x12 | 0xa0..=0xa5) {
+            crate::voice::dismiss(&state);
+        }
         if let Some(work) = work {
+            if !test {
+                lock(&state.shift_tap).other_key();
+            }
             if test || lp.0 & (1 << 30) != 0 {
                 return Ok(true.into());
             }
             let result = edit::request(&state, ctx, work);
+            if matches!(work, edit::Work::Voice(true))
+                && bindings.voice == retype_ai::config::Shortcut::VOICE
+                && result.is_ok()
+            {
+                state.voice_alt_down.store(true, Ordering::Release);
+            }
             if matches!(work, edit::Work::Translate) {
                 crate::settings_log::event(
                     "launcher",
@@ -741,6 +850,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             }
             if !foreground.as_bool() {
                 if let Some(s) = self.state.upgrade() {
+                    s.voice_alt_down.store(false, Ordering::Release);
                     *lock(&s.shift_tap) = ShiftTap::default();
                     s.epoch.fetch_add(1, Ordering::SeqCst);
                     s.finish(false);
@@ -783,8 +893,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             self.key(ctx, vk, lp, false)
         })
     }
-    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
         Ok((self.state.upgrade().is_some_and(|state| {
+            if right_alt_event(vk, lp) && state.voice_alt_down.load(Ordering::Acquire) {
+                return true;
+            }
             let binding = state.shortcuts().mode;
             binding.is_tap()
                 && normalized_modifier(vk) == binding.vk
@@ -793,8 +906,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         }))
         .into())
     }
-    fn OnKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, _lp: LPARAM) -> Result<BOOL> {
+    fn OnKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
         if let Some(state) = self.state.upgrade() {
+            if right_alt_event(vk, lp) && state.voice_alt_down.swap(false, Ordering::AcqRel) {
+                crate::voice::release_hold(&state);
+                return Ok(true.into());
+            }
             let binding = state.shortcuts().mode;
             if binding.is_tap() && normalized_modifier(vk) == binding.vk {
                 let toggle = lock(&state.shift_tap).release(tap_modifiers(binding.vk));
@@ -817,20 +934,49 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(false.into());
             }
             // SAFETY: TSF supplies a valid command GUID for this callback.
-            if unsafe { *guid } != TRANSLATION_COMMAND {
+            if unsafe { *guid } != TRANSLATION_COMMAND && unsafe { *guid } != VOICE_COMMAND {
                 return Ok(false.into());
             }
             let Some(state) = self.state.upgrade().filter(|state| state.is_activated()) else {
                 return Ok(false.into());
             };
-            let binding = state.shortcuts().translate;
-            if *lock(&state.preserved_translation) != Some(binding) {
+            let voice = unsafe { *guid } == VOICE_COMMAND;
+            let bindings = state.shortcuts();
+            let binding = if voice {
+                bindings.voice
+            } else {
+                bindings.translate
+            };
+            if voice
+                && binding == retype_ai::config::Shortcut::VOICE
+                && shortcut_modifiers(keymap::read_modifiers()) != 2
+            {
+                return Ok(false.into());
+            }
+            if *lock(if voice {
+                &state.preserved_voice
+            } else {
+                &state.preserved_translation
+            }) != Some(binding)
+            {
                 return Ok(false.into());
             }
             let Ok(ctx) = ctx.ok() else {
                 return Ok(false.into());
             };
-            let result = edit::request(&state, ctx, edit::Work::Translate);
+            lock(&state.shift_tap).other_key();
+            let result = edit::request(
+                &state,
+                ctx,
+                if voice {
+                    edit::Work::Voice(true)
+                } else {
+                    edit::Work::Translate
+                },
+            );
+            if voice && binding == retype_ai::config::Shortcut::VOICE && result.is_ok() {
+                state.voice_alt_down.store(true, Ordering::Release);
+            }
             crate::settings_log::event(
                 "launcher",
                 "translation_preserved_shortcut",
@@ -848,6 +994,23 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_hold_distinguishes_right_alt_and_excludes_other_chords() {
+        use retype_ai::config::Shortcut;
+        let right = LPARAM(1 << 24);
+        assert!(voice_matches(Shortcut::VOICE, WPARAM(0x12), right, 2));
+        assert!(voice_matches(Shortcut::VOICE, WPARAM(0xa5), LPARAM(0), 2));
+        assert!(!voice_matches(Shortcut::VOICE, WPARAM(0x12), LPARAM(0), 2));
+        assert!(!voice_matches(Shortcut::VOICE, WPARAM(0xa4), right, 2));
+        for bits in [0, 3, 6, 10] {
+            assert!(!voice_matches(Shortcut::VOICE, WPARAM(0x12), right, bits));
+        }
+        assert_eq!(
+            preserved_voice(Shortcut::VOICE).map(|k| (k.uVKey, k.uModifiers)),
+            Some((0x12, TF_MOD_RALT))
+        );
+        assert!(!right_alt_event(WPARAM(0x41), right));
+    }
     #[test]
     fn preserved_translation_uses_exact_modifiers_and_excludes_disabled_and_win() {
         use retype_ai::config::Shortcut;

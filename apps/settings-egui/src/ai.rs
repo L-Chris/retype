@@ -1,7 +1,7 @@
 //! Provider, translation and shortcut forms. Network work never runs in the UI callback.
 use eframe::egui::{self, RichText};
 use retype_ai::{
-    config::{ApiKind, Config, Provider, Shortcut, Shortcuts, PRESETS},
+    config::{ApiKind, Config, Provider, Shortcut, Shortcuts, VoiceProtocol, PRESETS},
     protocol::{Operation, Response},
 };
 use std::{
@@ -30,12 +30,13 @@ pub struct AiPages {
     dirty: Option<Instant>,
     saved: Config,
     saved_keys: HashMap<String, String>,
-    capture: Option<bool>,
+    capture: Option<u8>,
     tap: u16,
     error: Option<String>,
     languages: String,
     test_text: String,
     test_output: String,
+    voice_test: Option<crate::voice::Test>,
 }
 impl AiPages {
     pub fn refresh_from_disk(&mut self) {
@@ -56,6 +57,7 @@ impl AiPages {
     pub fn cancel_capture(&mut self) {
         self.capture = None;
         self.tap = 0;
+        self.voice_test = None;
     }
     pub fn new() -> Self {
         let loaded = Config::load();
@@ -101,6 +103,7 @@ impl AiPages {
             languages: String::new(),
             test_text: String::new(),
             test_output: String::new(),
+            voice_test: None,
         }
     }
     pub fn flush(&mut self) -> Result<(), String> {
@@ -614,6 +617,149 @@ impl AiPages {
         });
         self.show_error(ui);
     }
+    pub fn voice_page(&mut self, ui: &mut egui::Ui) {
+        super::app::card(ui, |ui| {
+            configure_form(ui);
+            let width = (ui.available_width() - 96.0).clamp(120.0, 280.0);
+            egui::Grid::new("voice-settings")
+                .num_columns(2)
+                .min_row_height(FORM_HEIGHT)
+                .spacing([20.0, 12.0])
+                .show(ui, |ui| {
+                    provider_label(ui, "语音模型");
+                    let selected = self
+                        .config
+                        .providers
+                        .iter()
+                        .find(|p| p.id == self.config.voice.provider)
+                        .map(|p| format!("{} / {}", p.name, self.config.voice.model))
+                        .unwrap_or_else(|| "请选择音频模型".into());
+                    egui::ComboBox::from_id_salt("voice-model")
+                        .width(width)
+                        .truncate()
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for p in
+                                self.config.providers.iter().filter(|p| {
+                                    matches!(p.kind, ApiKind::Compatible | ApiKind::Gemini)
+                                })
+                            {
+                                for model in &p.models {
+                                    if ui
+                                        .selectable_label(
+                                            p.id == self.config.voice.provider
+                                                && *model == self.config.voice.model,
+                                            format!("{} / {model}", p.name),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.config.voice.provider = p.id.clone();
+                                        self.config.voice.model = model.clone();
+                                    }
+                                }
+                            }
+                        });
+                    ui.end_row();
+                    if let Some(p) = self
+                        .config
+                        .providers
+                        .iter_mut()
+                        .find(|p| p.id == self.config.voice.provider)
+                    {
+                        provider_label(ui, "识别方式");
+                        let mut protocol = p.voice_protocol(&self.config.voice.model);
+                        let before = protocol;
+                        egui::ComboBox::from_id_salt("voice-protocol")
+                            .width(width)
+                            .selected_text(match protocol {
+                                VoiceProtocol::File => "录音后识别",
+                                VoiceProtocol::GeminiLive => "实时识别（Gemini Live）",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut protocol,
+                                    VoiceProtocol::File,
+                                    "录音后识别",
+                                );
+                                ui.selectable_value(
+                                    &mut protocol,
+                                    VoiceProtocol::GeminiLive,
+                                    "实时识别（Gemini Live）",
+                                );
+                            });
+                        if protocol != before {
+                            p.voice_protocols
+                                .insert(self.config.voice.model.clone(), protocol);
+                        }
+                        ui.end_row();
+                    }
+                    provider_label(ui, "识别语言");
+                    egui::ComboBox::from_id_salt("voice-language")
+                        .width(width)
+                        .selected_text(match self.config.voice.language.as_str() {
+                            "zh" => "中文",
+                            "en" => "英文",
+                            _ => "自动识别",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in
+                                [("auto", "自动识别"), ("zh", "中文"), ("en", "英文")]
+                            {
+                                ui.selectable_value(
+                                    &mut self.config.voice.language,
+                                    value.into(),
+                                    label,
+                                );
+                            }
+                        });
+                    ui.end_row();
+                    provider_label(ui, "文字整理");
+                    ui.checkbox(&mut self.config.voice.tidy, "整理口头语与段落");
+                    ui.end_row();
+                    provider_label(ui, "麦克风");
+                    let devices = retype_ai::voice::microphones();
+                    let name = devices
+                        .iter()
+                        .find(|(id, _)| *id == self.config.voice.microphone)
+                        .map(|(_, name)| name.as_str())
+                        .unwrap_or("设备不可用");
+                    egui::ComboBox::from_id_salt("voice-microphone")
+                        .width(width)
+                        .truncate()
+                        .selected_text(name)
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &devices {
+                                ui.selectable_value(&mut self.config.voice.microphone, *id, name);
+                            }
+                        });
+                    ui.end_row();
+                });
+        });
+        ui.add_space(12.0);
+        super::app::card(ui, |ui| {
+            ui.label("麦克风测试");
+            if let Some(test) = &mut self.voice_test {
+                test.ui(ui);
+                if ui.button("重新测试").clicked() {
+                    self.voice_test = None;
+                }
+            } else if ui
+                .add_enabled(
+                    self.config.voice.selected(&self.config).is_ok(),
+                    egui::Button::new("开始录音测试"),
+                )
+                .clicked()
+            {
+                match self.flush() {
+                    Ok(()) => {
+                        self.voice_test = Some(crate::voice::Test::start(self.config.voice.clone()))
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        });
+        self.show_error(ui);
+    }
     pub fn shortcuts_page(&mut self, ui: &mut egui::Ui) {
         if let Some(mode) = self.capture {
             let mods = ui.input(|i| i.modifiers);
@@ -650,7 +796,16 @@ impl AiPages {
                     break;
                 }
             }
-            if mode && captured.is_none() {
+            if mode == 2 && captured.is_none() {
+                if bits == 2 && right_alt_held() {
+                    self.tap = Shortcut::VOICE.vk;
+                } else if bits == 0 && self.tap == Shortcut::VOICE.vk {
+                    captured = Some(Shortcut::VOICE);
+                } else if bits != 0 {
+                    self.tap = 0;
+                }
+            }
+            if mode == 0 && captured.is_none() {
                 if bits == 4 {
                     self.tap = 0x10;
                 } else if bits == 1 {
@@ -669,10 +824,10 @@ impl AiPages {
             if let Some(binding) = captured {
                 self.tap = 0;
                 let mut candidate = self.shortcuts;
-                if mode {
-                    candidate.mode = binding;
-                } else {
-                    candidate.translate = binding;
+                match mode {
+                    0 => candidate.mode = binding,
+                    1 => candidate.translate = binding,
+                    _ => candidate.voice = binding,
                 }
                 match candidate.validate().and_then(|_| {
                     retype_ai::secrets::save_shortcuts(candidate)
@@ -697,8 +852,9 @@ impl AiPages {
                 .spacing([20.0, 12.0])
                 .show(ui, |ui| {
                     for (mode, label, binding) in [
-                        (true, "切换中英文", self.shortcuts.mode),
-                        (false, "翻译输入框全文", self.shortcuts.translate),
+                        (0, "切换中英文", self.shortcuts.mode),
+                        (1, "翻译输入框全文", self.shortcuts.translate),
+                        (2, "按住语音输入", self.shortcuts.voice),
                     ] {
                         form_label(ui, label, 144.0);
                         ui.horizontal(|ui| {
@@ -739,10 +895,10 @@ impl AiPages {
                             }
                             if ui.button("清除").clicked() {
                                 let mut candidate = self.shortcuts;
-                                if mode {
-                                    candidate.mode = Shortcut::DISABLED;
-                                } else {
-                                    candidate.translate = Shortcut::DISABLED;
+                                match mode {
+                                    0 => candidate.mode = Shortcut::DISABLED,
+                                    1 => candidate.translate = Shortcut::DISABLED,
+                                    _ => candidate.voice = Shortcut::DISABLED,
                                 }
                                 if retype_ai::secrets::save_shortcuts(candidate).is_ok() {
                                     self.shortcuts = candidate;
@@ -787,6 +943,11 @@ fn win_held() -> bool {
         windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x5b) < 0
             || windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0x5c) < 0
     }
+}
+#[allow(unsafe_code)]
+fn right_alt_held() -> bool {
+    // SAFETY: read-only modifier state used to distinguish left and right Alt.
+    unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState(0xa5) < 0 }
 }
 const FORM_HEIGHT: f32 = 36.0;
 pub(crate) fn configure_form(ui: &mut egui::Ui) {
@@ -867,7 +1028,7 @@ mod tests {
     use super::*;
     #[test]
     fn shortcut_capture_renders_and_escape_cancels_without_saving() {
-        for mode in [true, false] {
+        for mode in [0, 1, 2] {
             let mut app = AiPages::from_config(
                 Config::default(),
                 HashMap::new(),
@@ -914,18 +1075,24 @@ mod tests {
     #[test]
     fn forms_fit_normal_and_minimum_content_widths() {
         for width in [420.0, 620.0] {
-            for page in 0..3 {
+            for page in 0..4 {
                 let provider = Provider {
                     id: "headless-fixture".into(),
                     name: "示例服务".into(),
                     base_url: "https://example.invalid/v1".into(),
                     models: vec!["example-model".into()],
+                    voice_protocols: [("example-model".into(), VoiceProtocol::GeminiLive)].into(),
                     ..Default::default()
                 };
                 let config = Config {
                     provider: provider.id.clone(),
                     model: "example-model".into(),
                     providers: vec![provider],
+                    voice: retype_ai::voice::Settings {
+                        provider: "headless-fixture".into(),
+                        model: "example-model".into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 let keys = HashMap::from([("headless-fixture".into(), String::new())]);
@@ -954,7 +1121,8 @@ mod tests {
                             match page {
                                 0 => app.providers(ui),
                                 1 => app.translation(ui),
-                                _ => app.shortcuts_page(ui),
+                                2 => app.shortcuts_page(ui),
+                                _ => app.voice_page(ui),
                             }
                             right = ui.min_rect().right();
                         },
@@ -975,6 +1143,10 @@ mod tests {
                     "layout tests must not alter stored settings"
                 );
                 assert_eq!(app.keys, app.saved_keys);
+                assert!(
+                    app.voice_test.is_none(),
+                    "rendering must never start a microphone"
+                );
             }
         }
     }

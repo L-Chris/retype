@@ -22,6 +22,49 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 }
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "voiceStart" | "voicePush" | "voiceStop" | "voicePoll" | "voiceCancel" => {
+            use retype_ai::{voice::Settings, voice_service::Controller};
+            use std::sync::{Mutex, OnceLock};
+            static VOICE: OnceLock<Mutex<Controller>> = OnceLock::new();
+            let mut controller = VOICE
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|_| "语音状态异常")?;
+            let id = field(&v, "id")?;
+            match field(&v, "type")? {
+                "voiceStart" => {
+                    let cfg: AiConfig =
+                        serde_json::from_value(v["config"].clone()).map_err(|_| "语音配置无效")?;
+                    let settings: Settings = serde_json::from_value(v["settings"].clone())
+                        .map_err(|_| "语音配置无效")?;
+                    let provider = settings.selected(&cfg)?.clone();
+                    controller.start(id.into(), provider, settings, field(&v, "key")?.into())?;
+                }
+                "voicePush" => {
+                    use base64::{engine::general_purpose::STANDARD, Engine};
+                    let bytes = STANDARD
+                        .decode(field(&v, "pcm")?)
+                        .map_err(|_| "音频数据无效")?;
+                    if bytes.len() > 32000 || bytes.len() % 2 != 0 {
+                        return Err("音频帧长度无效".into());
+                    }
+                    controller.get(id)?.push(
+                        bytes
+                            .chunks_exact(2)
+                            .map(|s| i16::from_le_bytes([s[0], s[1]]))
+                            .collect(),
+                    )?;
+                }
+                "voiceStop" => controller.get(id)?.stop()?,
+                "voiceCancel" => controller.get(id)?.cancel(),
+                _ => {}
+            }
+            serde_json::to_value(controller.get(id)?.snapshot()).map_err(|_| "语音状态无效".into())
+        }
+        "voiceCounts" => {
+            let (chinese, english) = retype_ai::voice::counts(field(&v, "text")?);
+            Ok(json!({"chinese":chinese,"english":english}))
+        }
         "countWords" => {
             let state: Vec<u8> = serde_json::from_value(v["state"].clone())
                 .map_err(|_| "Invalid word counter state")?;
@@ -41,6 +84,12 @@ pub fn perform(v: Value) -> Result<Value> {
             let p: Provider =
                 serde_json::from_value(v["provider"].clone()).map_err(|e| e.to_string())?;
             Ok(json!(service::models_with_key(&p, field(&v, "key")?)?))
+        }
+        "testProvider" => {
+            let p: Provider =
+                serde_json::from_value(v["provider"].clone()).map_err(|_| "提供商配置无效")?;
+            service::test_with_key(&p, field(&v, "model")?, field(&v, "key")?)?;
+            Ok(json!("连接成功"))
         }
         "translate" => {
             let cfg: AiConfig =

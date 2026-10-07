@@ -119,7 +119,7 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
                 let helper = directory.join("retype-ai-host.exe");
                 let started = custom_db.is_none()
                     && helper.is_file()
-                    && retype_learning::client::launch_host(Some(&helper)).is_ok();
+                    && std::process::Command::new(&helper).spawn().is_ok();
                 let response = if started {
                     br#"{"ai_started":true}"#.as_slice()
                 } else {

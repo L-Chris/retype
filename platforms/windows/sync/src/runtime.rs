@@ -202,6 +202,10 @@ fn portable() -> Result<BTreeMap<String, Value>> {
         ("translation.instructions".into(), json!(ai.instructions)),
         ("translation.reasoning".into(), json!(ai.reasoning)),
         ("translation.timeout".into(), json!(ai.timeout_seconds)),
+        (
+            "voice.settings".into(),
+            json!({"provider":ai.voice.provider,"model":ai.voice.model,"language":ai.voice.language,"tidy":ai.voice.tidy}),
+        ),
     ]);
     for provider in ai.providers {
         if provider.base_url.contains(['@', '?', '#']) {
@@ -251,6 +255,7 @@ fn known_key(key: &str) -> bool {
             | "translation.instructions"
             | "translation.reasoning"
             | "translation.timeout"
+            | "voice.settings"
     ) || key
         .strip_prefix("providers/")
         .is_some_and(|s| !s.is_empty() && s.len() <= 128 && !s.contains(['/', '\\']))
@@ -346,6 +351,12 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
         .and_then(Value::as_u64)
         .filter(|v| (5..=180).contains(v))
         .ok_or("翻译超时无效")?;
+    if let Some(value) = values.get("voice.settings") {
+        let local_microphone = ai.voice.microphone;
+        ai.voice = serde_json::from_value(value.clone()).map_err(|_| "语音配置无效")?;
+        ai.voice.validate()?;
+        ai.voice.microphone = local_microphone;
+    }
     // All validation precedes writes; preserve the old portable values for recovery.
     ai.save().map_err(|_| "无法保存同步后的 AI 设置")?;
     retype_ai::secrets::save_shortcuts(shortcuts).map_err(|_| "无法保存同步后的快捷键")?;

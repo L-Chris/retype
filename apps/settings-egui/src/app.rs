@@ -76,6 +76,7 @@ impl Options {
                     "statistics" => Page::Statistics,
                     "providers" => Page::Providers,
                     "translation" => Page::Translation,
+                    "voice" => Page::Voice,
                     "shortcuts" => Page::Shortcuts,
                     "cloud" => Page::Cloud,
                     "lan" => Page::Lan,
@@ -156,6 +157,7 @@ enum Page {
     Dictionary,
     Providers,
     Translation,
+    Voice,
     Shortcuts,
     Statistics,
     Cloud,
@@ -535,6 +537,15 @@ impl SettingsApp {
             return;
         };
         ui.label(RichText::new("桌面端统计").color(MUTED));
+        if snapshot.voice.chinese > 0 || snapshot.voice.english_words > 0 {
+            card(ui, |ui| {
+                ui.label("累计语音输入");
+                ui.label(format!(
+                    "中文 {} 字 · 英文 {} 词",
+                    snapshot.voice.chinese, snapshot.voice.english_words
+                ));
+            });
+        }
         ui.add_space(8.0);
         ui.columns(2, |columns| {
             for (column, title, counts) in [
@@ -1105,6 +1116,21 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
                 painter.line_segment([point(a.0, a.1), point(b.0, b.1)], stroke);
             }
         }
+        Page::Voice => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(origin, egui::vec2(7.0, 12.0)),
+                4.0,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    origin + egui::vec2(0.0, 6.0),
+                    origin + egui::vec2(0.0, 11.0),
+                ],
+                stroke,
+            );
+        }
         Page::Shortcuts => {
             painter.text(
                 origin,
@@ -1351,6 +1377,7 @@ impl eframe::App for SettingsApp {
                             (Page::Dictionary, "词库"),
                             (Page::Providers, "AI 提供商"),
                             (Page::Translation, "翻译"),
+                            (Page::Voice, "语音输入"),
                             (Page::Shortcuts, "快捷键"),
                             (Page::Statistics, "统计"),
                             (Page::Cloud, "云同步"),
@@ -1373,6 +1400,7 @@ impl eframe::App for SettingsApp {
                         Page::Dictionary => "词库",
                         Page::Providers => "AI 提供商",
                         Page::Translation => "翻译",
+                        Page::Voice => "语音输入",
                         Page::Shortcuts => "快捷键",
                         Page::Statistics => "统计",
                         Page::Cloud => "云同步",
@@ -1420,6 +1448,7 @@ impl eframe::App for SettingsApp {
                             Page::Dictionary => "dictionary-content",
                             Page::Providers => "providers-content",
                             Page::Translation => "translation-content",
+                            Page::Voice => "voice-content",
                             Page::Shortcuts => "shortcuts-content",
                             Page::Statistics => "statistics-content",
                             Page::Cloud => "cloud-content",
@@ -1444,6 +1473,7 @@ impl eframe::App for SettingsApp {
                                         self.select_page(Page::Providers);
                                     }
                                 }
+                                Page::Voice => self.ai.voice_page(ui),
                                 Page::Shortcuts => self.ai.shortcuts_page(ui),
                                 Page::Statistics => self.statistics_page(ui),
                                 Page::Cloud => {

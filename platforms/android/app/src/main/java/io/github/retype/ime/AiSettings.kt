@@ -236,6 +236,27 @@ private fun ProviderDialog(
                 ) {
                     Text(if (busy) "获取中…" else "获取模型")
                 }
+                OutlinedButton(
+                    enabled = !busy && models.isNotBlank(),
+                    onClick = {
+                        busy = true; error = null
+                        scope.launch {
+                            try {
+                                val p = draft()
+                                val secret = key
+                                val model = p.getJSONArray("models").getString(0)
+                                withContext(Dispatchers.IO) {
+                                    NativeBridge.feature(JSONObject().put("type", "testProvider")
+                                        .put("provider", p).put("model", model).put("key", secret).toString())
+                                }
+                                check(draft().toString() == p.toString() && key == secret) { "配置已变化，请重新测试" }
+                                error = "连接成功"
+                            } catch (e: CancellationException) { throw e
+                            } catch (e: Exception) { error = e.message
+                            } finally { busy = false }
+                        }
+                    },
+                ) { Text("测试连接") }
                 if (error != null) Text(error!!, style = MaterialTheme.typography.bodySmall)
             }
         },
@@ -331,4 +352,3 @@ fun TranslationPage(store: AppStore) {
         }
     }
 }
-

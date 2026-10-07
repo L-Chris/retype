@@ -350,6 +350,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chacha20"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -566,7 +577,7 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "fiat-crypto",
- "rand_core",
+ "rand_core 0.6.4",
  "rustc_version",
  "subtle",
 ]
@@ -1138,6 +1149,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2553,6 +2565,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "rand"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
+dependencies = [
+ "chacha20",
+ "getrandom 0.4.3",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2560,6 +2583,12 @@ checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "range-alloc"
@@ -2644,19 +2673,24 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "retype-ai"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
+ "base64 0.22.1",
  "retype-learning",
+ "retype-types",
  "serde",
  "serde_json",
+ "tungstenite",
  "ureq",
+ "url",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "retype-android"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
+ "base64 0.22.1",
  "jni 0.21.1",
  "retype-ai",
  "retype-dict",
@@ -2672,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "retype-candidate-ui"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "egui",
  "png 0.17.16",
@@ -2682,7 +2716,7 @@ dependencies = [
 
 [[package]]
 name = "retype-cloud"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "futures",
  "retype-types",
@@ -2692,14 +2726,14 @@ dependencies = [
 
 [[package]]
 name = "retype-context"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-diag"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-candidate-ui",
  "retype-cloud",
@@ -2712,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "pinyin",
  "retype-file-map",
@@ -2724,7 +2758,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict-build"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2733,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "retype-engine"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "crossbeam-channel",
  "futures",
@@ -2748,14 +2782,14 @@ dependencies = [
 
 [[package]]
 name = "retype-english"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-ffi"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-dict",
  "retype-engine",
@@ -2765,7 +2799,7 @@ dependencies = [
 
 [[package]]
 name = "retype-file-map"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "memmap2",
  "sha2 0.11.0",
@@ -2774,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "retype-learning"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-dict",
  "retype-learning-store",
@@ -2789,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "retype-learning-store"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2802,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "retype-pinyin"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "pinyin",
  "retype-types",
@@ -2810,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "retype-settings-egui"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -2830,7 +2864,7 @@ dependencies = [
 
 [[package]]
 name = "retype-sync"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -2854,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "retype-tsf"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-ai",
  "retype-candidate-ui",
@@ -2874,11 +2908,11 @@ dependencies = [
 
 [[package]]
 name = "retype-types"
-version = "0.6.9"
+version = "0.7.0"
 
 [[package]]
 name = "retype-updater"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "serde_json",
  "sha2 0.11.0",
@@ -2888,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "retype-updater-cli"
-version = "0.6.9"
+version = "0.7.0"
 dependencies = [
  "retype-updater",
  "serde_json",
@@ -3108,6 +3142,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3264,7 +3309,7 @@ checksum = "c5482afe85a0b6ce956c945401598dbc527593c77ba51d0a87a586938b1b893a"
 dependencies = [
  "curve25519-dalek",
  "hkdf",
- "rand_core",
+ "rand_core 0.6.4",
  "sha2 0.10.9",
 ]
 
@@ -3536,6 +3581,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand",
+ "rustls",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror 2.0.21",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "type-map"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3597,7 +3661,7 @@ dependencies = [
  "serde_json",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3897,6 +3961,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]

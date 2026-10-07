@@ -10,6 +10,7 @@
 
 ## 当前功能
 
+- Windows 与 Android [语音输入](docs/voice-input.md)，支持录音预览、音频模型和独立语音数量统计。
 - 支持 Windows 64 位和 32 位桌面应用的 TSF 输入法。
 - Android 键盘支持离线输入、个人学习、可选词库、打字统计、AI 翻译和 WebDAV 云同步；见 [Android 文档](docs/android.md)。
 - 全拼和小鹤双拼，可在语言栏切换；双拼未完成的音节也会预览匹配的字词。

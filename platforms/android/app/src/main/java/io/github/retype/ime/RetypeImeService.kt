@@ -34,6 +34,7 @@ data class KeyboardState(
     val error: String? = null,
     val translation: String? = null,
     val translating: Boolean = false,
+    val voice: VoiceState? = null,
 )
 
 class RetypeImeService :
@@ -62,6 +63,9 @@ class RetypeImeService :
   private val activityClock = ActivityClock()
   private var translationJob: Job? = null
   private var noticeJob: Job? = null
+  private var voiceInput: VoiceInput? = null
+  private var voiceGeneration = 0L
+  private var voicePending = false
   private var modifierTap = 0
   private var modifierUsed = false
 
@@ -117,6 +121,9 @@ class RetypeImeService :
               ::openSettings,
               ::translate,
               ::paste,
+              ::startVoice,
+              { voiceInput?.finish() },
+              ::cancelVoice,
           )
         }
       }
@@ -130,6 +137,7 @@ class RetypeImeService :
   }
 
   override fun onWindowHidden() {
+    cancelVoice()
     registry.currentState = Lifecycle.State.STARTED
     super.onWindowHidden()
   }
@@ -137,6 +145,7 @@ class RetypeImeService :
   override fun onEvaluateFullscreenMode() = false
 
   override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
+    cancelVoice()
     super.onStartInput(attribute, restarting)
     finishEditorStatistics()
     connection?.finishComposingText()
@@ -205,6 +214,7 @@ class RetypeImeService :
   }
 
   override fun onFinishInput() {
+    cancelVoice()
     Log.d("retype", "finish input epoch=$epoch")
     ++epoch
     translationJob?.cancel()
@@ -375,6 +385,7 @@ class RetypeImeService :
   }
 
   private fun key(value: String, mods: Int = 0) {
+    cancelVoice()
     if (!policy.password &&
         !policy.literal &&
         (value == "space" || value.firstOrNull()?.isLetterOrDigit() == true && value.length == 1))
@@ -421,6 +432,7 @@ class RetypeImeService :
   }
 
   private fun openSettings() {
+    cancelVoice()
     startActivity(
         Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
   }
@@ -435,7 +447,50 @@ class RetypeImeService :
         }
   }
 
+  private fun cancelVoice() {
+    ++voiceGeneration; voicePending = false
+    voiceInput?.cancel(); voiceInput = null
+    if (state.voice != null) state = state.copy(voice = null)
+  }
+  private fun startVoice() {
+    if (voiceInput != null || voicePending || state.translating) return
+    if (policy.password || policy.literal || !policy.learning) { notice("此输入框不支持语音输入"); return }
+    if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+      notice("请在设置 → 语音输入中允许麦克风权限"); return
+    }
+    val current = epoch; val ic = connection ?: return
+    val generation = ++voiceGeneration; voicePending = true
+    if (state.composition.isNotEmpty()) command(JSONObject().put("type", "key").put("value", if (state.chinese) "space" else "enter"))
+    jobs.trySend {
+      if (epoch != current || voiceGeneration != generation) return@trySend
+      if (handle != 0L) NativeBridge.dispatch(handle,JSONObject().put("type","reset").toString())
+      withContext(Dispatchers.Main) {
+        if (epoch != current || connection !== ic || voiceGeneration != generation) return@withContext
+        finishEditorStatistics(); ic.finishComposingText(); composing = false
+        val before = ic.getTextBeforeCursor(32,0)?.toString()
+        val after = ic.getTextAfterCursor(32,0)?.toString()
+        val selected = ic.getSelectedText(0)?.toString()
+        if (before == null || after == null) { voicePending = false; notice("应用不允许确认输入位置"); return@withContext }
+        state = state.copy(composition="",candidates=emptyList(),voice=VoiceState())
+        voicePending = false
+        voiceInput = VoiceInput(applicationContext,scope,
+          { snapshot -> if(epoch == current && connection === ic && voiceGeneration == generation) state = state.copy(voice=snapshot) },
+          { text ->
+            if(epoch == current && connection === ic && voiceGeneration == generation) {
+              if (ic.getTextBeforeCursor(32,0)?.toString() != before || ic.getTextAfterCursor(32,0)?.toString() != after || ic.getSelectedText(0)?.toString() != selected) {
+                state = state.copy(voice=VoiceState("Error",text,error="输入位置已变化，未上屏"))
+              } else if (ic.commitText(text,1)) {
+                voiceInput = null; state = state.copy(voice=null)
+                TypingStatistics.get(applicationContext).recordVoice(text)
+                jobs.trySend { if(epoch == current && handle != 0L) NativeBridge.dispatch(handle,JSONObject().put("type","voiceLearn").put("text",text).toString()) }
+              } else state = state.copy(voice=VoiceState("Error",text,error="应用拒绝上屏，识别文字保留在此处"))
+            }
+          }).also { it.start() }
+      }
+    }
+  }
   private fun translate() {
+    cancelVoice()
     if (policy.password) {
       notice("密码框不支持翻译")
       return
@@ -508,6 +563,7 @@ class RetypeImeService :
         candidatesStart,
         candidatesEnd,
     )
+    if (voiceInput != null && (oldSelStart != newSelStart || oldSelEnd != newSelEnd)) cancelVoice()
     // Cursor movement outside our composition finishes it instead of deleting editor text.
     if (composing && newSelStart != candidatesEnd && oldSelStart != newSelStart) {
       Log.d(
@@ -589,6 +645,7 @@ class RetypeImeService :
   }
 
   override fun onDestroy() {
+    cancelVoice()
     finishEditorStatistics()
     ++epoch
     view?.disposeComposition()

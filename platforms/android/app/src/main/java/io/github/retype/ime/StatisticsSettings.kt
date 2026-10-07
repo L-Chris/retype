@@ -15,12 +15,15 @@ fun StatisticsPage() {
     val context = LocalContext.current
     var period by remember { mutableIntStateOf(0) }
     var summary by remember { mutableStateOf<StatisticsSummary?>(null) }
+    var voice by remember { mutableStateOf(Counts()) }
     var recent by remember { mutableStateOf(Counts()) }
     LaunchedEffect(period) {
         summary = withContext(Dispatchers.IO) { TypingStatistics.get(context).summary(period) }
+        voice = withContext(Dispatchers.IO) { TypingStatistics.get(context).voiceTotal() }
         recent = withContext(Dispatchers.IO) { TypingStatistics.get(context).recent() }
     }
     Text("手机端统计", style = MaterialTheme.typography.titleMedium)
+    if (voice.chinese > 0 || voice.englishWords > 0) SettingsCard { Text("累计语音输入"); Text("中文 ${voice.chinese} 字 · 英文 ${voice.englishWords} 词") }
     Row {
         listOf("天", "周", "月", "年").forEachIndexed { i, s ->
             TextButton(onClick = { period = i }) {

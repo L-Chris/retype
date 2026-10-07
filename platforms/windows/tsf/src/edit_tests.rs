@@ -904,3 +904,138 @@ fn run_host() -> Result<()> {
         Ok(())
     }
 }
+
+type VoiceSelection = Arc<Mutex<Option<(ITfRange, Vec<u16>)>>>;
+#[implement(ITfEditSession)]
+struct VoiceProbe {
+    context: ITfContext,
+    saved: VoiceSelection,
+    capture: bool,
+    output: Arc<Mutex<Option<bool>>>,
+}
+impl ITfEditSession_Impl for VoiceProbe_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        if self.capture {
+            unsafe {
+                let mut selected = [TF_SELECTION::default()];
+                let mut count = 0;
+                self.context
+                    .GetSelection(ec, TF_DEFAULT_SELECTION, &mut selected, &mut count)?;
+                let range = ManuallyDrop::take(&mut selected[0].range).ok_or(E_FAIL)?;
+                let mut text = [0u16; 64];
+                let mut read = 0;
+                range.GetText(ec, 0, &mut text, &mut read)?;
+                *lock(&self.saved) = Some((range, text[..read as usize].to_vec()));
+            }
+        } else {
+            let (range, text) = lock(&self.saved).clone().ok_or(E_FAIL)?;
+            *lock(&self.output) = Some(
+                crate::voice::replace_verified(&self.context, &range, ec, &text, "语音内容")
+                    .is_ok(),
+            );
+        }
+        Ok(())
+    }
+}
+#[test]
+fn voice_writes_only_the_original_selection_and_refuses_private_changed_or_rejected_targets(
+) -> Result<()> {
+    std::thread::spawn(|| -> Result<()> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let result = (|| -> Result<()> {
+                let manager: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let tid = manager.Activate()?;
+                let document = manager.CreateDocumentMgr()?;
+                let original = "prefix OLD suffix".encode_utf16().collect::<Vec<_>>();
+                let data = Arc::new(Mutex::new(Data {
+                    text: original.clone(),
+                    start: 7,
+                    end: 10,
+                    input_scope: Some(IS_DEFAULT),
+                    ..Default::default()
+                }));
+                let store: ITextStoreACP = Store {
+                    data: Arc::clone(&data),
+                }
+                .into();
+                let mut context = None;
+                let mut cookie = 0;
+                document.CreateContext(tid, 0, &store, &mut context, &mut cookie)?;
+                let context = context.ok_or(E_FAIL)?;
+                document.Push(&context)?;
+                let saved = Arc::new(Mutex::new(None));
+                let output = Arc::new(Mutex::new(None));
+                let probe = |capture: bool| -> Result<bool> {
+                    let edit: ITfEditSession = VoiceProbe {
+                        context: context.clone(),
+                        saved: Arc::clone(&saved),
+                        capture,
+                        output: Arc::clone(&output),
+                    }
+                    .into();
+                    context
+                        .RequestEditSession(tid, &edit, TF_ES_SYNC | TF_ES_READWRITE)?
+                        .ok()?;
+                    Ok(lock(&output).take().unwrap_or(false))
+                };
+                probe(true)?;
+                for scope in [IS_PASSWORD, IS_PRIVATE, IS_NUMERIC_PIN] {
+                    lock(&data).input_scope = Some(scope);
+                    assert!(!probe(false)?);
+                    assert_eq!(lock(&data).text, original);
+                }
+                lock(&data).input_scope = Some(IS_DEFAULT);
+                {
+                    let mut d = lock(&data);
+                    d.start = 0;
+                    d.end = 0;
+                }
+                assert!(!probe(false)?);
+                {
+                    let mut d = lock(&data);
+                    d.start = 7;
+                    d.end = 10;
+                    d.text[7] = b'N' as u16;
+                }
+                let sink = lock(&data).sink.clone().ok_or(E_FAIL)?;
+                sink.OnTextChange(
+                    TEXT_STORE_TEXT_CHANGE_FLAGS(0),
+                    &TS_TEXTCHANGE {
+                        acpStart: 7,
+                        acpOldEnd: 8,
+                        acpNewEnd: 8,
+                    },
+                )?;
+                sink.OnSelectionChange()?;
+                assert!(!probe(false)?);
+                lock(&data).text = original.clone();
+                sink.OnTextChange(
+                    TEXT_STORE_TEXT_CHANGE_FLAGS(0),
+                    &TS_TEXTCHANGE {
+                        acpStart: 7,
+                        acpOldEnd: 8,
+                        acpNewEnd: 8,
+                    },
+                )?;
+                lock(&data).reject_write = true;
+                assert!(!probe(false)?);
+                assert_eq!(lock(&data).text, original);
+                lock(&data).reject_write = false;
+                assert!(probe(false)?);
+                assert_eq!(
+                    String::from_utf16_lossy(&lock(&data).text),
+                    "prefix 语音内容 suffix"
+                );
+                document.Pop(TF_POPF_ALL)?;
+                manager.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            result
+        }
+    })
+    .join()
+    .map_err(|_| E_FAIL)?
+}

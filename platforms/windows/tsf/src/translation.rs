@@ -256,7 +256,7 @@ fn replace_checked(
     }
     Ok(())
 }
-fn same_target(state: &TipState, context: &ITfContext, epoch: u32, owner: HWND) -> bool {
+pub(crate) fn same_target(state: &TipState, context: &ITfContext, epoch: u32, owner: HWND) -> bool {
     if !state.is_activated()
         || state.epoch.load(Ordering::SeqCst) != epoch
         || lock(&state.composition).is_some()

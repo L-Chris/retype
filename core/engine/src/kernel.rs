@@ -884,15 +884,13 @@ impl Kernel {
                 actions.push(KernelAction::Render(self.render_state()));
             }
             VoiceEvent::Stop => {
+                if self.voice != VoicePhase::Recording {
+                    return;
+                }
                 self.status = self.status.difference(StatusFlags::VOICE_RECORDING);
                 if let Some(t) = self.voice_final.clone() {
                     // final 已经到了，不必再等（test.md：松手后不该无谓地显示「优化中」）
                     self.commit_voice(&t, actions);
-                } else if self.voice_text.is_empty() {
-                    // 什么都没说 → 静默收场
-                    self.reset_voice();
-                    self.bump_gen();
-                    actions.push(KernelAction::Render(self.render_state()));
                 } else {
                     // 关键：松手不等于结束。进入 Optimizing 等 final pass，
                     // 由平台层的定时器投递 OptimizeTimeout 兜底。
@@ -930,6 +928,9 @@ impl Kernel {
     }
 
     fn on_asr(&mut self, ev: AsrEvent, actions: &mut Vec<KernelAction>) {
+        if self.voice == VoicePhase::Idle {
+            return;
+        }
         match ev {
             // 第一遍：实时听写，只是预览，随时会被改写
             AsrEvent::Interim(t) => {

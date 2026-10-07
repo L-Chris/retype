@@ -40,8 +40,9 @@ class AppStore(private val context: Context) {
             JSONObject(
                 """{"version":1,"providers":[],"provider":"","model":"","target":"English","preview":false,"instructions":"","reasoning":"none","timeout_seconds":60}"""
             )
-        }
+        }.also { if (!it.has("voice")) it.put("voice", voiceDefaults()) }
 
+    fun voiceDefaults() = JSONObject().put("provider", "").put("model", "").put("language", "auto").put("tidy", false)
     fun saveAi(value: JSONObject) {
         write("ai.json", value)
     }
@@ -93,6 +94,7 @@ class AppStore(private val context: Context) {
                     .put("dictionary.enabled", prefs.getInt("packs", 0))
                     .put("updates.auto_check", prefs.getBoolean("updatesAutoCheck", true))
                     .put("shortcuts", shortcuts())
+                    .put("voice.settings", JSONObject(ai.getJSONObject("voice").toString()).also { it.remove("microphone") })
                     .put(
                         "translation.model",
                         JSONObject()
@@ -134,6 +136,11 @@ class AppStore(private val context: Context) {
                     require(!p.getString("base_url").contains(Regex("[@?#]")))
                     providers.put(p)
                 }
+            }
+            values.optJSONObject("voice.settings")?.let { v ->
+                require(v.optString("language", "auto") in listOf("auto", "zh", "en"))
+                require(v.optString("model").length <= 512 && v.optString("provider").length <= 128)
+                ai.put("voice", JSONObject(v.toString()).also { it.remove("microphone") })
             }
             ai.put("providers", providers)
             values.getJSONObject("translation.model").let {

@@ -87,6 +87,7 @@ impl Period {
 pub struct Snapshot {
     pub today: Counts,
     pub total: Counts,
+    pub voice: Counts,
     pub chinese_speed: Option<u64>,
     pub english_speed: Option<u64>,
     pub days: BTreeMap<NaiveDate, Counts>,
@@ -237,7 +238,16 @@ impl Store {
         let mut recent = Counts::default();
         let mut last_chinese = 0;
         let mut last_english = 0;
-        for cache in self.files.values() {
+        for (path, cache) in &self.files {
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("voice-"))
+            {
+                for counts in cache.days.values() {
+                    result.voice.add(*counts);
+                }
+                continue;
+            }
             for (day, counts) in &cache.days {
                 result.days.entry(*day).or_default().add(*counts);
             }
@@ -256,7 +266,7 @@ impl Store {
             {
                 for row in rows {
                     // Preserve Android rows in sync storage, excluding them from desktop totals.
-                    if row.stream == "android.log" {
+                    if row.stream.starts_with("android") {
                         continue;
                     }
                     let Some(seconds) = row
@@ -267,6 +277,14 @@ impl Store {
                         continue;
                     };
                     if seconds.saturating_mul(1000) < reset || seconds.saturating_mul(1000) > now {
+                        continue;
+                    }
+                    if row.stream.starts_with("voice-") {
+                        result.voice.add(Counts {
+                            chinese: row.counts.chinese,
+                            english_words: row.counts.english_words,
+                            ..Default::default()
+                        });
                         continue;
                     }
                     if let Some(date) = Local
@@ -463,6 +481,36 @@ mod tests {
         fs::write(&file, format!("{time},20,10,10000,10000\n"))?;
         assert_eq!(store.load(now + 1)?.total.total(), 0);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+    #[test]
+    fn voice_counts_do_not_enter_keyboard_totals_or_speed() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "retype-voice-statistics-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root)?;
+        let now = chrono::Local::now().timestamp_millis();
+        let second = now / 1000;
+        fs::write(
+            root.join("keyboard.log"),
+            format!("{second},3,0,15000,0,2,15000\n"),
+        )?;
+        fs::write(
+            root.join("voice-synthetic.log"),
+            format!("{second},500,0,0,0,200,0\n"),
+        )?;
+        let mut store = Store::new(root.clone());
+        let snapshot = store.load(now)?;
+        assert_eq!(snapshot.total.chinese, 3);
+        assert_eq!(snapshot.total.english_words, 2);
+        assert_eq!(snapshot.voice.chinese, 500);
+        assert_eq!(snapshot.voice.english_words, 200);
+        assert_eq!(snapshot.chinese_speed, None);
+        assert_eq!(snapshot.english_speed, None);
+        fs::remove_file(root.join("keyboard.log"))?;
+        fs::remove_file(root.join("voice-synthetic.log"))?;
+        fs::remove_dir(root)?;
         Ok(())
     }
 }

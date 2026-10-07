@@ -17,6 +17,7 @@ A Chinese input method for Windows and [Android](docs/android.md), built around 
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
 - Offline English word completion and spelling suggestions, with case preservation and persistent personal vocabulary; see [English input](docs/english-input.md).
+- [Voice input](docs/voice-input.md) on Windows and Android, with recording previews, audio-capable AI models, and separate voice counts.
 - Configurable AI providers and models, with a shortcut to translate and replace supported input fields or preview the result first.
 - Personal learning saved locally and shared across applications, Full Pinyin, and Xiaohe Shuangpin, with frequency-based ranking and decaying recent preferences.
 - Local typing statistics in Settings, with separate Chinese and English counts, speeds, and a seven-day trend; input text is never saved.

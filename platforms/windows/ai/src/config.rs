@@ -9,6 +9,12 @@ pub enum ApiKind {
     Gemini,
     Ollama,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoiceProtocol {
+    #[default]
+    File,
+    GeminiLive,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
@@ -17,6 +23,21 @@ pub struct Provider {
     pub kind: ApiKind,
     pub base_url: String,
     pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub voice_protocols: std::collections::BTreeMap<String, VoiceProtocol>,
+}
+impl Provider {
+    pub fn voice_protocol(&self, model: &str) -> VoiceProtocol {
+        self.voice_protocols.get(model).copied().unwrap_or_else(|| {
+            // Explicit official capability, not a substring/name heuristic. Custom aliases
+            // can select their transport in Voice Input and persist it per model.
+            if self.kind == ApiKind::Gemini && model == "gemini-3.5-transcribe-live" {
+                VoiceProtocol::GeminiLive
+            } else {
+                VoiceProtocol::File
+            }
+        })
+    }
 }
 pub const PRESETS: &[(&str, &str, ApiKind)] = &[
     ("自定义", "", ApiKind::Compatible),
@@ -53,6 +74,7 @@ impl Default for Provider {
             kind: ApiKind::Compatible,
             base_url: String::new(),
             models: Vec::new(),
+            voice_protocols: Default::default(),
         }
     }
 }
@@ -81,6 +103,7 @@ pub struct Config {
     pub instructions: String,
     pub reasoning: String,
     pub timeout_seconds: u64,
+    pub voice: crate::voice::Settings,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -94,6 +117,7 @@ impl Default for Config {
             instructions: String::new(),
             reasoning: "none".into(),
             timeout_seconds: 60,
+            voice: Default::default(),
         }
     }
 }
@@ -150,7 +174,7 @@ fn path() -> io::Result<PathBuf> {
     .join("retype/ai/settings.json"))
 }
 
-/// Windows virtual key plus Ctrl/Alt/Shift/Win bit flags. A modifier-only binding is a tap.
+/// Windows virtual key plus Ctrl/Alt/Shift/Win bit flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shortcut {
     pub vk: u16,
@@ -164,6 +188,10 @@ impl Shortcut {
     pub const TRANSLATE: Self = Self {
         vk: 0x30,
         modifiers: 3,
+    };
+    pub const VOICE: Self = Self {
+        vk: 0xa5,
+        modifiers: 0,
     };
     pub const DISABLED: Self = Self {
         vk: 0,
@@ -185,12 +213,18 @@ impl Shortcut {
                     && matches!(self.vk, 0x20 | 0x4c | 0x44 | 0x45 | 0x52))
                     || (self.modifiers == 2 && self.vk == 0x73)))
     }
+    pub fn valid_voice(self) -> bool {
+        self == Self::VOICE || self.valid(false)
+    }
     pub fn label(self) -> String {
         if self.vk == 0 {
             return "未设置".into();
         }
         if self.is_tap() {
             return if self.vk == 0x10 { "Shift" } else { "Ctrl" }.into();
+        }
+        if self == Self::VOICE {
+            return "右 Alt".into();
         }
         let mut parts = Vec::new();
         for (bit, name) in [(1, "Ctrl"), (2, "Alt"), (4, "Shift"), (8, "Win")] {
@@ -213,22 +247,27 @@ impl Shortcut {
 pub struct Shortcuts {
     pub mode: Shortcut,
     pub translate: Shortcut,
+    pub voice: Shortcut,
 }
 impl Default for Shortcuts {
     fn default() -> Self {
         Self {
             mode: Shortcut::SHIFT,
             translate: Shortcut::TRANSLATE,
+            voice: Shortcut::VOICE,
         }
     }
 }
 impl Shortcuts {
     pub fn validate(self) -> Result<(), String> {
-        if !self.mode.valid(true) || !self.translate.valid(false) {
+        if !self.mode.valid(true) || !self.translate.valid(false) || !self.voice.valid_voice() {
             return Err("请使用最多三个按键的组合键".into());
         }
         if self.mode.vk != 0 && self.mode == self.translate {
             return Err("两个快捷键不能相同".into());
+        }
+        if self.voice.vk != 0 && (self.voice == self.mode || self.voice == self.translate) {
+            return Err("快捷键不能相同".into());
         }
         Ok(())
     }
@@ -247,10 +286,30 @@ mod tests {
         .valid(false));
         assert!(Shortcuts {
             mode: Shortcut::TRANSLATE,
-            translate: Shortcut::TRANSLATE
+            translate: Shortcut::TRANSLATE,
+            ..Default::default()
         }
         .validate()
         .is_err());
+    }
+    #[test]
+    fn voice_default_is_right_alt_hold_only() {
+        assert_eq!(
+            Shortcuts::default().voice,
+            Shortcut {
+                vk: 0xa5,
+                modifiers: 0
+            }
+        );
+        assert!(Shortcut::VOICE.valid_voice());
+        assert!(!Shortcut::VOICE.valid(false));
+        assert!(!Shortcut::VOICE.is_tap());
+        assert_eq!(Shortcut::VOICE.label(), "右 Alt");
+        assert!(!Shortcut {
+            vk: 0xa4,
+            modifiers: 0
+        }
+        .valid_voice());
     }
     #[test]
     fn missing_model_does_not_silently_select_another() {

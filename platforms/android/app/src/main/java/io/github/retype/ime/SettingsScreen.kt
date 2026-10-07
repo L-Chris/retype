@@ -33,7 +33,7 @@ fun SettingsScreen() {
   var revision by remember { mutableIntStateOf(0) }
   var busy by remember { mutableStateOf(false) }
   var message by remember { mutableStateOf<String?>(null) }
-  val pages = listOf("输入", "词库", "统计", "AI 提供商", "翻译", "云同步", "关于", "跨设备")
+  val pages = listOf("输入", "词库", "统计", "AI 提供商", "翻译", "云同步", "关于", "跨设备", "语音输入")
   val descriptions =
       listOf(
           "全拼、双拼、英文补全",
@@ -42,7 +42,7 @@ fun SettingsScreen() {
           "模型、接口与凭据",
           "目标语言与思考等级",
           "跨设备同步设置与数据",
-          "版本与开源许可", "局域网文字剪贴板同步")
+          "版本与开源许可", "局域网文字剪贴板同步", "识别模型与麦克风")
   BackHandler(page >= 0) {
     page = -1
     message = null
@@ -131,7 +131,7 @@ fun SettingsScreen() {
                             Column(
                                 Modifier.fillMaxWidth().padding(18.dp),
                                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                  SettingsGlyph(if (index == 7) 8 else index)
+                                  SettingsGlyph(if (index == 7) 8 else if (index == 8) 9 else index)
                                   Spacer(Modifier.height(8.dp))
                                   Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
@@ -162,6 +162,7 @@ fun SettingsScreen() {
                     4 -> TranslationPage(store)
                     5 -> CloudPage(store, busy, ::work)
                     7 -> LanPage()
+                    8 -> VoicePage(store)
                     else -> AboutPage()
                   }
               Spacer(Modifier.height(24.dp))
@@ -210,6 +211,7 @@ internal fun SettingsGlyph(index: Int, modifier: Modifier = Modifier.size(30.dp)
             androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()),
             style = Stroke(stroke))
     when (index) {
+      9 -> { box(9f, 2f, 15f, 15f); line(6f, 10f, 6f, 16f); line(18f, 10f, 18f, 16f); line(6f, 16f, 12f, 19f); line(18f, 16f, 12f, 19f); line(12f, 19f, 12f, 22f); line(8f, 22f, 16f, 22f) }
       0 -> {
         box(2f, 5f, 22f, 19f)
         for (y in listOf(9f, 12f)) for (x in listOf(6f, 10f, 14f, 18f)) line(x, y, x + .3f, y)

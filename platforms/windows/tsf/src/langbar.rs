@@ -137,6 +137,7 @@ impl Drop for MenuOwner {
 pub(crate) struct LanguageBar {
     manager: ITfLangBarItemMgr,
     item: ITfLangBarItemButton,
+    microphone: Option<ITfLangBarItemButton>,
     sink: Arc<Mutex<Option<ITfLangBarItemSink>>>,
 }
 impl LanguageBar {
@@ -148,15 +149,36 @@ impl LanguageBar {
             state: Arc::downgrade(state),
             sink: Arc::clone(&sink),
             hidden: AtomicBool::new(false),
+            voice: false,
+        }
+        .into();
+        let microphone: ITfLangBarItemButton = Button {
+            state: Arc::downgrade(state),
+            sink: Arc::new(Mutex::new(None)),
+            hidden: AtomicBool::new(false),
+            voice: true,
         }
         .into();
         // SAFETY: Item and manager belong to this apartment; Drop removes the registration.
         unsafe {
             manager.AddItem(&item)?;
         }
+        let microphone = match unsafe { manager.AddItem(&microphone) } {
+            Ok(()) => Some(microphone),
+            Err(error) => {
+                crate::settings_log::event(
+                    "launcher",
+                    "voice_button_unavailable",
+                    0,
+                    format!("hresult={:08x}", error.code().0),
+                );
+                None
+            }
+        };
         Ok(Self {
             manager,
             item,
+            microphone,
             sink,
         })
     }
@@ -169,6 +191,9 @@ impl Drop for LanguageBar {
         // SAFETY: Balances AddItem on this thread. Release sink outside its mutex.
         unsafe {
             let _ = self.manager.RemoveItem(&self.item);
+            if let Some(microphone) = &self.microphone {
+                let _ = self.manager.RemoveItem(microphone);
+            }
         }
         let sink = lock(&self.sink).take();
         drop(sink);
@@ -180,6 +205,7 @@ struct Button {
     state: Weak<TipState>,
     sink: Arc<Mutex<Option<ITfLangBarItemSink>>>,
     hidden: AtomicBool,
+    voice: bool,
 }
 impl Button_Impl {
     fn mode(&self) -> (bool, PinyinScheme) {
@@ -231,7 +257,11 @@ impl ITfLangBarItem_Impl for Button_Impl {
         }
         let mut value = TF_LANGBARITEMINFO {
             clsidService: crate::ids::CLSID_RETYPE_TIP,
-            guidItem: GUID_LBI_INPUTMODE,
+            guidItem: if self.voice {
+                GUID::from_u128(0xb043caee_6308_4c4a_aec4_710a8dbce11f)
+            } else {
+                GUID_LBI_INPUTMODE
+            },
             dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_BTN_MENU | TF_LBI_STYLE_SHOWNINTRAY,
             ..Default::default()
         };
@@ -261,6 +291,15 @@ impl ITfLangBarItem_Impl for Button_Impl {
         Ok(())
     }
     fn GetTooltipString(&self) -> Result<BSTR> {
+        if self.voice {
+            return Ok(BSTR::from(
+                format!(
+                    "语音输入 · 按住 {} 或点击开始",
+                    retype_ai::secrets::shortcuts().voice.label()
+                )
+                .as_str(),
+            ));
+        }
         let (chinese, scheme) = self.mode();
         Ok(BSTR::from(
             format!(
@@ -280,7 +319,11 @@ impl ITfLangBarItem_Impl for Button_Impl {
 impl ITfLangBarItemButton_Impl for Button_Impl {
     fn OnClick(&self, click: TfLBIClick, point: &POINT, _rect: *const RECT) -> Result<()> {
         if click == TF_LBI_CLK_LEFT {
-            self.action(edit::Work::Toggle)
+            self.action(if self.voice {
+                edit::Work::Voice(false)
+            } else {
+                edit::Work::Toggle
+            })
         } else if click == TF_LBI_CLK_RIGHT {
             guarded(|| {
                 crate::settings_log::event("launcher", "menu_open_requested", 0, "right click");
@@ -362,10 +405,16 @@ impl ITfLangBarItemButton_Impl for Button_Impl {
         }
     }
     fn GetIcon(&self) -> Result<HICON> {
-        guarded(|| mode_icon(self.mode().0))
+        guarded(|| item_icon(self.mode().0, self.voice))
     }
     fn GetText(&self) -> Result<BSTR> {
-        Ok(BSTR::from(if self.mode().0 { "中" } else { "A" }))
+        Ok(BSTR::from(if self.voice {
+            "语音"
+        } else if self.mode().0 {
+            "中"
+        } else {
+            "A"
+        }))
     }
 }
 impl ITfSource_Impl for Button_Impl {
@@ -398,7 +447,11 @@ impl ITfSource_Impl for Button_Impl {
     }
 }
 
+#[cfg(test)]
 fn mode_icon(chinese: bool) -> Result<HICON> {
+    item_icon(chinese, false)
+}
+fn item_icon(chinese: bool, voice: bool) -> Result<HICON> {
     // SAFETY: All GDI objects are local; CreateIconIndirect copies the bitmaps.
     // TSF owns the returned HICON and calls DestroyIcon as required by GetIcon.
     unsafe {
@@ -435,7 +488,11 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
             CLIP_DEFAULT_PRECIS,
             ANTIALIASED_QUALITY,
             0,
-            w!("Microsoft YaHei UI"),
+            if voice {
+                w!("Segoe MDL2 Assets")
+            } else {
+                w!("Microsoft YaHei UI")
+            },
         );
         let previous_font = SelectObject(dc, font.into());
         let previous_mask_font = SelectObject(mask_dc, font.into());
@@ -443,7 +500,15 @@ fn mode_icon(chinese: bool) -> Result<HICON> {
         SetBkMode(mask_dc, TRANSPARENT);
         SetTextColor(dc, COLORREF(0x00ffffff));
         SetTextColor(mask_dc, COLORREF(0x00000000));
-        let mut glyph: Vec<u16> = (if chinese { "中" } else { "A" }).encode_utf16().collect();
+        let mut glyph: Vec<u16> = (if voice {
+            "\u{e720}"
+        } else if chinese {
+            "中"
+        } else {
+            "A"
+        })
+        .encode_utf16()
+        .collect();
         DrawTextW(
             dc,
             &mut glyph,
@@ -578,6 +643,7 @@ mod tests {
             state: Arc::downgrade(&state),
             sink: Arc::new(Mutex::new(None)),
             hidden: AtomicBool::new(false),
+            voice: false,
         }
         .into();
         // SAFETY: Local COM objects and valid output buffers; every owned HICON is destroyed.

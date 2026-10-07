@@ -1015,13 +1015,28 @@ mod tests {
         assert!(!acts.iter().any(|a| matches!(a, KernelAction::Commit(_))));
         assert!(last_render(&acts).composition.is_empty());
         assert_eq!(f.backend.with_kernel(|k| k.voice_phase()), VoicePhase::Idle);
+        let late = voice(
+            &f.backend,
+            VoiceEvent::Asr(AsrEvent::Final("迟到的定稿".into())),
+        );
+        assert!(late.is_empty());
+        assert!(f
+            .backend
+            .with_kernel(|k| k.render_state().composition)
+            .is_empty());
     }
 
     #[test]
-    fn silence_commits_nothing() {
+    fn stop_before_first_result_waits_for_final_and_silence_times_out() {
         let f = fixture(false);
         voice(&f.backend, VoiceEvent::Start);
         let acts = voice(&f.backend, VoiceEvent::Stop);
+        assert!(!acts.iter().any(|a| matches!(a, KernelAction::Commit(_))));
+        assert_eq!(
+            f.backend.with_kernel(|k| k.voice_phase()),
+            VoicePhase::Optimizing
+        );
+        let acts = voice(&f.backend, VoiceEvent::OptimizeTimeout);
         assert!(!acts.iter().any(|a| matches!(a, KernelAction::Commit(_))));
         assert_eq!(f.backend.with_kernel(|k| k.voice_phase()), VoicePhase::Idle);
     }

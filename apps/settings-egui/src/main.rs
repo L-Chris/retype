@@ -17,6 +17,8 @@ mod lan;
 mod settings_log;
 #[cfg(windows)]
 mod statistics;
+#[cfg(windows)]
+mod voice;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {

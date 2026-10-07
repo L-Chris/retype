@@ -36,6 +36,7 @@ pub(crate) enum Work {
     Finish(bool),
     Refresh,
     Translate,
+    Voice(bool),
 }
 
 pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -> Result<()> {
@@ -206,11 +207,15 @@ impl Edit_Impl {
             }
             return Ok(());
         }
-        if matches!(self.work, Work::Translate)
+        if matches!(self.work, Work::Translate | Work::Voice(_))
             && !session.backend.with_kernel(|k| k.has_composition())
         {
             stats::boundary(&state.stats_clock);
-            return crate::translation::capture(state, &self.context, ec);
+            return if let Work::Voice(held) = self.work {
+                crate::voice::capture(state, &self.context, ec, held)
+            } else {
+                crate::translation::capture(state, &self.context, ec)
+            };
         }
         let existing = lock(&state.composition).clone();
         if existing.as_ref().is_some_and(|c| c.context != self.context) {
@@ -219,7 +224,7 @@ impl Edit_Impl {
             return Err(E_FAIL.into());
         }
         let event = match self.work {
-            Work::Translate => InputEvent::Key {
+            Work::Translate | Work::Voice(_) => InputEvent::Key {
                 key: if session.backend.with_kernel(|k| k.is_chinese()) {
                     Key::Space
                 } else {
@@ -328,8 +333,12 @@ impl Edit_Impl {
                 stats::boundary(&state.stats_clock);
             }
         }
-        if matches!(self.work, Work::Translate) {
-            return crate::translation::capture(state, &self.context, ec);
+        if matches!(self.work, Work::Translate | Work::Voice(_)) {
+            return if let Work::Voice(held) = self.work {
+                crate::voice::capture(state, &self.context, ec, held)
+            } else {
+                crate::translation::capture(state, &self.context, ec)
+            };
         }
         Ok(())
     }

@@ -131,7 +131,7 @@ fn sender() -> Option<&'static SyncSender<Delta>> {
             let (sender, receiver) = mpsc::sync_channel(1024);
             std::thread::Builder::new()
                 .name("retype-statistics".into())
-                .spawn(move || writer(receiver, root))
+                .spawn(move || writer(receiver, root, false))
                 .ok()?;
             Some(sender)
         })
@@ -224,12 +224,16 @@ fn is_han(ch: char) -> bool {
         0x2B820..=0x2CEAF | 0x2CEB0..=0x2EBEF | 0x30000..=0x323AF)
 }
 
-fn writer(receiver: Receiver<Delta>, root: PathBuf) {
+fn writer(receiver: Receiver<Delta>, root: PathBuf, voice: bool) {
     if std::fs::create_dir_all(&root).is_err() {
         return;
     }
     let started = now_ms();
-    let file = root.join(format!("{}-{started}.log", std::process::id()));
+    let file = root.join(format!(
+        "{}{}-{started}.log",
+        if voice { "voice-" } else { "" },
+        std::process::id()
+    ));
     let mut pending = BTreeMap::<u64, Delta>::new();
     let mut next_flush = Instant::now() + FLUSH_INTERVAL;
     loop {
@@ -293,6 +297,31 @@ fn flush(path: &PathBuf, pending: &mut BTreeMap<u64, Delta>) {
     }
 }
 
+pub(crate) fn voice(text: &str) {
+    if cfg!(test) {
+        return;
+    }
+    static VOICE: OnceLock<Option<SyncSender<Delta>>> = OnceLock::new();
+    let sender = VOICE.get_or_init(|| {
+        let root = directory()?;
+        let (tx, rx) = mpsc::sync_channel(128);
+        std::thread::Builder::new()
+            .name("retype-voice-statistics".into())
+            .spawn(move || writer(rx, root, true))
+            .ok()?;
+        Some(tx)
+    });
+    let (chinese, english_words) = retype_ai::voice::counts(text);
+    if let Some(sender) = sender {
+        let _ = sender.try_send(Delta {
+            timestamp_ms: now_ms(),
+            chinese,
+            english_words,
+            ..Default::default()
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -333,7 +362,7 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(8);
         let worker = std::thread::spawn({
             let root = root.clone();
-            move || writer(receiver, root)
+            move || writer(receiver, root, false)
         });
         sender
             .send(Delta {

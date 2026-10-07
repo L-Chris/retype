@@ -110,8 +110,15 @@ pub fn shortcuts() -> crate::config::Shortcuts {
         return Default::default();
     }
     let end = bytes.iter().position(|c| *c == 0).unwrap_or(bytes.len());
-    let value: crate::config::Shortcuts =
+    let mut value: crate::config::Shortcuts =
         serde_json::from_str(&String::from_utf16_lossy(&bytes[..end])).unwrap_or_default();
+    // Old configurations may already use the new default chord for translation.
+    let legacy =
+        serde_json::from_str::<serde_json::Value>(&String::from_utf16_lossy(&bytes[..end]))
+            .is_ok_and(|v| v.get("voice").is_none());
+    if legacy && (value.voice == value.translate || value.voice == value.mode) {
+        value.voice = crate::config::Shortcut::DISABLED;
+    }
     if value.validate().is_ok() {
         value
     } else {

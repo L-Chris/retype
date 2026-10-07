@@ -34,6 +34,8 @@ mod settings_log;
 mod stats;
 pub mod tip;
 mod translation;
+#[cfg(windows)]
+mod voice;
 
 use class_factory::ClassFactory;
 use core::ffi::c_void;

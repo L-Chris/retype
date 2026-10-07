@@ -74,7 +74,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
         }
     }
 
-    fun record(c: Counts) {
+    fun record(c: Counts, stream: String = "android.log") {
         if (c == Counts()) return
         val minute = System.currentTimeMillis() / 60000
         val device = AppStore(context).deviceId()
@@ -83,12 +83,12 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             db.beginTransaction()
             try {
                 db.execSQL(
-                    "INSERT OR IGNORE INTO buckets VALUES(?, 'android.log', ?,0,0,0,0,0,0)",
-                    arrayOf<Any>(device, minute),
+                    "INSERT OR IGNORE INTO buckets VALUES(?, ?, ?,0,0,0,0,0,0)",
+                    arrayOf<Any>(device, stream, minute),
                 )
                 db.execSQL(
-                    "UPDATE buckets SET chinese=chinese+?,english=english+?,chinese_ms=chinese_ms+?,english_ms=english_ms+?,english_words=english_words+?,english_word_ms=english_word_ms+? WHERE device=? AND stream='android.log' AND minute=?",
-                    arrayOf<Any>(c.chinese, c.english, c.chineseMs, c.englishMs, c.englishWords, c.englishWordMs, device, minute),
+                    "UPDATE buckets SET chinese=chinese+?,english=english+?,chinese_ms=chinese_ms+?,english_ms=english_ms+?,english_words=english_words+?,english_word_ms=english_word_ms+? WHERE device=? AND stream=? AND minute=?",
+                    arrayOf<Any>(c.chinese, c.english, c.chineseMs, c.englishMs, c.englishWords, c.englishWordMs, device, stream, minute),
                 )
                 db.setTransactionSuccessful()
             } finally {
@@ -303,4 +303,13 @@ class ActivityClock {
         pending = 0
         wordState = JSONArray()
     }
+}
+
+// Voice counts use a separate stream so speed summaries never include them.
+fun TypingStatistics.recordVoice(text: String) {
+    val result = JSONObject(NativeBridge.feature(JSONObject().put("type","voiceCounts").put("text",text).toString()))
+    record(Counts(chinese=result.getLong("chinese"),englishWords=result.getLong("english")), "android-voice.log")
+}
+fun TypingStatistics.voiceTotal(): Counts {
+    readableDatabase.rawQuery("SELECT COALESCE(SUM(chinese),0),COALESCE(SUM(english_words),0) FROM buckets WHERE stream='android-voice.log'",null).use { c->c.moveToFirst();return Counts(chinese=c.getLong(0),englishWords=c.getLong(1)) }
 }

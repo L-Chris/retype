@@ -48,7 +48,7 @@ pub fn perform(operation: Operation) -> Result<Response, String> {
             if !provider.models.contains(&model) {
                 return Err("测试模型未保存".into());
             }
-            translate(&provider, &model, "Hello", "简体中文", "", "none", 20)?;
+            test_with_key(&provider, &model, &key(&provider)?)?;
             Ok(Response::Tested)
         }
         Operation::Translate { text } => {
@@ -75,6 +75,13 @@ pub fn perform(operation: Operation) -> Result<Response, String> {
             })
         }
     }
+}
+pub fn test_with_key(provider: &Provider, model: &str, key: &str) -> Result<(), String> {
+    if provider.voice_protocol(model) == crate::config::VoiceProtocol::GeminiLive {
+        return crate::voice_live::test(provider, model, key);
+    }
+    translate_with_key(provider, model, "Hello", "简体中文", "", "none", 20, key)?;
+    Ok(())
 }
 fn configured_provider(provider: &Provider) -> Result<(), String> {
     let config = Config::load().map_err(|_| "无法读取提供商配置".to_string())?;
@@ -143,7 +150,11 @@ pub fn models_with_key(provider: &Provider, key: &str) -> Result<Vec<String>, St
             if provider.kind == ApiKind::Gemini
                 && !item["supportedGenerationMethods"]
                     .as_array()
-                    .is_some_and(|a| a.iter().any(|m| m.as_str() == Some("generateContent")))
+                    .is_some_and(|a| {
+                        a.iter().any(|m| {
+                            matches!(m.as_str(), Some("generateContent" | "bidiGenerateContent"))
+                        })
+                    })
             {
                 return None;
             }
@@ -550,6 +561,28 @@ mod http_tests {
         assert!(message.contains("鉴权"));
         assert!(!message.contains("SENSITIVE"));
         let _ = server.join();
+    }
+    #[test]
+    fn gemini_model_refresh_includes_live_models_and_excludes_embeddings() {
+        let (url, server) = mock(
+            "200 OK",
+            json!({"models":[
+                {"name":"models/gemini-3.5-transcribe-live","supportedGenerationMethods":["bidiGenerateContent"]},
+                {"name":"models/text-model","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/embedding-model","supportedGenerationMethods":["embedContent"]}
+            ]}),
+        );
+        let provider = Provider {
+            kind: ApiKind::Gemini,
+            base_url: url,
+            ..Default::default()
+        };
+        let models = models_with_key(&provider, "test").unwrap_or_default();
+        assert_eq!(models, vec!["gemini-3.5-transcribe-live", "text-model"]);
+        assert!(server
+            .join()
+            .unwrap_or_default()
+            .starts_with("GET /v1/models "));
     }
 }
 #[cfg(test)]

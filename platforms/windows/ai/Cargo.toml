@@ -8,16 +8,20 @@ publish.workspace = true
 
 [features]
 default = []
-service = ["dep:ureq"]
+service = ["dep:ureq", "dep:tungstenite", "dep:url"]
 
 [dependencies]
+retype-types.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+base64 = "0.22"
 retype-learning = { path = "../learning" }
 ureq = { workspace = true, optional = true }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
+url = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_Registry", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_Media_Audio"] }
 
 [[bin]]
 name = "retype-ai-host"

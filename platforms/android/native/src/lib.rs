@@ -23,6 +23,9 @@ static LEARNING_IO: Mutex<()> = Mutex::new(());
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Command {
+    VoiceLearn {
+        text: String,
+    },
     EnglishOptions {
         enabled: bool,
         spelling: bool,
@@ -211,6 +214,15 @@ impl Session {
         let mut commits = Vec::new();
         let mut pass = false;
         let event = match command {
+            Command::VoiceLearn { text } => {
+                // Kotlin calls this only after commitText succeeds on the original editor.
+                if let Some(writer) = &self.writer {
+                    if !text.is_empty() && text.len() <= 128 * 1024 {
+                        let _ = writer.send(vec![Event::Voice { text }]);
+                    }
+                }
+                return self.snapshot(commits, pass);
+            }
             Command::EnglishOptions { enabled, spelling } => {
                 InputEvent::SetEnglishOptions { enabled, spelling }
             }

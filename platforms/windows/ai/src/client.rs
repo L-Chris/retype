@@ -12,7 +12,7 @@ pub fn endpoint() -> Result<String, String> {
         transport::user_sid().map_err(|e| e.to_string())?
     ))
 }
-fn exchange(name: &str, request: &Request) -> Result<Response, String> {
+pub fn exchange(name: &str, request: &Request) -> Result<Response, String> {
     let bytes = serde_json::to_vec(request).map_err(|e| e.to_string())?;
     let response = transport::exchange(name, &bytes).map_err(|e| e.to_string())?;
     serde_json::from_slice(&response).map_err(|e| e.to_string())
@@ -28,10 +28,11 @@ pub fn launch() -> Result<(), String> {
                 .and_then(|p| p.parent().map(|p| p.join("retype-ai-host.exe")))
         })
         .ok_or("找不到翻译服务，请重新安装完整安装包")?;
-    if std::process::Command::new(path)
-        .creation_flags(0x08000000)
-        .spawn()
-        .is_ok()
+    if !transport::is_app_container().unwrap_or(true)
+        && std::process::Command::new(path)
+            .creation_flags(0x08000000)
+            .spawn()
+            .is_ok()
     {
         return Ok(());
     }
@@ -46,6 +47,27 @@ pub fn launch() -> Result<(), String> {
         Ok(())
     } else {
         Err("无法启动翻译服务，请确认安装包包含 retype-ai-host.exe".into())
+    }
+}
+/// Runs on a voice/UI worker. Never send PCM across the learning-control pipe.
+pub fn voice(command: crate::voice::Command) -> Result<crate::voice::Snapshot, String> {
+    let name = endpoint()?;
+    let request = Request::Voice(command);
+    let mut result = exchange(&name, &request);
+    if result.is_err() {
+        launch()?;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            result = exchange(&name, &request);
+            if result.is_ok() {
+                break;
+            }
+        }
+    }
+    match result? {
+        Response::Voice(snapshot) => Ok(snapshot),
+        Response::Error(e) => Err(e),
+        _ => Err("语音服务响应无效".into()),
     }
 }
 /// Worker only. Each IPC roundtrip is bounded even for slow models.

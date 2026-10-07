@@ -15,12 +15,14 @@ pub enum Operation {
 }
 #[derive(Serialize, Deserialize)]
 pub enum Request {
+    Voice(crate::voice::Command),
     Start { id: String, operation: Operation },
     Poll { id: String },
     Cancel { id: String },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Response {
+    Voice(crate::voice::Snapshot),
     Pending,
     Translation { text: String, preview: bool },
     Models(Vec<String>),

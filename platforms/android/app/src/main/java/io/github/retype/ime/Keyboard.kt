@@ -62,6 +62,9 @@ fun Keyboard(
     onSettings: () -> Unit,
     onTranslate: () -> Unit,
     onPaste: (String) -> Unit,
+    onVoice: () -> Unit = {},
+    onVoiceFinish: () -> Unit = {},
+    onVoiceCancel: () -> Unit = {},
 ) {
   val context = LocalContext.current
   val clipboard = remember { LanClipboard.get(context) }
@@ -96,7 +99,7 @@ fun Keyboard(
               Modifier.fillMaxWidth().height(44.dp),
               verticalAlignment = Alignment.CenterVertically,
           ) {
-            if (state.translation != null || (!expanded && state.candidates.isEmpty())) {
+            if (state.voice != null || state.translation != null || (!expanded && state.candidates.isEmpty())) {
               Row(
                 Modifier.weight(1f).padding(start = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -105,6 +108,7 @@ fun Keyboard(
                 Image(painterResource(R.drawable.ic_retype), "retype", Modifier.size(30.dp))
                 val status =
                   when {
+                    state.voice != null -> "语音输入"
                     state.translation != null -> state.translation
                     state.password -> "安全输入"
                     state.error != null -> state.error
@@ -152,7 +156,7 @@ fun Keyboard(
                 }
               }
             }
-            if (state.candidates.isNotEmpty()) {
+            if (state.voice == null && state.candidates.isNotEmpty()) {
               IconButton(
                   onClick = { expanded = !expanded },
                   modifier =
@@ -163,12 +167,15 @@ fun Keyboard(
                 Text(if (expanded) "⌃" else "⌄", fontSize = 22.sp)
               }
             }
-            if (!expanded) {
+            if (!expanded && state.voice == null) {
+              ToolbarButton("语音输入", 9, !state.password && !state.translating, onVoice)
               ToolbarButton("翻译", 4, !state.password && !state.translating, onTranslate)
               ToolbarButton("设置", 7, true, onSettings)
             }
           }
-          if (expanded) {
+          if (state.voice != null) {
+            VoicePanel(state.voice, onVoiceFinish, onVoiceCancel)
+          } else if (expanded) {
             Box(Modifier.fillMaxWidth().height(205.dp)) {
               LazyVerticalGrid(
                   columns = GridCells.Adaptive(72.dp),
@@ -253,7 +260,7 @@ fun Keyboard(
                   Modifier.weight(.9f).height(height),
                   { onKey(",", 0) },
               )
-              KeyCap("空格", Modifier.weight(3.8f).height(height), { press("space") })
+              KeyCap("空格", Modifier.weight(3.8f).height(height), { press("space") }, onLongClick = onVoice)
               KeyCap(
                   "",
                   Modifier.weight(.9f).height(height).semantics {
@@ -362,6 +369,7 @@ private fun KeyCap(
     accent: Boolean = false,
     function: Boolean = false,
     content: (@Composable () -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
   val current by rememberUpdatedState(onClick)
   val scope = rememberCoroutineScope()
@@ -386,6 +394,7 @@ private fun KeyCap(
                   }
                 })
           }
+      else if (onLongClick != null) Modifier.pointerInput(onLongClick) { detectTapGestures(onTap = { current() }, onLongPress = { onLongClick() }) }
       else Modifier.clickable { current() }
   Surface(
       modifier.then(interaction),

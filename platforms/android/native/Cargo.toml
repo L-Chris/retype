@@ -19,6 +19,7 @@ retype-english.workspace = true
 retype-learning-store = { path = "../../../core/learning", features = ["sqlite"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+base64 = "0.22"
 retype-ai = { path = "../../windows/ai", features = ["service"] }
 retype-sync = { path = "../../windows/sync" }
 
