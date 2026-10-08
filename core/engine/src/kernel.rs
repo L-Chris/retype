@@ -217,6 +217,14 @@ impl Kernel {
     pub fn has_candidates(&self) -> bool {
         !self.candidates.is_empty()
     }
+    /// Numeric diagnostics without copying input text or candidate strings.
+    pub fn input_metrics(&self) -> (Generation, usize, usize) {
+        (
+            self.gen,
+            self.buffer.len() + self.parts.iter().map(|p| p.text.len()).sum::<usize>(),
+            self.candidates.len(),
+        )
+    }
     pub fn english_candidate_selected(&self) -> bool {
         self.english_selected
     }

@@ -62,6 +62,55 @@ pub struct Surface {
     context: egui::Context,
     textures: HashMap<egui::TextureId, Texture>,
     initialized: bool,
+    widths: HashMap<String, (f32, u64)>,
+    width_bytes: usize,
+    width_tick: u64,
+    width_scale: u32,
+    last_frame: Option<(PaintKey, Arc<Bitmap>)>,
+}
+
+const WIDTH_CACHE_ENTRIES: usize = 4096;
+const WIDTH_CACHE_BYTES: usize = 128 * 1024;
+
+struct PaintKey {
+    texts: Vec<String>,
+    selected: Option<usize>,
+    widths: Vec<i32>,
+    gap: i32,
+    viewport: i32,
+    scale: u32,
+}
+
+fn painted_selection(state: &RenderState) -> Option<usize> {
+    (state.status.contains(retype_types::StatusFlags::CHINESE)
+        || state
+            .status
+            .contains(retype_types::StatusFlags::ENGLISH_SELECTED))
+    .then(|| state.selected.checked_sub(state.page_start))
+    .flatten()
+    .filter(|&index| index < state.visible().len())
+}
+
+impl PaintKey {
+    fn matches(
+        &self,
+        state: &RenderState,
+        widths: &[i32],
+        gap: i32,
+        viewport: i32,
+        scale: f32,
+    ) -> bool {
+        self.selected == painted_selection(state)
+            && self.widths == widths
+            && self.gap == gap
+            && self.viewport == viewport
+            && self.scale == scale.to_bits()
+            && self
+                .texts
+                .iter()
+                .map(String::as_str)
+                .eq(state.visible().iter().map(|c| c.text.as_str()))
+    }
 }
 
 impl Default for Surface {
@@ -87,6 +136,11 @@ impl Default for Surface {
             context,
             textures: HashMap::new(),
             initialized: false,
+            widths: HashMap::new(),
+            width_bytes: 0,
+            width_tick: 0,
+            width_scale: 0,
+            last_frame: None,
         }
     }
 }
@@ -177,19 +231,56 @@ impl Surface {
     }
 
     pub fn measure(&mut self, state: &RenderState, available: i32, scale: f32) -> Vec<i32> {
+        if self.width_scale != scale.to_bits() {
+            self.widths.clear();
+            self.width_bytes = 0;
+            self.width_scale = scale.to_bits();
+        }
         self.initialize(scale);
         self.context.fonts_mut(|fonts| {
             state
                 .candidates
                 .iter()
                 .map(|candidate| {
-                    let galley = fonts.layout_no_wrap(
-                        candidate.text.clone(),
-                        FontId::proportional(CANDIDATE_FONT_SIZE),
-                        INK,
-                    );
+                    self.width_tick = self.width_tick.wrapping_add(1);
+                    let width = if let Some((width, used)) = self.widths.get_mut(&candidate.text) {
+                        *used = self.width_tick;
+                        *width
+                    } else {
+                        let width = fonts
+                            .layout_no_wrap(
+                                candidate.text.clone(),
+                                FontId::proportional(CANDIDATE_FONT_SIZE),
+                                INK,
+                            )
+                            .size()
+                            .x;
+                        // Cache metrics, not galleys or font-atlas UV coordinates.
+                        // The latter become invalid when egui rebuilds its atlas.
+                        if candidate.text.len() <= WIDTH_CACHE_BYTES / 8 {
+                            if self.widths.len() >= WIDTH_CACHE_ENTRIES
+                                || self.width_bytes + candidate.text.len() > WIDTH_CACHE_BYTES
+                            {
+                                let cutoff = self
+                                    .width_tick
+                                    .saturating_sub((WIDTH_CACHE_ENTRIES / 2) as u64);
+                                self.widths.retain(|_, (_, used)| *used > cutoff);
+                                self.width_bytes = self.widths.keys().map(String::len).sum();
+                                if self.widths.len() >= WIDTH_CACHE_ENTRIES
+                                    || self.width_bytes + candidate.text.len() > WIDTH_CACHE_BYTES
+                                {
+                                    self.widths.clear();
+                                    self.width_bytes = 0;
+                                }
+                            }
+                            self.width_bytes += candidate.text.len();
+                            self.widths
+                                .insert(candidate.text.clone(), (width, self.width_tick));
+                        }
+                        width
+                    };
                     // Round upwards: pagination must never underestimate the painted width.
-                    ((galley.size().x + 22.0) * scale)
+                    ((width + 22.0) * scale)
                         .ceil()
                         .max(36.0 * scale)
                         .min(available as f32) as i32
@@ -205,7 +296,12 @@ impl Surface {
         gap: i32,
         viewport: i32,
         scale: f32,
-    ) -> Bitmap {
+    ) -> Arc<Bitmap> {
+        if let Some((key, bitmap)) = &self.last_frame {
+            if key.matches(state, widths, gap, viewport, scale) {
+                return Arc::clone(bitmap);
+            }
+        }
         self.initialize(scale);
         let pad = (4.0 * scale).round();
         let chinese = state.status.contains(retype_types::StatusFlags::CHINESE);
@@ -310,7 +406,19 @@ impl Surface {
             }
         }
         self.free_textures(&mut output.textures_delta);
-        Bitmap { geometry, pixels }
+        let bitmap = Arc::new(Bitmap { geometry, pixels });
+        self.last_frame = Some((
+            PaintKey {
+                texts: state.visible().iter().map(|c| c.text.clone()).collect(),
+                selected: painted_selection(state),
+                widths: widths.to_vec(),
+                gap,
+                viewport,
+                scale: scale.to_bits(),
+            },
+            Arc::clone(&bitmap),
+        ));
+        bitmap
     }
 }
 
@@ -397,6 +505,60 @@ fn rasterize(
             .ceil()
             .min(height as f32)
             .max(0.0) as usize;
+        if let Some(color) = solid {
+            // Convex triangles cover one continuous span per scanline. Find
+            // its ends with the exact same edge/top-left tests as the pixel
+            // path, then fill it without per-pixel geometry or blending.
+            for y in y0..y1 {
+                let py = y as f32 + 0.5;
+                if py < clip.top() * scale || py >= clip.bottom() * scale {
+                    continue;
+                }
+                let mut lo = x0.max((clip.left() * scale - 0.5).ceil().max(0.0) as usize);
+                let mut hi = x1.min((clip.right() * scale - 0.5).ceil().max(0.0) as usize);
+                for (i, (a, b)) in [
+                    (points[1], points[2]),
+                    (points[2], points[0]),
+                    (points[0], points[1]),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let inside = |x: usize| {
+                        let value = edge(a, b, Pos2::new(x as f32 + 0.5, py));
+                        value > 0.0 || value == 0.0 && inclusive[i]
+                    };
+                    if a.y == b.y {
+                        if !inside(lo) {
+                            hi = lo;
+                        }
+                    } else {
+                        let increasing = a.y > b.y;
+                        let (mut left, mut right) = (lo, hi);
+                        while left < right {
+                            let mid = left + (right - left) / 2;
+                            if inside(mid) == increasing {
+                                right = mid;
+                            } else {
+                                left = mid + 1;
+                            }
+                        }
+                        if increasing {
+                            lo = left;
+                        } else {
+                            hi = left;
+                        }
+                    }
+                    if lo >= hi {
+                        break;
+                    }
+                }
+                if lo < hi {
+                    pixels[y * width + lo..y * width + hi].fill(color);
+                }
+            }
+            continue;
+        }
         for y in y0..y1 {
             for x in x0..x1 {
                 let p = Pos2::new(x as f32 + 0.5, y as f32 + 0.5);
@@ -417,10 +579,6 @@ fn rasterize(
                     .enumerate()
                     .any(|(i, v)| *v < 0.0 || (*v == 0.0 && !inclusive[i]))
                 {
-                    continue;
-                }
-                if let Some(color) = solid {
-                    pixels[y * width + x] = color;
                     continue;
                 }
                 let bary = [e[0] / area, e[1] / area, e[2] / area];
@@ -680,6 +838,108 @@ mod tests {
                 .map(|i| state.page_start + i),
             Some(3)
         );
+    }
+
+    #[test]
+    fn cached_widths_survive_other_frames_and_reclamp_for_viewport_and_dpi() {
+        let mut surface = Surface::default();
+        let original = state(&["我", "额度", "快捷键", "a longer English completion"]);
+        let widths = surface.measure(&original, 472, 1.0);
+        for _ in 0..5 {
+            let other = state(&["另一组候选"]);
+            let measured = surface.measure(&other, 472, 1.0);
+            surface.render(&other, &measured, 2, 480, 1.0);
+        }
+        assert_eq!(surface.measure(&original, 472, 1.0), widths);
+        assert_eq!(
+            surface.measure(&original, 80, 1.0),
+            widths.iter().map(|&w| w.min(80)).collect::<Vec<_>>()
+        );
+        for scale in [1.5, 2.0, 1.0] {
+            let mut fresh = Surface::default();
+            assert_eq!(
+                surface.measure(&original, (472.0 * scale) as i32, scale),
+                fresh.measure(&original, (472.0 * scale) as i32, scale)
+            );
+        }
+        // Eviction changes storage, never the measured result.
+        let many: Vec<_> = (0..WIDTH_CACHE_ENTRIES + 32)
+            .map(|i| format!("word{i}"))
+            .collect();
+        let refs: Vec<_> = many.iter().map(String::as_str).collect();
+        surface.measure(&state(&refs), 472, 1.0);
+        assert!(surface.widths.len() <= WIDTH_CACHE_ENTRIES);
+        assert!(surface.width_bytes <= WIDTH_CACHE_BYTES);
+        assert_eq!(surface.measure(&original, 472, 1.0), widths);
+    }
+
+    #[test]
+    fn bitmap_reuse_ignores_metadata_but_tracks_every_visual_input() {
+        let mut surface = Surface::default();
+        let mut current = state(&["你好", "额度"]);
+        let widths = surface.measure(&current, 472, 1.0);
+        let original = surface.render(&current, &widths, 2, 480, 1.0);
+        current.gen += 1;
+        current.composition = "nihc".into();
+        current.candidates[0].score += 1.0;
+        let same = surface.render(&current, &widths, 2, 480, 1.0);
+        assert!(Arc::ptr_eq(&original, &same));
+        current.selected = 1;
+        let selected = surface.render(&current, &widths, 2, 480, 1.0);
+        assert!(!Arc::ptr_eq(&same, &selected));
+        assert_ne!(same.pixels, selected.pixels);
+        current.status = retype_types::StatusFlags::EMPTY;
+        let english = surface.render(&current, &widths, 2, 480, 1.0);
+        assert_ne!(selected.pixels, english.pixels);
+        current.candidates[0].text = "再见".into();
+        let changed = surface.render(&current, &widths, 2, 480, 1.0);
+        assert_ne!(english.pixels, changed.pixels);
+        let resized = surface.render(&current, &widths, 4, 300, 1.0);
+        assert!(!Arc::ptr_eq(&changed, &resized));
+        let scaled_widths = surface.measure(&current, 944, 2.0);
+        let scaled = surface.render(&current, &scaled_widths, 4, 960, 2.0);
+        assert!(!Arc::ptr_eq(&resized, &scaled));
+    }
+
+    #[test]
+    fn solid_scanlines_match_pixel_path_for_rotated_clipped_and_shared_edges() {
+        let texture = Texture {
+            size: [1, 1],
+            pixels: vec![Color32::WHITE],
+            alpha: None,
+            monochrome: true,
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for shift in [0.0, 0.25, 0.5, 0.9] {
+                let mut mesh = epaint::Mesh {
+                    vertices: [
+                        Pos2::new(0.0, 1.0),
+                        Pos2::new(9.0, 0.0),
+                        Pos2::new(7.0, 10.0),
+                        Pos2::new(1.0, 8.0),
+                    ]
+                    .map(|p| epaint::Vertex {
+                        pos: p + Vec2::splat(shift),
+                        uv: Pos2::ZERO,
+                        color: Color32::from_rgb(19, 143, 150),
+                    })
+                    .to_vec(),
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    ..Default::default()
+                };
+                let clip = Rect::from_min_max(Pos2::new(0.6, 0.7), Pos2::new(8.1, 9.2));
+                let mut fast = vec![0; 24 * 24];
+                rasterize(&mut fast, 24, 24, &mesh, clip, scale, &texture);
+                // Unequal UVs force the per-pixel path, but a 1x1 white
+                // texture still produces exactly the same color and coverage.
+                for (i, vertex) in mesh.vertices.iter_mut().enumerate() {
+                    vertex.uv = Pos2::new(i as f32 * 0.1, 0.0);
+                }
+                let mut reference = vec![0; 24 * 24];
+                rasterize(&mut reference, 24, 24, &mesh, clip, scale, &texture);
+                assert_eq!(fast, reference, "scale={scale} shift={shift}");
+            }
+        }
     }
 
     #[test]

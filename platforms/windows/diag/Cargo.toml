@@ -11,6 +11,13 @@ publish.workspace = true
 name = "retype-diag"
 path = "src/main.rs"
 
+[features]
+candidate-benchmark = ["retype-candidate-ui/egui"]
+
+[[example]]
+name = "typing-latency"
+required-features = ["candidate-benchmark"]
+
 [dependencies]
 retype-types = { workspace = true }
 retype-pinyin = { workspace = true }

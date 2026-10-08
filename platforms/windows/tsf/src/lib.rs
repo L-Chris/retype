@@ -21,6 +21,7 @@ mod display;
 mod edit;
 mod english_updates;
 pub mod ids;
+mod input_profile;
 pub mod keymap;
 mod langbar;
 mod packs;

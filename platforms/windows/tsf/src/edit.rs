@@ -6,8 +6,9 @@ use retype_types::{
     CommitRequest, InputEvent, InputSource, KernelAction, Key, Modifiers, SideEffect,
 };
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 use windows::Win32::Foundation::{E_FAIL, RECT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::TextServices::*;
@@ -39,7 +40,37 @@ pub(crate) enum Work {
     Voice(bool),
 }
 
+impl Work {
+    fn profile_name(self) -> &'static str {
+        match self {
+            Self::Key(Key::Backspace, _) => "backspace",
+            Self::Key(Key::Char(_), _) => "typing",
+            Self::Key(_, _) => "navigation",
+            Self::Refresh => "layout_refresh",
+            Self::Choose(..) => "choose",
+            Self::Finish(_) => "finish",
+            Self::Direct(_) | Self::Boundary(..) => "boundary",
+            Self::Toggle | Self::SetChinese(_) => "mode",
+            Self::Translate => "translation",
+            Self::Voice(_) => "voice",
+        }
+    }
+}
+
 pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -> Result<()> {
+    static REFRESH_SERIAL: AtomicU32 = AtomicU32::new(1);
+    let epoch = state.epoch.load(Ordering::SeqCst);
+    let refresh_id = if matches!(work, Work::Refresh) {
+        let mut pending = lock(&state.refresh_pending);
+        if pending.is_some_and(|(queued_epoch, _)| queued_epoch == epoch) {
+            return Ok(());
+        }
+        let id = REFRESH_SERIAL.fetch_add(1, Ordering::Relaxed).max(1);
+        *pending = Some((epoch, id));
+        id
+    } else {
+        0
+    };
     let synchronous = matches!(work, Work::Direct(_) | Work::Boundary(..));
     let pending_counted = !synchronous;
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -48,7 +79,7 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
         state: Arc::clone(state),
         context: context.clone(),
         work,
-        epoch: state.epoch.load(Ordering::SeqCst),
+        epoch,
         finishing: if matches!(work, Work::Finish(_)) {
             lock(&state.composition).as_ref().map(|c| c.object.clone())
         } else {
@@ -57,6 +88,8 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
         cancelled: Arc::clone(&cancelled),
         completed: Arc::clone(&completed),
         pending_counted,
+        requested: Instant::now(),
+        refresh_id,
     }
     .into();
     if pending_counted {
@@ -97,9 +130,22 @@ struct Edit {
     cancelled: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
     pending_counted: bool,
+    requested: Instant,
+    refresh_id: u32,
+}
+impl Edit {
+    fn release_refresh(&self) {
+        if self.refresh_id != 0 {
+            let mut pending = lock(&self.state.refresh_pending);
+            if *pending == Some((self.epoch, self.refresh_id)) {
+                *pending = None;
+            }
+        }
+    }
 }
 impl Drop for Edit {
     fn drop(&mut self) {
+        self.release_refresh();
         if self.pending_counted {
             self.state.pending.fetch_sub(1, Ordering::SeqCst);
         }
@@ -107,7 +153,12 @@ impl Drop for Edit {
 }
 impl ITfEditSession_Impl for Edit_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
-        guarded(|| {
+        let mut timing = crate::input_profile::Timing::new(
+            self.requested,
+            self.work.profile_name(),
+            self.state.pending.load(Ordering::SeqCst),
+        );
+        let result = guarded(|| {
             if self.cancelled.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -118,10 +169,10 @@ impl ITfEditSession_Impl for Edit_Impl {
                 return Ok(());
             }
             if matches!(self.work, Work::Refresh) {
-                return self.refresh(ec);
+                return self.refresh(ec, &mut timing);
             }
             self.state.writing.store(true, Ordering::SeqCst);
-            let result = guarded(|| self.run(ec));
+            let result = guarded(|| self.run(ec, &mut timing));
             self.state.writing.store(false, Ordering::SeqCst);
             if result.is_ok() && matches!(self.work, Work::Direct(_) | Work::Boundary(..)) {
                 self.completed.store(true, Ordering::SeqCst);
@@ -136,14 +187,27 @@ impl ITfEditSession_Impl for Edit_Impl {
                 self.state.hide();
             }
             result
-        })
+        });
+        // Some hosts retain the completed COM session. Release now as well as
+        // on Drop; the token prevents an older session clearing a newer one.
+        self.release_refresh();
+        timing.finish(
+            || {
+                self.state
+                    .session()
+                    .map(|session| session.backend.with_kernel(|k| k.input_metrics()))
+                    .unwrap_or_default()
+            },
+            result.as_ref().err().map_or(0, |e| e.code().0),
+        );
+        result
     }
 }
 impl Edit_Impl {
-    fn run(&self, ec: u32) -> Result<()> {
+    fn run(&self, ec: u32, timing: &mut crate::input_profile::Timing) -> Result<()> {
         let state = &self.state;
         if matches!(self.work, Work::Refresh) {
-            return self.refresh(ec);
+            return self.refresh(ec, timing);
         }
         if let Work::Finish(cancel) = self.work {
             let c = lock(&state.composition).clone();
@@ -254,50 +318,59 @@ impl Edit_Impl {
             Work::Direct(_) | Work::Finish(_) | Work::Refresh => return Ok(()),
         };
         let input_chinese = session.backend.with_kernel(|k| k.is_chinese());
-        let actions = session.submit_in_context(event, countable(&self.context));
+        let allow_learning = countable(&self.context);
+        let started = Instant::now();
+        let actions = session.submit_in_context(event, allow_learning);
+        timing.kernel_us += crate::input_profile::micros(started.elapsed());
         if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
         }
         let mut pass = false;
         let mut committed = Vec::new();
         let mut learning = Vec::new();
-        for action in actions {
-            match action {
-                KernelAction::Commit(
-                    CommitRequest::Text(text) | CommitRequest::ReplaceComposition { text },
-                ) => {
-                    replace(state, &self.context, ec, &text, false)?;
-                    committed.push(text);
-                }
-                KernelAction::Render(render) => {
-                    if render.composition.is_empty() {
-                        end(state, ec, true)?;
-                        state.hide();
-                    } else {
-                        replace(state, &self.context, ec, &render.composition, true)?;
+        let write_start = Instant::now();
+        let write_result: Result<()> = (|| {
+            for action in actions {
+                match action {
+                    KernelAction::Commit(
+                        CommitRequest::Text(text) | CommitRequest::ReplaceComposition { text },
+                    ) => {
+                        replace(state, &self.context, ec, &text, false)?;
+                        committed.push(text);
                     }
+                    KernelAction::Render(render) => {
+                        if render.composition.is_empty() {
+                            end(state, ec, true)?;
+                            state.hide();
+                        } else {
+                            replace(state, &self.context, ec, &render.composition, true)?;
+                        }
+                    }
+                    KernelAction::PassThrough => pass = true,
+                    KernelAction::Side(SideEffect::Learn(event)) => learning.push(event),
+                    KernelAction::Side(_) => {}
                 }
-                KernelAction::PassThrough => pass = true,
-                KernelAction::Side(SideEffect::Learn(event)) => learning.push(event),
-                KernelAction::Side(_) => {}
             }
-        }
-        // A printable key following a composition must be inserted in the SAME edit
-        // transaction as its commit, otherwise an async commit can land after punctuation.
-        if pass {
-            let literal = match self.work {
-                Work::Key(Key::Char(c), _) => Some(c.to_string()),
-                Work::Key(Key::Space, _) => Some(" ".into()),
-                Work::Key(Key::Enter, _) => Some("\r\n".into()),
-                _ => None,
-            };
-            if let Some(literal) = literal {
-                end(state, ec, false)?;
-                state.reset_kernel();
-                replace(state, &self.context, ec, &literal, false)?;
-                committed.push(literal);
+            // A printable key following a composition must be inserted in the SAME edit
+            // transaction as its commit, otherwise an async commit can land after punctuation.
+            if pass {
+                let literal = match self.work {
+                    Work::Key(Key::Char(c), _) => Some(c.to_string()),
+                    Work::Key(Key::Space, _) => Some(" ".into()),
+                    Work::Key(Key::Enter, _) => Some("\r\n".into()),
+                    _ => None,
+                };
+                if let Some(literal) = literal {
+                    end(state, ec, false)?;
+                    state.reset_kernel();
+                    replace(state, &self.context, ec, &literal, false)?;
+                    committed.push(literal);
+                }
             }
-        }
+            Ok(())
+        })();
+        timing.write_us += crate::input_profile::micros(write_start.elapsed());
+        write_result?;
         // Only successful host writes count as selections. Failed/cancelled edit sessions
         // and hidden input contexts must not persist a user's uncommitted text.
         if !committed.is_empty() && !learning.is_empty() && learnable(&self.context, ec) {
@@ -305,7 +378,7 @@ impl Edit_Impl {
                 session.backend.record_learning(event);
             }
         }
-        self.refresh(ec)?;
+        self.refresh(ec, timing)?;
         if countable(&self.context)
             && !(input_chinese && matches!(self.work, Work::Key(Key::Enter, _)))
         {
@@ -342,7 +415,7 @@ impl Edit_Impl {
         }
         Ok(())
     }
-    fn refresh(&self, ec: u32) -> Result<()> {
+    fn refresh(&self, ec: u32, timing: &mut crate::input_profile::Timing) -> Result<()> {
         let state = &self.state;
         let Some(session) = state.session() else {
             return Ok(());
@@ -354,6 +427,7 @@ impl Edit_Impl {
             }
             // SAFETY: ec is a valid read/write cookie for this composition's context.
             unsafe {
+                let start = Instant::now();
                 let range = c.object.GetRange()?;
                 let mut rect = RECT::default();
                 let mut clipped = BOOL(0);
@@ -364,6 +438,7 @@ impl Edit_Impl {
                     .is_ok()
                     && !clipped.as_bool())
                 .then_some(rect);
+                timing.anchor_us += crate::input_profile::micros(start.elapsed());
                 let initial = session.backend.with_kernel(|k| k.render_state());
                 if !matches!(self.work, Work::Refresh)
                     && initial.composition.len() >= 3
@@ -384,20 +459,41 @@ impl Edit_Impl {
                         (!focused.is_invalid()).then_some(focused)
                     });
                 // Pagination and drawing share these physical pixel measurements.
+                let start = Instant::now();
                 let layout = crate::popup::measure(&initial, owner, anchor);
+                timing.measure_us += crate::input_profile::micros(start.elapsed());
+                let start = Instant::now();
                 session
                     .backend
                     .layout_candidates(&layout.widths, layout.available, layout.gap);
                 let render = session.backend.with_kernel(|k| k.render_state());
+                timing.layout_us += crate::input_profile::micros(start.elapsed());
                 let manager = lock(&state.thread_mgr).clone();
                 let window = lock(&state.window).take();
                 if let Some(mut window) = window {
                     if let Some(manager) = manager {
-                        if let Err(error) =
-                            window.update(state, &manager, &self.context, &render, anchor, &layout)
-                        {
-                            tracing::warn!("TSF candidate UI update failed: {error}");
+                        let start = Instant::now();
+                        match window.update(
+                            state,
+                            &manager,
+                            &self.context,
+                            &render,
+                            anchor,
+                            &layout,
+                        ) {
+                            Ok(metrics) => {
+                                timing.raster_us += metrics.raster_us;
+                                timing.notify_us += metrics.notify_us;
+                                timing.notify_result = metrics.notify_result;
+                                timing.getter_calls += metrics.getter_calls;
+                                timing.string_calls += metrics.string_calls;
+                                timing.updated_flags |= metrics.updated_flags;
+                                timing.reused = metrics.reused;
+                                timing.dpi = metrics.dpi;
+                            }
+                            Err(error) => tracing::warn!("TSF candidate UI update failed: {error}"),
                         }
+                        timing.ui_us += crate::input_profile::micros(start.elapsed());
                     }
                     *lock(&state.window) = Some(window);
                 }

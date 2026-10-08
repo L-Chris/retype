@@ -6,6 +6,7 @@ use std::cell::RefCell;
 
 thread_local! { static SURFACE: RefCell<Surface> = RefCell::new(Surface::default()); }
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 use windows::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
@@ -15,12 +16,35 @@ use windows::Win32::{
 use windows_core::{w, Result, PCWSTR};
 
 struct Frame {
-    render: RenderState,
+    generation: u64,
+    page_start: usize,
+    composition: String,
+    texts: Vec<String>,
     context: ITfContext,
     tip: Weak<TipState>,
-    bitmap: Bitmap,
+    bitmap: Arc<Bitmap>,
     width: i32,
     height: i32,
+    dpi: i32,
+    invalidated: Option<Instant>,
+}
+
+#[derive(Default)]
+pub(crate) struct UpdateMetrics {
+    pub notify_us: u64,
+    pub notify_result: i32,
+    pub getter_calls: u64,
+    pub string_calls: u64,
+    pub updated_flags: u32,
+    pub raster_us: u64,
+    pub reused: bool,
+    pub dpi: i32,
+}
+
+pub(crate) struct Update {
+    pub width: i32,
+    pub height: i32,
+    pub metrics: UpdateMetrics,
 }
 
 /// One set of physical pixel measurements for pagination and popup drawing.
@@ -112,7 +136,7 @@ pub fn update(
     context: &ITfContext,
     render: &RenderState,
     layout: &Layout,
-) -> (i32, i32) {
+) -> Update {
     // SAFETY: Our own HWND, only touched by its apartment; bitmap owned by Frame.
     unsafe {
         let dpi = layout.dpi;
@@ -121,6 +145,7 @@ pub fn update(
             .widths
             .get(render.page_start..render.page_start + visible.len())
             .unwrap_or(&[]);
+        let start = Instant::now();
         let bitmap = SURFACE.with(|surface| {
             surface.borrow_mut().render(
                 render,
@@ -130,40 +155,77 @@ pub fn update(
                 dpi as f32 / 96.0,
             )
         });
+        let raster_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let width = bitmap.geometry.width as i32;
         let height = bitmap.geometry.height as i32;
+        let old = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Frame;
+        let reused = !old.is_null() && Arc::ptr_eq(&(*old).bitmap, &bitmap);
+        let geometry_changed =
+            old.is_null() || (*old).width != width || (*old).height != height || (*old).dpi != dpi;
+        let label_changed = old.is_null()
+            || (*old).composition != render.composition
+            || !(*old)
+                .texts
+                .iter()
+                .map(String::as_str)
+                .eq(visible.iter().map(|c| c.text.as_str()));
+        let invalidated = if reused {
+            (*old).invalidated
+        } else {
+            Some(Instant::now())
+        };
         let frame = Box::new(Frame {
-            render: render.clone(),
+            generation: render.gen,
+            page_start: render.page_start,
+            composition: render.composition.clone(),
+            texts: visible.iter().map(|c| c.text.clone()).collect(),
             context: context.clone(),
             tip: Arc::downgrade(tip),
             bitmap,
             width,
             height,
+            dpi,
+            invalidated,
         });
         let old = SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(frame) as _);
         if old != 0 {
             drop(Box::from_raw(old as *mut Frame));
         }
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, px(10, dpi), px(10, dpi));
-        if SetWindowRgn(window, Some(region), false) == 0 {
-            let _ = DeleteObject(region.into());
+        if geometry_changed {
+            let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, px(10, dpi), px(10, dpi));
+            if SetWindowRgn(window, Some(region), false) == 0 {
+                let _ = DeleteObject(region.into());
+            }
         }
         // Window text provides a fallback accessible name alongside TSF candidate enumeration.
-        let label = format!(
-            "{} · {}",
-            render.composition,
-            render
-                .visible()
-                .iter()
-                .enumerate()
-                .map(|(i, c)| format!("{} {}", i + 1, c.text))
-                .collect::<Vec<_>>()
-                .join("  ")
-        );
-        let label: Vec<u16> = label.encode_utf16().chain([0]).collect();
-        let _ = SetWindowTextW(window, PCWSTR(label.as_ptr()));
-        let _ = InvalidateRect(Some(window), None, false);
-        (width, height)
+        if label_changed {
+            let label = format!(
+                "{} · {}",
+                render.composition,
+                render
+                    .visible()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{} {}", i + 1, c.text))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            );
+            let label: Vec<u16> = label.encode_utf16().chain([0]).collect();
+            let _ = SetWindowTextW(window, PCWSTR(label.as_ptr()));
+        }
+        if !reused {
+            let _ = InvalidateRect(Some(window), None, false);
+        }
+        Update {
+            width,
+            height,
+            metrics: UpdateMetrics {
+                raster_us,
+                reused,
+                dpi,
+                ..Default::default()
+            },
+        }
     }
 }
 
@@ -219,7 +281,14 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
             return LRESULT(1);
         } else if !pointer.is_null() {
             if msg == WM_PAINT {
+                let invalidated = (*pointer).invalidated.take();
+                let generation = (*pointer).generation;
+                let dpi = (*pointer).dpi;
+                let start = Instant::now();
                 paint(window, &*pointer);
+                if let Some(queued) = invalidated {
+                    crate::input_profile::paint(generation, queued, start, dpi);
+                }
                 return LRESULT(0);
             }
             if msg == WM_LBUTTONUP {
@@ -230,8 +299,8 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
                     (
                         Weak::clone(&frame.tip),
                         frame.context.clone(),
-                        frame.render.page_start + i,
-                        frame.render.gen,
+                        frame.page_start + i,
+                        frame.generation,
                     )
                 });
                 if let Some((tip, context, index, generation)) = target {
@@ -246,6 +315,15 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
         DefWindowProcW(window, msg, wp, lp)
     }))
     .unwrap_or(LRESULT(0))
+}
+
+#[cfg(test)]
+pub(crate) fn frame_for_test(window: HWND) -> (Arc<Bitmap>, u64) {
+    // SAFETY: Integration test owns this popup on its TSF apartment.
+    unsafe {
+        let frame = &*(GetWindowLongPtrW(window, GWLP_USERDATA) as *const Frame);
+        (Arc::clone(&frame.bitmap), frame.generation)
+    }
 }
 
 #[cfg(test)]

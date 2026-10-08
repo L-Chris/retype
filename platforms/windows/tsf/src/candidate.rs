@@ -1,6 +1,10 @@
 //! TSF candidate discovery plus a no-activate native popup for desktop hosts.
 use retype_types::RenderState;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc, Mutex, MutexGuard, Weak,
+};
+use std::time::Instant;
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::TextServices::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -13,6 +17,79 @@ pub struct CandidateWindow {
     element: Option<ITfCandidateListUIElementBehavior>,
     data: Arc<Mutex<RenderState>>,
     visibility: Arc<Mutex<Visibility>>,
+    placement: Option<(i32, i32, i32, i32)>,
+    selection: Arc<Mutex<Option<(u64, usize)>>>,
+    updated_flags: Arc<AtomicU32>,
+    reads: Arc<CandidateReads>,
+    context: Option<ITfContext>,
+    pending_notification: u32,
+}
+
+#[derive(Default)]
+struct CandidateReads {
+    getters: AtomicU64,
+    strings: AtomicU64,
+}
+
+const ALL_UPDATED: u32 = TF_CLUIE_COUNT
+    | TF_CLUIE_SELECTION
+    | TF_CLUIE_STRING
+    | TF_CLUIE_PAGEINDEX
+    | TF_CLUIE_CURRENTPAGE
+    | TF_CLUIE_DOCUMENTMGR;
+
+fn selected(state: &RenderState, selection: Option<(u64, usize)>) -> usize {
+    selection
+        .filter(|(generation, index)| *generation == state.gen && *index < state.candidates.len())
+        .map_or(state.selected, |(_, index)| index)
+}
+
+fn current_page(state: &RenderState) -> usize {
+    if state.page_starts.is_empty() {
+        state.page_start / state.page_size.max(1)
+    } else {
+        state
+            .page_starts
+            .partition_point(|&start| start <= state.page_start)
+            .saturating_sub(1)
+    }
+}
+
+fn page_start(state: &RenderState, page: usize) -> usize {
+    state
+        .page_starts
+        .get(page)
+        .copied()
+        .unwrap_or(page * state.page_size.max(1))
+}
+
+// Only compare fields exposed by the candidate-list interface. Generation and
+// consumption metadata still get published, without asking hosts to reread text.
+fn updated_flags(old: &RenderState, new: &RenderState, selection: Option<(u64, usize)>) -> u32 {
+    let mut flags = 0;
+    if old.candidates.len() != new.candidates.len() {
+        flags |= TF_CLUIE_COUNT;
+    }
+    if !old
+        .candidates
+        .iter()
+        .map(|c| c.text.as_str())
+        .eq(new.candidates.iter().map(|c| c.text.as_str()))
+    {
+        flags |= TF_CLUIE_STRING;
+    }
+    if selected(old, selection) != selected(new, selection) {
+        flags |= TF_CLUIE_SELECTION;
+    }
+    if old.page_count() != new.page_count()
+        || (0..old.page_count()).any(|i| page_start(old, i) != page_start(new, i))
+    {
+        flags |= TF_CLUIE_PAGEINDEX;
+    }
+    if current_page(old) != current_page(new) {
+        flags |= TF_CLUIE_CURRENTPAGE;
+    }
+    flags
 }
 
 #[derive(Default)]
@@ -22,6 +99,16 @@ struct Visibility {
 }
 
 impl CandidateWindow {
+    #[cfg(test)]
+    pub(crate) fn native_handle(&self) -> Option<HWND> {
+        self.window
+    }
+
+    #[cfg(test)]
+    pub(crate) fn element_for_test(&self) -> Option<ITfCandidateListUIElementBehavior> {
+        self.element.clone()
+    }
+
     pub fn hide(&mut self) {
         // SAFETY: The popup is owned and accessed by this TSF apartment only.
         unsafe {
@@ -34,6 +121,9 @@ impl CandidateWindow {
             }
         }
         self.element = None;
+        self.placement = None;
+        self.context = None;
+        self.pending_notification = 0;
     }
     #[allow(clippy::arc_with_non_send_sync)] // Shared only by COM objects in this STA.
     pub fn update(
@@ -44,14 +134,49 @@ impl CandidateWindow {
         state: &RenderState,
         anchor: Option<RECT>,
         layout: &crate::popup::Layout,
-    ) -> Result<()> {
-        *self.data.lock().unwrap_or_else(|e| e.into_inner()) = state.clone();
+    ) -> Result<crate::popup::UpdateMetrics> {
+        if self.context.as_ref().is_some_and(|bound| bound != ctx) {
+            self.hide();
+        }
+        let new_element = self.element.is_none();
+        if new_element {
+            // A retained element must keep its own data and counters after EndUIElement.
+            self.data = Arc::default();
+            self.selection = Arc::default();
+            self.updated_flags = Arc::default();
+            self.reads = Arc::default();
+        }
+        let flags = {
+            let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
+            let selection = *self.selection.lock().unwrap_or_else(|e| e.into_inner());
+            let flags = if new_element {
+                ALL_UPDATED
+            } else {
+                updated_flags(&data, state, selection)
+            };
+            let changed = *data != *state;
+            if changed {
+                *data = state.clone();
+            }
+            flags
+        } | self.pending_notification;
+        // Keep the last notification's flags available to hosts which query
+        // after UpdateUIElement returns; a caret-only refresh must not erase it.
+        if flags != 0 {
+            self.updated_flags.store(flags, Ordering::Relaxed);
+        }
+        let mut metrics = crate::popup::UpdateMetrics {
+            updated_flags: flags,
+            ..Default::default()
+        };
         if state.composition.is_empty() || state.candidates.is_empty() {
             self.hide();
-            return Ok(());
+            return Ok(Default::default());
         }
         // SAFETY: COM objects and HWND belong to the calling TSF UI thread. No global hooks.
         unsafe {
+            let getters_before = self.reads.getters.load(Ordering::Relaxed);
+            let strings_before = self.reads.strings.load(Ordering::Relaxed);
             if self.element.is_none() {
                 self.visibility = Arc::new(Mutex::new(Visibility {
                     window: self.window,
@@ -62,7 +187,9 @@ impl CandidateWindow {
                     document: ctx.GetDocumentMgr()?,
                     context: ctx.clone(),
                     tip: Arc::downgrade(tip),
-                    selection: Mutex::new(None),
+                    selection: Arc::clone(&self.selection),
+                    updated_flags: Arc::clone(&self.updated_flags),
+                    reads: Arc::clone(&self.reads),
                     visibility: Arc::clone(&self.visibility),
                 }
                 .into();
@@ -74,17 +201,38 @@ impl CandidateWindow {
                 let mut show = BOOL(1);
                 let mut id = 0;
                 let ui: ITfUIElement = element.cast()?;
+                let start = Instant::now();
                 ui_mgr.BeginUIElement(&ui, &mut show, &mut id)?;
+                metrics.notify_us += crate::input_profile::micros(start.elapsed());
                 self.visibility
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .requested = show.as_bool();
                 self.ui = Some((ui_mgr, id));
                 self.element = Some(element);
+                self.context = Some(ctx.clone());
             }
-            if let Some((ui_mgr, id)) = &self.ui {
-                let _ = ui_mgr.UpdateUIElement(*id);
+            if let Some((ui_mgr, id)) = self.ui.as_ref().filter(|_| flags != 0) {
+                let start = Instant::now();
+                match ui_mgr.UpdateUIElement(*id) {
+                    Ok(()) => self.pending_notification = 0,
+                    Err(error) => {
+                        self.pending_notification = flags;
+                        metrics.notify_result = error.code().0;
+                    }
+                }
+                metrics.notify_us += crate::input_profile::micros(start.elapsed());
             }
+            metrics.getter_calls = self
+                .reads
+                .getters
+                .load(Ordering::Relaxed)
+                .wrapping_sub(getters_before);
+            metrics.string_calls = self
+                .reads
+                .strings
+                .load(Ordering::Relaxed)
+                .wrapping_sub(strings_before);
             // A UI-less host renders the candidate list itself. Do not create a
             // popup inside that host, even if it accepts our UI element updates.
             if !self
@@ -96,7 +244,7 @@ impl CandidateWindow {
                 if let Some(window) = self.window {
                     let _ = ShowWindow(window, SW_HIDE);
                 }
-                return Ok(());
+                return Ok(metrics);
             }
             // UI-less controls can expose a composition without a screen-space
             // text extent. They still need Begin/UpdateUIElement above so the
@@ -105,7 +253,7 @@ impl CandidateWindow {
                 if let Some(window) = self.window {
                     let _ = ShowWindow(window, SW_HIDE);
                 }
-                return Ok(());
+                return Ok(metrics);
             };
             let owner = ctx
                 .GetActiveView()
@@ -121,6 +269,7 @@ impl CandidateWindow {
                 .is_some_and(|window| !IsWindow(Some(window)).as_bool())
             {
                 self.window = None;
+                self.placement = None;
             }
             if self.window.is_none() {
                 self.window = Some(crate::popup::create(owner)?);
@@ -142,7 +291,8 @@ impl CandidateWindow {
                 };
                 let has_monitor =
                     windows::Win32::Graphics::Gdi::GetMonitorInfoW(monitor, &mut info).as_bool();
-                let (width, height) = crate::popup::update(window, tip, ctx, state, layout);
+                let update = crate::popup::update(window, tip, ctx, state, layout);
+                let (width, height) = (update.width, update.height);
                 let (mut x, mut y) = (anchor.left, anchor.bottom + 4);
                 if has_monitor {
                     x = x
@@ -153,24 +303,34 @@ impl CandidateWindow {
                     }
                     y = y.max(info.rcWork.top);
                 }
-                SetWindowPos(
-                    window,
-                    Some(HWND_TOPMOST),
-                    x,
-                    y,
-                    width,
-                    height,
-                    SWP_NOACTIVATE,
-                )?;
+                let placement = (x, y, width, height);
+                if self.placement != Some(placement) {
+                    SetWindowPos(
+                        window,
+                        Some(HWND_TOPMOST),
+                        x,
+                        y,
+                        width,
+                        height,
+                        SWP_NOACTIVATE,
+                    )?;
+                    self.placement = Some(placement);
+                }
                 let show = self
                     .visibility
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .requested;
-                let _ = ShowWindow(window, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                if IsWindowVisible(window).as_bool() != show {
+                    let _ = ShowWindow(window, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+                }
+                metrics.raster_us = update.metrics.raster_us;
+                metrics.reused = update.metrics.reused;
+                metrics.dpi = update.metrics.dpi;
+                return Ok(metrics);
             }
         }
-        Ok(())
+        Ok(metrics)
     }
 }
 impl Drop for CandidateWindow {
@@ -196,22 +356,22 @@ struct Candidates {
     document: ITfDocumentMgr,
     context: ITfContext,
     tip: Weak<crate::tip::TipState>,
-    selection: Mutex<Option<(u64, usize)>>,
+    selection: Arc<Mutex<Option<(u64, usize)>>>,
+    updated_flags: Arc<AtomicU32>,
+    reads: Arc<CandidateReads>,
     visibility: Arc<Mutex<Visibility>>,
 }
 impl Candidates_Impl {
-    fn state(&self) -> RenderState {
-        self.data.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    fn state(&self) -> MutexGuard<'_, RenderState> {
+        self.reads.getters.fetch_add(1, Ordering::Relaxed);
+        self.data.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn selected(&self, state: &RenderState) -> usize {
-        self.selection
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .filter(|(generation, index)| {
-                *generation == state.gen && *index < state.candidates.len()
-            })
-            .map_or(state.selected, |(_, index)| index)
+        selected(
+            state,
+            *self.selection.lock().unwrap_or_else(|e| e.into_inner()),
+        )
     }
 
     fn request(&self, work: crate::edit::Work) -> Result<()> {
@@ -264,14 +424,11 @@ impl ITfUIElement_Impl for Candidates_Impl {
 }
 impl ITfCandidateListUIElement_Impl for Candidates_Impl {
     fn GetUpdatedFlags(&self) -> Result<u32> {
-        Ok(TF_CLUIE_COUNT
-            | TF_CLUIE_SELECTION
-            | TF_CLUIE_STRING
-            | TF_CLUIE_PAGEINDEX
-            | TF_CLUIE_CURRENTPAGE
-            | TF_CLUIE_DOCUMENTMGR)
+        self.reads.getters.fetch_add(1, Ordering::Relaxed);
+        Ok(self.updated_flags.load(Ordering::Relaxed))
     }
     fn GetDocumentMgr(&self) -> Result<ITfDocumentMgr> {
+        self.reads.getters.fetch_add(1, Ordering::Relaxed);
         Ok(self.document.clone())
     }
     fn GetCount(&self) -> Result<u32> {
@@ -282,6 +439,7 @@ impl ITfCandidateListUIElement_Impl for Candidates_Impl {
         Ok(self.selected(&state) as u32)
     }
     fn GetString(&self, index: u32) -> Result<BSTR> {
+        self.reads.strings.fetch_add(1, Ordering::Relaxed);
         self.state()
             .candidates
             .get(index as usize)
@@ -313,14 +471,7 @@ impl ITfCandidateListUIElement_Impl for Candidates_Impl {
         Err(windows::Win32::Foundation::E_NOTIMPL.into())
     }
     fn GetCurrentPage(&self) -> Result<u32> {
-        let s = self.state();
-        Ok(if s.page_starts.is_empty() {
-            (s.page_start / s.page_size.max(1)) as u32
-        } else {
-            s.page_starts
-                .partition_point(|&start| start <= s.page_start)
-                .saturating_sub(1) as u32
-        })
+        Ok(current_page(&self.state()) as u32)
     }
 }
 
@@ -336,8 +487,12 @@ impl ITfCandidateListUIElementBehavior_Impl for Candidates_Impl {
     }
 
     fn Finalize(&self) -> Result<()> {
-        let state = self.state();
-        self.request(crate::edit::Work::Choose(self.selected(&state), state.gen))
+        let (index, generation) = {
+            let state = self.state();
+            (self.selected(&state), state.gen)
+        };
+        // Never hold candidate data across a reentrant host edit request.
+        self.request(crate::edit::Work::Choose(index, generation))
     }
 
     fn Abort(&self) -> Result<()> {
@@ -379,5 +534,53 @@ impl ITfIntegratableCandidateListUIElement_Impl for Candidates_Impl {
             retype_types::Key::Enter,
             retype_types::Modifiers::NONE,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use retype_types::{Candidate, CandidateSource};
+
+    #[test]
+    fn flags_track_exposed_text_count_selection_and_variable_pages() {
+        let old = RenderState {
+            candidates: (0..20)
+                .map(|i| Candidate::new(i.to_string(), CandidateSource::Local))
+                .collect(),
+            page_size: 8,
+            page_starts: vec![0, 8, 13],
+            ..Default::default()
+        };
+        let mut new = old.clone();
+        new.gen += 1;
+        new.composition = "different internal composition".into();
+        new.candidates[0].score = 1.0;
+        new.candidates[0].consumed = 2;
+        assert_eq!(updated_flags(&old, &new, None), 0);
+        new.candidates[19].text = "changed".into();
+        assert_eq!(updated_flags(&old, &new, None), TF_CLUIE_STRING);
+        new = old.clone();
+        new.page_starts = vec![0, 7, 12];
+        assert_eq!(updated_flags(&old, &new, None), TF_CLUIE_PAGEINDEX);
+        new = old.clone();
+        new.selected = 13;
+        new.page_start = 13;
+        assert_eq!(
+            updated_flags(&old, &new, None),
+            TF_CLUIE_SELECTION | TF_CLUIE_CURRENTPAGE
+        );
+        new = old.clone();
+        new.candidates.pop();
+        assert_eq!(
+            updated_flags(&old, &new, None),
+            TF_CLUIE_COUNT | TF_CLUIE_STRING
+        );
+        // Equivalent fixed and explicit boundaries must not cause a reread.
+        let mut fixed = old.clone();
+        fixed.page_starts.clear();
+        let mut explicit = fixed.clone();
+        explicit.page_starts = vec![0, 8, 16];
+        assert_eq!(updated_flags(&fixed, &explicit, None), 0);
     }
 }

@@ -451,8 +451,16 @@ impl ITfUIElementSink_Impl for UiLessSink_Impl {
             unsafe { integrated.GetSelectionStyle()? },
             STYLE_ACTIVE_SELECTION
         );
-        if unsafe { list.GetCount()? } > 0 {
-            lock(&self.candidates).push(unsafe { list.GetString(0)? }.to_string());
+        let flags = unsafe { list.GetUpdatedFlags()? };
+        if flags & (TF_CLUIE_COUNT | TF_CLUIE_STRING) != 0 {
+            // Search/UI-less hosts may enumerate every candidate, not just the
+            // visible page. Exercise that path against the production interface.
+            let count = unsafe { list.GetCount()? };
+            let mut words = Vec::with_capacity(count as usize);
+            for index in 0..count {
+                words.push(unsafe { list.GetString(index)? }.to_string());
+            }
+            lock(&self.candidates).extend(words);
         }
         Ok(())
     }
@@ -606,6 +614,7 @@ fn run_host() -> Result<()> {
         state.tid.store(tid, Ordering::SeqCst);
         state.activated.store(true, Ordering::SeqCst);
         *lock(&state.thread_mgr) = Some(manager.clone());
+        check_candidate_getters(&state, &manager, &context)?;
         // Known deterministic dictionary; no background loader races.
         let session =
             crate::session::Session::start_with(std::path::PathBuf::from("Z:/retype-test/no-dict"));
@@ -654,7 +663,14 @@ fn run_host() -> Result<()> {
         assert!(lock(&seen_candidates).iter().any(|word| word == "你好"));
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "nihao");
         assert!(lock(&state.composition).is_some());
-        request(&state, &context, Work::Key(Key::Space, Modifiers::NONE))?;
+        let candidate_list = lock(&state.window)
+            .as_ref()
+            .and_then(crate::candidate::CandidateWindow::element_for_test)
+            .ok_or(E_FAIL)?;
+        candidate_list.SetSelection(0)?;
+        // Finalize synchronously edits and replaces candidate data. Getter
+        // read locks must have been released before this host reentry.
+        candidate_list.Finalize()?;
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好");
         assert!(lock(&state.composition).is_none());
         // Deferred writes must not touch the engine/document before the host grants its lock.
@@ -695,6 +711,19 @@ fn run_host() -> Result<()> {
         for ch in "ni".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
+        // A host can queue several caret-layout notifications while its read
+        // lock is pending. They need one refresh, not multiple full drawings.
+        lock(&data).defer = true;
+        request(&state, &context, Work::Refresh)?;
+        let refresh_count = state.pending.load(Ordering::SeqCst);
+        assert!(lock(&state.refresh_pending).is_some());
+        request(&state, &context, Work::Refresh)?;
+        assert_eq!(state.pending.load(Ordering::SeqCst), refresh_count);
+        let flags = lock(&data).deferred_flags.take().expect("deferred refresh");
+        lock(&data).defer = false;
+        sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(flags))?;
+        assert!(lock(&state.refresh_pending).is_none());
+        assert_eq!(state.pending.load(Ordering::SeqCst), 0);
         request(&state, &context, Work::Key(Key::Escape, Modifiers::NONE))?;
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好");
         for ch in "nihao".chars() {
@@ -898,11 +927,199 @@ fn run_host() -> Result<()> {
             "failed host writes must not learn"
         );
         lock(&data).reject_write = false;
+        // Native popup reuse must update its click generation even when only
+        // the composition changes and its visible candidate pixels stay equal.
+        source.UnadviseSink(_ui_cookie)?;
+        lock(&data).no_text_extent = false;
+        session.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Full,
+        ));
+        for ch in "ni".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        let window = lock(&state.window)
+            .as_ref()
+            .and_then(|w| w.native_handle())
+            .expect("native popup");
+        let (before, old_generation) = crate::popup::frame_for_test(window);
+        request(
+            &state,
+            &context,
+            Work::Key(Key::Char('\''), Modifiers::NONE),
+        )?;
+        let (after, generation) = crate::popup::frame_for_test(window);
+        assert!(Arc::ptr_eq(&before, &after));
+        assert_ne!(old_generation, generation);
+        assert_eq!(generation, session.backend.with_kernel(|k| k.generation()));
+        let center = after.geometry.cells[0].center();
+        let click = LPARAM(((center.y as i32) << 16 | center.x as i32) as isize);
+        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            window,
+            windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP,
+            Some(WPARAM(0)),
+            Some(click),
+        );
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('你'));
+        assert!(lock(&state.composition).is_none());
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;
         Ok(())
     }
+}
+
+fn check_candidate_getters(
+    tip: &Arc<TipState>,
+    manager: &ITfThreadMgr,
+    context: &ITfContext,
+) -> Result<()> {
+    use retype_types::{Candidate, CandidateSource, RenderState};
+    use std::{hint::black_box, time::Instant};
+    use windows_core::BSTR;
+
+    let mut render = RenderState {
+        gen: 7,
+        composition: "ss".into(),
+        candidates: (0..512)
+            .map(|i| {
+                let mut candidate = Candidate::new(format!("候选{i}"), CandidateSource::Local);
+                candidate.comment = "song".into();
+                candidate.syllables = vec![1];
+                candidate.consumed = 2;
+                candidate
+            })
+            .collect(),
+        page_size: 8,
+        page_starts: (0..512).step_by(8).collect(),
+        ..Default::default()
+    };
+    let layout = crate::popup::measure(&render, None, None);
+    let mut window = crate::candidate::CandidateWindow::default();
+    let metrics = window.update(tip, manager, context, &render, None, &layout)?;
+    assert!(
+        window.native_handle().is_none(),
+        "UI-less host must own the UI"
+    );
+    assert!(
+        metrics.string_calls >= 512,
+        "count host enumeration inside notification"
+    );
+    let list = window.element_for_test().ok_or(E_FAIL)?;
+    // SAFETY: Isolated, live COM apartment with an in-memory TSF host.
+    unsafe {
+        assert_eq!(list.GetCount()?, 512);
+        assert_eq!(list.GetString(511)?.to_string(), "候选511");
+        assert_eq!(list.GetString(512).unwrap_err().code(), E_INVALIDARG);
+        let mut count = 0;
+        let mut indexes = [0; 64];
+        list.GetPageIndex(&mut indexes, &mut count)?;
+        assert_eq!(count, 64);
+        assert_eq!(indexes[63], 504);
+        assert_eq!(list.GetCurrentPage()?, 0);
+        // Repeated reads must retain a notification's flags.
+        let initial_flags = list.GetUpdatedFlags()?;
+        assert_ne!(initial_flags & TF_CLUIE_DOCUMENTMGR, 0);
+        assert_eq!(list.GetUpdatedFlags()?, initial_flags);
+
+        render.gen += 1;
+        render.candidates[0].consumed = 1;
+        render.candidates[0].score = 100.0;
+        let metadata_only = window.update(tip, manager, context, &render, None, &layout)?;
+        assert_eq!(metadata_only.updated_flags, 0);
+        assert_eq!(metadata_only.string_calls, 0);
+        assert_eq!(list.GetUpdatedFlags()?, initial_flags);
+        list.SetSelection(7)?;
+        assert_eq!(list.GetSelection()?, 7);
+        render.gen += 1;
+        let reset_selection = window.update(tip, manager, context, &render, None, &layout)?;
+        assert_eq!(reset_selection.updated_flags, TF_CLUIE_SELECTION);
+        assert_eq!(reset_selection.string_calls, 0);
+        assert_eq!(list.GetSelection()?, 0);
+
+        render.page_start = 8;
+        render.selected = 8;
+        let page_only = window.update(tip, manager, context, &render, None, &layout)?;
+        assert_eq!(
+            page_only.updated_flags,
+            TF_CLUIE_SELECTION | TF_CLUIE_CURRENTPAGE
+        );
+        assert_eq!(page_only.string_calls, 0);
+        assert_eq!(list.GetCurrentPage()?, 1);
+        assert_eq!(list.GetSelection()?, 8);
+        render.candidates[511].text = "最后一条".into();
+        let text_only = window.update(tip, manager, context, &render, None, &layout)?;
+        assert_eq!(text_only.updated_flags, TF_CLUIE_STRING);
+        assert!(text_only.string_calls >= 512);
+        assert_eq!(list.GetString(511)?.to_string(), "最后一条");
+
+        // Compare equivalent full enumeration, including BSTR allocations, using
+        // real candidate metadata. This is not an application latency guarantee.
+        if std::env::var_os("RETYPE_BENCH_CANDIDATES").is_some() {
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for _ in 0..11 {
+                let start = Instant::now();
+                for i in 0..512 {
+                    let cloned = black_box(&render).clone();
+                    black_box(BSTR::from(cloned.candidates[i].text.as_str()));
+                }
+                before.push(start.elapsed().as_micros());
+                let start = Instant::now();
+                for i in 0..512 {
+                    black_box(list.GetString(i)?);
+                }
+                after.push(start.elapsed().as_micros());
+            }
+            before.sort();
+            after.sort();
+            eprintln!("512-candidate enumeration median: previous full clone {} us, indexed COM getters {} us (no real application scheduling)", before[5], after[5]);
+        }
+
+        window.hide();
+        render.candidates[0].text = "新的列表".into();
+        let restarted = window.update(tip, manager, context, &render, None, &layout)?;
+        assert_ne!(restarted.updated_flags & TF_CLUIE_DOCUMENTMGR, 0);
+        assert_eq!(
+            list.GetString(0)?.to_string(),
+            "候选0",
+            "retained element stays isolated after EndUIElement"
+        );
+        assert_eq!(
+            window
+                .element_for_test()
+                .ok_or(E_FAIL)?
+                .GetString(0)?
+                .to_string(),
+            "新的列表"
+        );
+
+        let other_document = manager.CreateDocumentMgr()?;
+        let other_store: ITextStoreACP = Store {
+            data: Arc::new(Mutex::new(Data::default())),
+        }
+        .into();
+        let mut other_context = None;
+        let mut cookie = 0;
+        other_document.CreateContext(
+            tip.tid.load(Ordering::SeqCst),
+            0,
+            &other_store,
+            &mut other_context,
+            &mut cookie,
+        )?;
+        let other_context = other_context.ok_or(E_FAIL)?;
+        other_document.Push(&other_context)?;
+        let switched = window.update(tip, manager, &other_context, &render, None, &layout)?;
+        assert_ne!(switched.updated_flags & TF_CLUIE_DOCUMENTMGR, 0);
+        assert_eq!(
+            window.element_for_test().ok_or(E_FAIL)?.GetDocumentMgr()?,
+            other_document
+        );
+        window.hide();
+        other_document.Pop(TF_POPF_ALL)?;
+    }
+    window.hide();
+    Ok(())
 }
 
 type VoiceSelection = Arc<Mutex<Option<(ITfRange, Vec<u16>)>>>;
