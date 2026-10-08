@@ -131,7 +131,7 @@ fn full_and_flypy_odd_and_even_codes_share_the_same_preference() {
 }
 
 #[test]
-fn registered_compound_competes_with_composed_candidates_without_a_length_bonus() {
+fn registered_compound_becomes_a_whole_word_without_a_length_bonus() {
     let base: Arc<dyn Lexicon> = Arc::new(
         from_pairs([
             ("你", "ni", 1000.),
@@ -150,7 +150,11 @@ fn registered_compound_competes_with_composed_candidates_without_a_length_bonus(
     choice(&learner, "拟号", "ni hao", 3);
     let prior = user.usage_snapshot().records[0].prior_logp.unwrap();
     assert!((prior + retype_pinyin::DecodeOptions::default().word_bonus - original).abs() < 1e-5);
-    assert_eq!(decode("nihao", &lex)[0].text, "你好");
+    // Once registered, the user phrase is a whole-word match. With no system
+    // whole word for this reading, automatic compositions are now the fallback.
+    let registered = decode("nihao", &lex);
+    assert_eq!(registered[0].text, "拟号");
+    assert!(!registered.iter().any(|candidate| candidate.text == "你好"));
     for _ in 0..12 {
         choice(&learner, "拟号", "ni hao", 0);
     }

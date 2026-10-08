@@ -112,9 +112,11 @@ fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
 pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOutput {
     let normalized = crate::normalize(input);
     let lattice = build_lattice_with(&normalized, lex, opts, options);
+    let has_exact_word = lattice.has_whole_word(&normalized);
     let mut output = decode_lattice(&normalized, lattice, opts, lex);
     if can_preview_tail(normalized.as_bytes()) {
         let preview = build_lattice_with(&normalized, lex, opts, preview_options);
+        let has_preview_word = preview.has_whole_word(&normalized);
         let mut candidates: Vec<_> = decode_lattice(&normalized, preview, opts, lex)
             .candidates
             .into_iter()
@@ -132,11 +134,18 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
                     .filter(|c| c.source != CandidateSource::Raw),
             );
         }
+        let mut exact = Vec::new();
         let mut raw = Vec::new();
         for candidate in output.candidates {
             if candidate.source == CandidateSource::Raw {
                 raw.push(candidate);
-            } else {
+            } else if has_exact_word && candidate.consumed == normalized.len() {
+                // A complete code is more reliable than a tail completion,
+                // even when both consume all typed keys.
+                exact.push(candidate);
+            } else if !has_preview_word || candidate.consumed < normalized.len() {
+                // Do not reintroduce automatic compositions from the strict
+                // graph when a dictionary word covers the preview graph.
                 candidates.push(candidate);
             }
         }
@@ -147,11 +156,12 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
             let rank =
                 |candidate: &Candidate| candidate.score / candidate.syllable_len.max(1) as f32;
             rank(b)
-                .partial_cmp(&rank(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&rank(a))
                 .then_with(|| b.consumed.cmp(&a.consumed))
                 .then_with(|| a.text.cmp(&b.text))
         });
+        exact.extend(candidates);
+        let mut candidates = exact;
         let mut seen = HashSet::new();
         candidates.retain(|c| seen.insert(c.text.clone()));
         candidates.extend(raw.into_iter().filter(|c| seen.insert(c.text.clone())));

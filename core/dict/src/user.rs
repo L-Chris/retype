@@ -518,15 +518,22 @@ fn dedup_keeping_best(out: &mut Vec<LexEntry>, start: usize) {
     // Lexicon queries append: entries supplied by the caller belong to another
     // query/layer. A nested LayeredDict must never remove or reweight them,
     // otherwise its parent can lose entries and slice past the shortened buffer.
-    for i in (start..out.len()).rev() {
-        let best = (start..i).find(|&j| out[j].text == out[i].text);
-        if let Some(j) = best {
+    let mut positions: HashMap<Arc<str>, usize> = HashMap::with_capacity(out.len() - start);
+    let mut write = start;
+    for i in start..out.len() {
+        if let Some(&j) = positions.get(out[i].text.as_ref()) {
             if out[j].logp < out[i].logp {
                 out[j].logp = out[i].logp;
             }
-            out.remove(i);
+        } else {
+            positions.insert(Arc::clone(&out[i].text), write);
+            if write != i {
+                out.swap(write, i);
+            }
+            write += 1;
         }
     }
+    out.truncate(write);
 }
 
 #[cfg(test)]
@@ -538,6 +545,31 @@ mod tests {
 
     fn ids(py: &str) -> Vec<SyllableId> {
         annotate::parse_pinyin(py).unwrap()
+    }
+
+    #[test]
+    fn dedup_preserves_previous_results_first_flags_and_appended_order() {
+        let mut out = vec![
+            LexEntry::new("甲", -1.0).with_flags(1),
+            LexEntry::new("甲", -2.0).with_flags(2),
+            LexEntry::new("乙", -8.0).with_flags(3),
+            LexEntry::new("丙", -5.0).with_flags(4),
+            LexEntry::new("乙", -3.0).with_flags(5),
+            LexEntry::new("甲", -9.0).with_flags(6),
+            LexEntry::new("丙", -7.0).with_flags(7),
+        ];
+        dedup_keeping_best(&mut out, 2);
+        let rows: Vec<_> = out.iter().map(|e| (&*e.text, e.logp, e.flags)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("甲", -1.0, 1),
+                ("甲", -2.0, 2),
+                ("乙", -3.0, 3),
+                ("丙", -5.0, 4),
+                ("甲", -9.0, 6)
+            ]
+        );
     }
 
     #[test]

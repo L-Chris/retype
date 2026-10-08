@@ -156,6 +156,97 @@ mod tests {
     }
 
     #[test]
+    fn whole_words_bypass_composition_even_outside_the_beam() {
+        let mut lex = TestLex::default();
+        lex.add("米", "mi", -1.0);
+        lex.add("人", "ren", -1.0);
+        lex.add("迷人", "mi ren", -30.0);
+        lex.add("谜人", "mi ren", -40.0);
+        let opts = DecodeOptions {
+            k: 1,
+            ..Default::default()
+        };
+        for out in [
+            decode("miren", &lex, &opts),
+            shuangpin::decode("mirf", &lex, &opts),
+        ] {
+            let texts: Vec<_> = out.candidates.iter().map(|c| c.text.as_str()).collect();
+            assert_eq!(&texts[..2], &["迷人", "谜人"]);
+            assert!(!texts.contains(&"米人"), "{texts:?}");
+            assert!(!out.has_raw);
+            assert_eq!(out.syllables, ["mi", "ren"]);
+        }
+        let preview = shuangpin::decode("mir", &lex, &opts);
+        for expected in ["迷人", "谜人"] {
+            assert!(preview
+                .candidates
+                .iter()
+                .any(|c| c.text == expected && c.consumed == 3));
+        }
+        assert!(!preview.candidates.iter().any(|c| c.text == "米人"));
+        let traces = trace("miren", &lex, &opts);
+        assert_eq!(traces.len(), 2);
+        assert_eq!(traces[0].text, "迷人");
+        assert_eq!(traces[0].steps.len(), 1);
+    }
+
+    #[test]
+    fn whole_words_span_explicit_syllable_boundaries() {
+        let mut lex = TestLex::default();
+        // Only the phrase exists: separators must not require standalone words.
+        lex.add("迷人", "mi ren", -30.0);
+        let opts = DecodeOptions::default();
+        for input in ["mi'ren", "'mi''ren'"] {
+            let out = decode(input, &lex, &opts);
+            assert_eq!(out.candidates[0].text, "迷人");
+            assert_eq!(out.candidates[0].consumed, input.len());
+            assert!(!out.has_raw);
+        }
+        for input in ["mi'rf", "'mi''rf'"] {
+            let out = shuangpin::decode(input, &lex, &opts);
+            assert_eq!(out.candidates[0].text, "迷人");
+            assert_eq!(out.candidates[0].consumed, input.len());
+            assert!(!out.has_raw);
+        }
+    }
+
+    #[test]
+    fn no_whole_word_keeps_composition_and_selectable_prefixes() {
+        let mut lex = TestLex::default();
+        lex.add("米", "mi", -1.0);
+        lex.add("人", "ren", -1.0);
+        let opts = DecodeOptions::default();
+        for (input, out) in [
+            ("miren", decode("miren", &lex, &opts)),
+            ("mirf", shuangpin::decode("mirf", &lex, &opts)),
+            ("mir", shuangpin::decode("mir", &lex, &opts)),
+        ] {
+            assert_eq!(out.candidates[0].text, "米人");
+            assert_eq!(out.candidates[0].consumed, input.len());
+            assert!(out
+                .candidates
+                .iter()
+                .any(|c| c.text == "米" && c.consumed == 2));
+            assert!(!out.has_raw);
+        }
+    }
+
+    #[test]
+    fn complete_flypy_word_precedes_higher_scored_tail_completion() {
+        let mut lex = TestLex::default();
+        lex.add("偶哦", "ou o", -30.0);
+        // The final o is complete, but can also preview the ou code.
+        lex.add("偶偶", "ou ou", -1.0);
+        let out = shuangpin::decode("ouo", &lex, &DecodeOptions::default());
+        assert_eq!(out.candidates[0].text, "偶哦");
+        assert_eq!(out.candidates[0].consumed, 3);
+        assert!(out
+            .candidates
+            .iter()
+            .any(|c| c.text == "偶偶" && c.consumed == 3));
+    }
+
+    #[test]
     fn dictionary_resolves_syllable_ambiguity() {
         let lex = demo_lex();
         // `shanghai` 既能切成 shang+hai 也能切成 shan+g+hai（后者不合法），

@@ -20,17 +20,16 @@ pub struct DecodeOptions {
     pub k: usize,
     /// 候选窗每页条数
     pub page_size: usize,
-    /// 每个词的加分（注意是**加**不是减）。
+    /// 自动组词时每个词边的加分。
     ///
     /// unigram 模型下 `logp(w) = ln(freq_w / T)`，一条 k 词路径的总分是
-    /// `Σ ln f_i − k·ln T`：**每多切一个词就白扣一次 ln T（≈17.9）**。
-    /// 这是模型的固有偏差，不是语言事实 —— 它会让「妳好吗」这种词频≈3 的
-    /// 垃圾长词条（logp −16.8）压过「你好(−11.3) + 吗(−7.9)」。
+    /// `Σ ln f_i − k·ln T`：每多切一个词就多扣一次 ln T。
+    /// 这是模型的分词偏差，不能表达相邻词之间的真实搭配概率。
     ///
+    /// 仅在没有完整词条、需要自动组词时使用；完整词条由独立路线处理。
     /// `word_bonus` 就是这个偏差的部分补偿。理论上界是 `ln T`（完全补偿，
-    /// 等价于假设任意词都能自由相接，结果会退化成全单字）；下界是 0（现状，
-    /// 会过度合并）。合理区间由不等式给出，见 `word_bonus_bounds` 测试。
-    /// M2 引入 bigram/上下文模型后，这一项应退化为一个很小的微调量。
+    /// 等价于假设任意词都能自由相接，结果会退化成全单字）；为 0 时倾向过度合并。
+    /// 后续引入搭配模型时需要重新评估；当前不靠调整该值实现整词优先。
     pub word_bonus: f32,
     /// 无法匹配任何音节时，单个原样字母的惩罚。必须比最生僻的字更差，
     /// 否则解码器会宁可直接吐字母。
@@ -107,6 +106,25 @@ impl Lattice {
     pub fn edge_count(&self) -> usize {
         self.edges.iter().map(Vec::len).sum()
     }
+
+    fn whole_word_edges<'a>(
+        &'a self,
+        input: &str,
+    ) -> impl Iterator<Item = (usize, usize, &'a Edge)> {
+        let start = input.len() - input.trim_start_matches('\'').len();
+        let end = input.trim_end_matches('\'').len();
+        self.edges[start]
+            .iter()
+            .enumerate()
+            .filter_map(move |(ei, edge)| {
+                (start < end && edge.to == end && matches!(edge.text, EdgeText::Word(_)))
+                    .then_some((start, ei, edge))
+            })
+    }
+
+    pub(crate) fn has_whole_word(&self, input: &str) -> bool {
+        self.whole_word_edges(input).next().is_some()
+    }
 }
 
 /// 从 `pos` 起所有合法的音节切分（长度 1..=6，遇 `'` 截断）。
@@ -159,7 +177,12 @@ pub(crate) fn build_lattice_with(
 
         stack.clear();
         stack.push((i, Vec::new()));
-        while let Some((pos, syls)) = stack.pop() {
+        while let Some((mut pos, syls)) = stack.pop() {
+            // An explicit separator fixes a syllable boundary, but does not
+            // prevent one dictionary phrase from spanning several syllables.
+            while bytes.get(pos) == Some(&b'\'') {
+                pos += 1;
+            }
             options(bytes, pos, &mut syl_opts);
             for (len, id) in syl_opts.iter().copied() {
                 let npos = pos + len;
@@ -297,6 +320,30 @@ fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
     paths
 }
 
+/// Reliable whole-word matches and automatic composition are separate routes.
+/// Preserve every dictionary homophone (also beyond k), and only run the
+/// bounded sentence search when no word covers the complete input.
+fn decode_paths(
+    input: &str,
+    lattice: &Lattice,
+    opts: &DecodeOptions,
+) -> Vec<(f32, Vec<(usize, usize)>)> {
+    let mut paths: Vec<_> = lattice
+        .whole_word_edges(input)
+        .map(|(start, ei, edge)| {
+            let mut path: Vec<_> = (0..start).map(|pos| (pos, 0)).collect();
+            path.push((start, ei));
+            path.extend((edge.to..lattice.n).map(|pos| (pos, 0)));
+            (edge.score, path)
+        })
+        .collect();
+    if paths.is_empty() {
+        return kbest(lattice, opts.k.max(1));
+    }
+    paths.sort_by(|a, b| b.0.total_cmp(&a.0));
+    paths
+}
+
 /// 解码结果。
 #[derive(Debug, Clone, Default)]
 pub struct DecodeOutput {
@@ -311,11 +358,29 @@ pub struct DecodeOutput {
 }
 
 fn comment_of(syllables: &[SyllableId]) -> String {
-    syllables
-        .iter()
-        .filter_map(|id| syllables::name_of(*id))
-        .collect::<Vec<_>>()
-        .join("'")
+    let mut comment = String::with_capacity(syllables.len() * (syllables::MAX_SYLLABLE_LEN + 1));
+    for name in syllables.iter().filter_map(|id| syllables::name_of(*id)) {
+        if !comment.is_empty() {
+            comment.push('\'');
+        }
+        comment.push_str(name);
+    }
+    comment
+}
+
+fn word_candidate(edge: &Edge, consumed: usize) -> Option<Candidate> {
+    let EdgeText::Word(text) = &edge.text else {
+        return None;
+    };
+    Some(Candidate {
+        text: text.to_string(),
+        comment: comment_of(&edge.syllables),
+        source: CandidateSource::Local,
+        syllable_len: edge.syllables.len(),
+        consumed,
+        syllables: edge.syllables.clone(),
+        score: edge.score,
+    })
 }
 
 fn path_to_candidate(
@@ -431,11 +496,33 @@ pub(crate) fn decode_lattice(
     opts: &DecodeOptions,
     lex: &dyn Lexicon,
 ) -> DecodeOutput {
-    let paths = kbest(&lattice, opts.k.max(1));
+    let mut whole_words: Vec<_> = lattice
+        .whole_word_edges(input)
+        .map(|(_, _, edge)| edge)
+        .collect();
+    whole_words.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let has_whole_word = !whole_words.is_empty();
+    // Direct matches do not need path allocation or backtracking. This matters
+    // for single-key previews with thousands of dictionary homophones.
+    let paths = if has_whole_word {
+        Vec::new()
+    } else {
+        kbest(&lattice, opts.k.max(1))
+    };
     let bytes = input.as_bytes();
 
-    let mut found: Vec<(Candidate, bool, usize)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let capacity = whole_words.len().max(paths.len());
+    let mut found: Vec<(Candidate, bool, Option<usize>)> = Vec::with_capacity(capacity);
+    let mut seen: HashSet<String> = HashSet::with_capacity(capacity);
+
+    for edge in whole_words {
+        let Some(candidate) = word_candidate(edge, input.len()) else {
+            continue;
+        };
+        if seen.insert(candidate.text.clone()) {
+            found.push((candidate, false, None));
+        }
+    }
 
     for (pi, (score, path)) in paths.iter().enumerate() {
         let Some((cand, raw)) = path_to_candidate(bytes, &lattice, path, *score) else {
@@ -444,7 +531,7 @@ pub(crate) fn decode_lattice(
         if !seen.insert(cand.text.clone()) {
             continue;
         }
-        found.push((cand, raw, pi));
+        found.push((cand, raw, Some(pi)));
     }
 
     // 第二道防线：只要存在「完全切分成功」的候选，就把含原样字母的混排候选全部丢掉。
@@ -455,7 +542,7 @@ pub(crate) fn decode_lattice(
         found.retain(|(_, raw, _)| !raw);
     }
 
-    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::with_capacity(found.len());
     let mut first_syllables: Vec<String> = Vec::new();
     let mut matched = 0usize;
     let mut has_raw = false;
@@ -470,7 +557,7 @@ pub(crate) fn decode_lattice(
                 .collect();
             matched = cand.syllable_len;
             has_raw = raw;
-            best_path = Some(pi);
+            best_path = pi;
         }
         candidates.push(cand);
     }
@@ -492,39 +579,28 @@ pub(crate) fn decode_lattice(
                 }
             }
         }
-    }
-
-    // k-best keeps combined paths bounded. Preserve every direct dictionary match,
-    // including rare homophones and low-frequency phrases, so paging can still reach
-    // words outside the beam without expanding the combinatorial path search.
-    let mut exact_matches: Vec<&Edge> = lattice.edges[0]
-        .iter()
-        .filter(|e| e.to == lattice.n && !e.syllables.is_empty())
-        .filter(|e| matches!(e.text, EdgeText::Word(_)))
-        .collect();
-    exact_matches.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for edge in exact_matches {
-        let EdgeText::Word(text) = &edge.text else {
-            continue;
-        };
-        if seen.insert(text.to_string()) {
-            candidates.push(Candidate {
-                text: text.to_string(),
-                comment: comment_of(&edge.syllables),
-                source: if text.chars().count() == 1 {
-                    CandidateSource::SingleChar
-                } else {
-                    CandidateSource::Local
-                },
-                syllable_len: edge.syllables.len(),
-                consumed: lattice.n,
-                syllables: edge.syllables.clone(),
-                score: edge.score,
-            });
+        if has_whole_word {
+            // A whole-word path contains no shorter words to extract. Query
+            // its dictionary prefixes directly so partial selection remains
+            // available without running the automatic sentence search.
+            let start = input.len() - input.trim_start_matches('\'').len();
+            let end = input.trim_end_matches('\'').len();
+            let mut prefixes: Vec<_> = lattice.edges[start]
+                .iter()
+                .filter(|edge| edge.to < end && matches!(edge.text, EdgeText::Word(_)))
+                .collect();
+            prefixes.sort_by(|a, b| b.to.cmp(&a.to).then_with(|| b.score.total_cmp(&a.score)));
+            for edge in prefixes {
+                let Some(mut candidate) = word_candidate(edge, edge.to) else {
+                    continue;
+                };
+                if seen.insert(candidate.text.clone()) {
+                    if candidate.syllable_len == 1 {
+                        candidate.source = CandidateSource::SingleChar;
+                    }
+                    candidates.push(candidate);
+                }
+            }
         }
     }
 
@@ -544,6 +620,7 @@ pub(crate) fn decode_lattice(
                 .filter_map(|id| syllables::name_of(*id).map(str::to_owned))
                 .collect();
             matched = first.syllable_len;
+            has_raw = first.source == CandidateSource::Raw;
         }
     }
     DecodeOutput {
@@ -588,7 +665,7 @@ pub fn trace(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> Vec<PathTr
         return Vec::new();
     }
     let lattice = build_lattice(input, lex, opts);
-    let paths = kbest(&lattice, opts.k.max(1));
+    let paths = decode_paths(input, &lattice, opts);
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(paths.len());
 
