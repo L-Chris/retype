@@ -520,6 +520,13 @@ impl TipState {
                             || key == Key::Tab && !mods.contains(Modifiers::SHIFT))
                         || selected && matches!(key, Key::PageUp | Key::PageDown));
         }
+        if chinese
+            && english
+            && mods.is_plain()
+            && matches!(key, Key::Char(c) if c.is_ascii_alphabetic())
+        {
+            return true;
+        }
         wants_key(key, mods, chinese, composing)
     }
 }
@@ -779,7 +786,7 @@ impl KeyEventSink_Impl {
             return Ok(false.into());
         };
         let mut mods = keymap::read_modifiers();
-        // The kernel treats shifted letters as raw English. CapsLock uses the same path.
+        // CapsLock and Shift both preserve uppercase in the kernel's raw spelling.
         if matches!(key, Key::Char(c) if c.is_ascii_uppercase()) {
             mods = mods.union(Modifiers::SHIFT);
         }
@@ -840,20 +847,15 @@ impl KeyEventSink_Impl {
             state.finish(false);
             return Ok(false.into());
         }
-        match edit::request(&state, ctx, edit::Work::Key(key, mods)) {
-            Ok(()) => {
-                if status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0 {
-                    stats::activity(
-                        &state.stats_clock,
-                        if english {
-                            stats::Language::English
-                        } else {
-                            stats::Language::Chinese
-                        },
-                    );
-                }
-                Ok(true.into())
+        if status.dwStaticFlags & TS_SS_NOHIDDENTEXT != 0 {
+            if english {
+                stats::activity(&state.stats_clock, stats::Language::English);
+            } else {
+                stats::composition_activity(&state.stats_clock);
             }
+        }
+        match edit::request(&state, ctx, edit::Work::Key(key, mods)) {
+            Ok(()) => Ok(true.into()),
             Err(e) => {
                 tracing::warn!("TSF edit request rejected: {e}");
                 Ok(false.into())

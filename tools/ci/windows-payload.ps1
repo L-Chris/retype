@@ -63,7 +63,7 @@ if ($RegisterTip) {
 if ($arch -eq 'x86') { exit 0 }
 cargo build --locked --release --target $Target -p retype-updater-cli -p retype-learning -p retype-ai -p retype-sync --features retype-learning/broker,retype-ai/service
 if ($LASTEXITCODE) { throw 'Helper build failed' }
-foreach ($name in @('retype-diag.exe', 'retype-dict-build.exe', 'retype-updater.exe', 'retype-learning-host.exe', 'retype-ai-host.exe', 'retype-sync-host.exe')) {
+foreach ($name in @('retype-diag.exe', 'retype-dict-build.exe', 'retype-updater.exe', 'retype-update-launcher.exe', 'retype-learning-host.exe', 'retype-ai-host.exe', 'retype-sync-host.exe')) {
     Copy-Item -LiteralPath "$binaryDir\$name" -Destination $stage -Force
 }
 # Execute the existing dictionary builder, avoiding another Cargo feature graph.

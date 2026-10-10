@@ -433,6 +433,34 @@ mod tests {
             ["python", "3"]
         );
     }
+
+    #[test]
+    fn chinese_modes_select_english_and_restore_personal_learning() {
+        for flypy in [false, true] {
+            let path = temp();
+            let mut s = session(&path, flypy, true, true);
+            for _ in 0..2 {
+                let out = type_text(&mut s, "Hello");
+                let index = out.candidates.iter().position(|c| c == "Hello").unwrap();
+                let selected = s.dispatch(Command::Choose {
+                    index,
+                    generation: out.generation,
+                });
+                assert_eq!(selected.commits, ["Hello"]);
+                s.dispatch(Command::Ack {
+                    generation: selected.generation,
+                    accepted: true,
+                });
+            }
+            drop(s);
+            let mut reopened = session(&path, flypy, true, true);
+            let out = type_text(&mut reopened, "hel");
+            assert!(out
+                .candidates
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case("hello")));
+        }
+    }
     #[test]
     fn learns_only_acknowledged_commit_and_survives_reopen() {
         let path = temp();

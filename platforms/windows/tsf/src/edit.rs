@@ -185,6 +185,7 @@ impl ITfEditSession_Impl for Edit_Impl {
                 }
                 self.state.reset_kernel();
                 self.state.hide();
+                lock(&self.state.stats_clock).reset();
             }
             result
         });
@@ -379,11 +380,14 @@ impl Edit_Impl {
             }
         }
         self.refresh(ec, timing)?;
+        let discarded = (committed.is_empty()
+            || input_chinese && matches!(self.work, Work::Key(Key::Enter, _)))
+            && session.backend.with_kernel(|k| !k.has_composition());
         if countable(&self.context)
             && !(input_chinese && matches!(self.work, Work::Key(Key::Enter, _)))
         {
             for text in committed {
-                stats::commit(&state.stats_clock, &text, false);
+                stats::commit(&state.stats_clock, &text, input_chinese);
             }
             if matches!(
                 self.work,
@@ -405,6 +409,9 @@ impl Edit_Impl {
             ) {
                 stats::boundary(&state.stats_clock);
             }
+        }
+        if discarded {
+            lock(&state.stats_clock).reset();
         }
         if matches!(self.work, Work::Translate | Work::Voice(_)) {
             return if let Work::Voice(held) = self.work {

@@ -13,6 +13,9 @@
 pub mod backend;
 pub mod kernel;
 pub mod merge;
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod mixed_tests;
 
 pub use backend::{BackendOptions, InlineBackend, KernelBackend, LocalBackend};
 pub use kernel::{Kernel, KernelConfig, VoicePhase};
@@ -256,6 +259,12 @@ mod tests {
             Some("没有")
         );
 
+        // With mixed input enabled, woe is an actual English word. Disable it
+        // here to keep this regression focused on unmatched Chinese suffixes.
+        backend.submit(InputEvent::SetEnglishOptions {
+            enabled: false,
+            spelling: true,
+        });
         type_str(&backend, "woe");
         let render = backend.render();
         assert_eq!(render.candidates[0].text, "我");

@@ -1,7 +1,7 @@
 //! Immutable English vocabulary embedded in the module's file-backed image.
 //! No runtime dictionary building or full-vocabulary heap allocations.
 #![forbid(unsafe_code)]
-use retype_types::{Candidate, CandidateSource, LearningStore};
+use retype_types::{Candidate, CandidateLanguage, CandidateSource, LearningStore};
 use std::collections::{BinaryHeap, HashSet};
 
 const DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/english.bin"));
@@ -48,6 +48,15 @@ pub fn valid_word(input: &str) -> bool {
         && input.bytes().all(|b| b.is_ascii_alphabetic() || b == b'\'')
 }
 fn casing(word: &str, input: &str) -> String {
+    if word != "i" && word.eq_ignore_ascii_case(input) {
+        return input.to_owned();
+    }
+    if input.bytes().skip(1).any(|c| c.is_ascii_uppercase())
+        && !input.bytes().all(|c| c.is_ascii_uppercase())
+        && word.starts_with(&input.to_ascii_lowercase())
+    {
+        return format!("{input}{}", &word[input.len()..]);
+    }
     let letters: Vec<_> = input.bytes().filter(u8::is_ascii_alphabetic).collect();
     if !letters.is_empty() && letters.iter().all(u8::is_ascii_uppercase) {
         return word.to_ascii_uppercase();
@@ -67,6 +76,7 @@ fn casing(word: &str, input: &str) -> String {
 }
 fn candidate(id: usize, input: &str) -> Candidate {
     let mut c = Candidate::new(casing(word(id), input), CandidateSource::Local);
+    c.language = CandidateLanguage::English;
     c.consumed = input.len();
     c.score = (frequency(id) as f64).ln() as f32;
     c
@@ -131,6 +141,7 @@ pub fn complete(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<C
             existing.source = CandidateSource::User;
         } else {
             let mut c = Candidate::new(text, CandidateSource::User);
+            c.language = CandidateLanguage::English;
             c.consumed = input.len();
             c.score = score;
             hits.push(c);
@@ -141,6 +152,23 @@ pub fn complete(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<C
             .total_cmp(&a.score)
             .then_with(|| a.text.cmp(&b.text))
     });
+    hits.truncate(limit);
+    hits
+}
+
+/// A small mixed-language stream, exact spelling before frequency-ranked completions.
+/// Exact matches are looked up separately so a high-frequency completion cannot hide one.
+pub fn mixed(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<Candidate> {
+    if input.len() < 2 || limit == 0 || !valid_word(input) {
+        return Vec::new();
+    }
+    let mut hits = complete(input, learner, limit);
+    if let Some(id) = find(&input.to_ascii_lowercase()) {
+        if !hits.iter().any(|c| c.text.eq_ignore_ascii_case(input)) {
+            hits.push(candidate(id, input));
+        }
+    }
+    hits.sort_by_key(|c| !c.text.eq_ignore_ascii_case(input));
     hits.truncate(limit);
     hits
 }
@@ -195,6 +223,32 @@ mod tests {
     struct Empty;
     impl LearningStore for Empty {
         fn record(&self, _: retype_types::LearningEvent) {}
+    }
+    #[test]
+    fn mixed_stream_keeps_exact_spelling_case_and_personal_words() {
+        for input in ["an", "hello", "Hello", "HELLO"] {
+            let words = mixed(input, &Empty, 2);
+            assert!(words[0].text.eq_ignore_ascii_case(input));
+            assert_eq!(words[0].language, CandidateLanguage::English);
+            assert!(words.iter().all(|c| c.consumed == input.len()));
+        }
+        assert_eq!(mixed("Hello", &Empty, 2)[0].text, "Hello");
+        struct Personal;
+        impl LearningStore for Personal {
+            fn record(&self, _: retype_types::LearningEvent) {}
+            fn english_words(&self, prefix: &str, _: usize) -> Vec<(String, u64)> {
+                if "retypetestword".starts_with(prefix) {
+                    vec![("retypetestword".into(), 10)]
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+        assert_eq!(
+            mixed("retypetestword", &Personal, 2)[0].source,
+            CandidateSource::User
+        );
+        assert!(mixed("ni'hao", &Empty, 2).is_empty());
     }
     #[test]
     fn vocabulary_and_range_top_k() {

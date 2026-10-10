@@ -1,6 +1,28 @@
 use super::*;
 
 impl Kernel {
+    /// Merge separate ranked streams by match evidence, never by cross-language scores.
+    pub(super) fn mix_english(&mut self, chinese_word: bool) {
+        let words = retype_english::mixed(&self.buffer, self.learner.as_ref(), 2);
+        let chinese_count = self.candidates.len();
+        for (offset, word) in words.into_iter().enumerate() {
+            if self.candidates.iter().any(|c| c.text == word.text) {
+                continue;
+            }
+            let exact = word.text.eq_ignore_ascii_case(&self.buffer);
+            let before = if exact && !chinese_word {
+                0
+            } else if exact {
+                1
+            } else {
+                2
+            };
+            let position = before.min(chinese_count) + offset;
+            self.candidates
+                .insert(position.min(self.candidates.len()), word);
+        }
+        self.candidates.truncate(self.cfg.candidate_cap);
+    }
     pub(super) fn refresh_english(&mut self, actions: &mut Vec<KernelAction>) {
         self.bump_gen();
         self.english_selected = false;

@@ -13,6 +13,7 @@ HKLM 64 位视图 Software\retype 的 ActiveDir、Version 指向当前安装，�
 
 语言栏右键“设置”打开设置窗口，“关于”页完成检查、版本说明、跳过、下载及安装；开始菜单“检查更新”直达此页。`retype-updater update` 也打开设置的“关于”页；`update --background` 只做后台检查，有新版时显示设置窗口。
 当前用户任务 retype-update-<SID> 登录两分钟后和每日触发，普通权限运行，不保存密码。
+任务运行安装根目录的 `retype-update-launcher.exe`（Windows GUI 子系统），读取当前 ActiveDir 后以无控制台方式启动 Rust 更新器；日常检查不启动 PowerShell。升级会重新注册旧任务，安装和安装后验证脚本仍可使用 PowerShell。
 后台每 24 小时最多检查一次，可关闭或跳过版本；手动检查绕过限频。
 后台只检查和提醒，不自动安装。设置窗口保持单实例，已有窗口被唤起时切到“关于”页。
 自动检查开关以 HKCU\Software\retype\AutoCheck（DWORD）为准；设置窗口首次打开时迁移旧 state.json 的值，后台任务继续读取该首选项。

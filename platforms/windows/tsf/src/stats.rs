@@ -23,6 +23,7 @@ pub(crate) enum Language {
 pub(crate) struct ActivityClock {
     last: Option<(Instant, Language)>,
     words: retype_types::statistics::WordCounter,
+    composition_ms: u32,
 }
 
 impl ActivityClock {
@@ -41,6 +42,7 @@ impl ActivityClock {
     pub(crate) fn reset(&mut self) {
         self.finish_word();
         self.last = None;
+        self.composition_ms = 0;
     }
     fn finish_word(&mut self) {
         let words = self.words.finish();
@@ -174,21 +176,42 @@ pub(crate) fn activity(clock: &Mutex<ActivityClock>, language: Language) {
     enqueue(delta);
 }
 
-pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
-    let (chinese, english) = count(text);
+/// In Chinese mode the language is only known once the candidate is committed.
+pub(crate) fn composition_activity(clock: &Mutex<ActivityClock>) {
     let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
+    let elapsed = clock.tick(Language::Chinese, Instant::now());
+    clock.composition_ms = clock.composition_ms.saturating_add(elapsed);
+}
+
+pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
+    let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
+    let delta = commit_delta(&mut clock, text, boundary);
+    if delta.chinese + delta.english + delta.english_words > 0 {
+        enqueue(delta);
+    }
+}
+fn commit_delta(clock: &mut ActivityClock, text: &str, boundary: bool) -> Delta {
+    let (chinese, english) = count(text);
     let mut english_words = clock.words.feed(text);
     if boundary {
         english_words = english_words.saturating_add(clock.words.finish());
     }
-    if chinese + english + english_words > 0 {
-        enqueue(Delta {
-            timestamp_ms: now_ms(),
-            chinese,
-            english,
-            english_words,
-            ..Delta::default()
-        });
+    let elapsed = std::mem::take(&mut clock.composition_ms);
+    let chinese_ms =
+        (u64::from(elapsed) * u64::from(chinese) / u64::from((chinese + english).max(1))) as u32;
+    let english_ms = if english > 0 {
+        elapsed.saturating_sub(chinese_ms)
+    } else {
+        0
+    };
+    Delta {
+        timestamp_ms: now_ms(),
+        chinese,
+        english,
+        english_words,
+        chinese_active_ms: chinese_ms,
+        english_active_ms: english_ms,
+        english_word_ms: english_ms,
     }
 }
 pub(crate) fn boundary(clock: &Mutex<ActivityClock>) {
@@ -350,6 +373,31 @@ mod tests {
             clock.tick(Language::English, start + Duration::from_secs(20)),
             0
         );
+    }
+
+    #[test]
+    fn mixed_composition_counts_and_time_follow_committed_text() {
+        let mut clock = ActivityClock {
+            composition_ms: 2400,
+            ..Default::default()
+        };
+        let delta = commit_delta(&mut clock, "你Hello", true);
+        assert_eq!(
+            (delta.chinese, delta.english, delta.english_words),
+            (1, 5, 1)
+        );
+        assert_eq!(
+            (delta.chinese_active_ms, delta.english_word_ms),
+            (400, 2000)
+        );
+        assert_eq!(clock.composition_ms, 0);
+        clock.composition_ms = 1000;
+        let delta = commit_delta(&mut clock, "word", true);
+        assert_eq!(
+            (delta.chinese, delta.english_words, delta.english_word_ms),
+            (0, 1, 1000)
+        );
+        assert_eq!(commit_delta(&mut clock, "!", true).english_words, 0);
     }
 
     #[test]

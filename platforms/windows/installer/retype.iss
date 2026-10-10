@@ -123,6 +123,8 @@ Source: "{#X86Dir}\retype_ime.dll"; DestDir: "{code:GetPayloadDir}\x86"; Flags: 
 Source: "platforms\windows\installer\user-profile.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; 更新器：自动更新的执行者（TIP DLL 自己绝不做网络 IO）
 Source: "{#BaseDir}\retype-updater.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+; Stable GUI task entry resolves ActiveDir on every run and creates no console.
+Source: "{#BaseDir}\retype-update-launcher.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; Single per-user learning writer, independent of any application's TIP DLL.
 Source: "{#BaseDir}\retype-learning-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "{#BaseDir}\retype-ai-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion

@@ -13,9 +13,9 @@ use crate::merge::merge_outcome;
 use retype_cloud::CloudClient;
 use retype_pinyin::{DecodeOptions, Decoder, Lexicon};
 use retype_types::{
-    AppInfo, AsrEvent, Candidate, CommitRequest, ContextSnapshot, FieldInfo, Generation,
-    InputEvent, InputSource, KernelAction, Key, LearningEvent, LearningStore, Modifiers,
-    RenderState, RerankJob, RerankOutcome, SideEffect, StatusFlags, VoiceEvent,
+    AppInfo, AsrEvent, Candidate, CandidateLanguage, CommitRequest, ContextSnapshot, FieldInfo,
+    Generation, InputEvent, InputSource, KernelAction, Key, LearningEvent, LearningStore,
+    Modifiers, RenderState, RerankJob, RerankOutcome, SideEffect, StatusFlags, VoiceEvent,
 };
 use std::sync::Arc;
 #[path = "english.rs"]
@@ -94,6 +94,7 @@ pub enum VoicePhase {
 /// 而不是把用户已经选好的词直接删掉。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Part {
+    language: CandidateLanguage,
     text: String,
     pinyin: String,
     syllables: Vec<retype_types::SyllableId>,
@@ -292,6 +293,10 @@ impl Kernel {
                 }
                 self.cfg.english_enabled = enabled;
                 self.cfg.english_spelling = spelling;
+                if self.is_chinese() && self.has_composition() {
+                    self.bump_gen();
+                    self.redecode(InputSource::Keyboard, &mut actions);
+                }
             }
             InputEvent::EnglishCompleted { gen, candidates } => {
                 if gen == self.gen
@@ -369,7 +374,7 @@ impl Kernel {
         }
 
         // Shift+字母 = 用户想打大写英文
-        if mods.contains(Modifiers::SHIFT) {
+        if mods.contains(Modifiers::SHIFT) && !self.cfg.english_enabled {
             if let Key::Char(c) = key {
                 if c.is_ascii_alphanumeric() {
                     if self.has_composition() {
@@ -392,7 +397,11 @@ impl Kernel {
                 if self.buffer.chars().count() >= self.cfg.max_buffer_chars {
                     return;
                 }
-                self.buffer.push(c.to_ascii_lowercase());
+                self.buffer.push(if mods.contains(Modifiers::SHIFT) {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                });
                 self.bump_gen();
                 self.redecode(source, actions);
             }
@@ -584,6 +593,9 @@ impl Kernel {
         self.candidates
             .retain(|c| c.source != retype_types::CandidateSource::Raw);
         self.candidates.truncate(self.cfg.candidate_cap);
+        if self.cfg.english_enabled {
+            self.mix_english(out.has_whole_word);
+        }
         self.syllables = out.syllables;
         self.selected = 0;
         self.page_start = 0;
@@ -664,6 +676,7 @@ impl Kernel {
 
         self.buffer.drain(..cut_bytes);
         self.parts.push(Part {
+            language: c.language,
             text: c.text.clone(),
             pinyin,
             syllables: c.syllables.clone(),
@@ -687,19 +700,23 @@ impl Kernel {
     /// 上屏首选（整句），用于「组字中直接打标点」的场景。
     fn commit_best(&mut self, actions: &mut Vec<KernelAction>) {
         self.emit_part_learning(actions);
-        if let Some(candidate) = self
-            .candidates
-            .first()
-            .filter(|candidate| !candidate.syllables.is_empty())
-        {
-            actions.push(KernelAction::Side(SideEffect::Learn(
-                LearningEvent::CandidateChosen {
-                    source: InputSource::Keyboard,
-                    text: candidate.text.clone(),
-                    syllables: candidate.syllables.clone(),
-                    index: 0,
-                },
-            )));
+        if let Some(candidate) = self.candidates.first() {
+            if candidate.language == CandidateLanguage::English {
+                actions.push(KernelAction::Side(SideEffect::Learn(
+                    LearningEvent::EnglishWord {
+                        text: candidate.text.clone(),
+                    },
+                )));
+            } else if !candidate.syllables.is_empty() {
+                actions.push(KernelAction::Side(SideEffect::Learn(
+                    LearningEvent::CandidateChosen {
+                        source: InputSource::Keyboard,
+                        text: candidate.text.clone(),
+                        syllables: candidate.syllables.clone(),
+                        index: 0,
+                    },
+                )));
+            }
         }
         let text = match self.candidates.first() {
             Some(c) => {
@@ -740,7 +757,18 @@ impl Kernel {
     }
 
     fn emit_part_learning(&self, actions: &mut Vec<KernelAction>) {
-        for part in self.parts.iter().filter(|part| !part.syllables.is_empty()) {
+        for part in &self.parts {
+            if part.language == CandidateLanguage::English {
+                actions.push(KernelAction::Side(SideEffect::Learn(
+                    LearningEvent::EnglishWord {
+                        text: part.text.clone(),
+                    },
+                )));
+                continue;
+            }
+            if part.syllables.is_empty() {
+                continue;
+            }
             actions.push(KernelAction::Side(SideEffect::Learn(
                 LearningEvent::CandidateChosen {
                     source: InputSource::Keyboard,

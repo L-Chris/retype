@@ -11,10 +11,18 @@ publish.workspace = true
 name = "retype-updater"
 path = "src/main.rs"
 
+[[bin]]
+name = "retype-update-launcher"
+path = "src/launcher.rs"
+
 [dependencies]
 retype-updater = { workspace = true }
 serde_json = { workspace = true }
 ureq = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Registry", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_Security"] }
 
 [lints]
 workspace = true

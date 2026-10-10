@@ -5,7 +5,7 @@
 //! TIP DLL 被注入到**每一个**宿主进程。在里面发 HTTP 请求意味着：
 //! Chrome、Word、记事本各自替我们打一遍网络流量，各自持有一条连接，
 //! 而且更新检查一旦发生在线程上就违反 P1。所以更新永远是进程外的事，
-//! 由设置界面（Flutter）或计划任务调起这个 exe。
+//! 由原生设置界面或无控制台计划任务入口调起这个 exe。
 //!
 //! ## 它做什么、不做什么
 //!
@@ -34,6 +34,8 @@ use retype_updater::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(windows)]
+mod background;
 
 /// 与参考实现（torto-app）一致的 15s：更新检查通常发生在设置界面打开时，
 /// 卡住会让整个界面失去响应。
@@ -608,41 +610,15 @@ fn launch_update_ui(args: &[String]) -> i32 {
         eprintln!("用法: retype-updater update [--background]");
         return EXIT_USAGE;
     }
-    let result = (|| -> std::io::Result<()> {
+    let result = (|| -> retype_updater_cli::installation::Result<()> {
+        if !args.is_empty() {
+            return background::run();
+        }
         let executable = std::env::current_exe()?;
-        if args.is_empty() {
-            let settings = executable.with_file_name("settings").join("retype.exe");
-            std::process::Command::new(settings)
-                .arg("--updates")
-                .spawn()?;
-            return Ok(());
-        }
-        use std::os::windows::process::CommandExt;
-        let script = executable.with_file_name("update-ui.ps1");
-        if !script.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "请通过安装包安装后台更新组件",
-            ));
-        }
-        let root = std::env::var_os("SystemRoot")
-            .ok_or_else(|| std::io::Error::other("SystemRoot is missing"))?;
-        let mut process = std::process::Command::new(
-            PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
-        );
-        process
-            .args([
-                "-NoProfile",
-                "-STA",
-                "-WindowStyle",
-                "Hidden",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(script);
-        process.arg("-Background");
-        process.creation_flags(0x08000000).spawn()?;
+        let settings = executable.with_file_name("settings").join("retype.exe");
+        std::process::Command::new(settings)
+            .arg("--updates")
+            .spawn()?;
         Ok(())
     })();
     match result {

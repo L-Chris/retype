@@ -155,6 +155,7 @@ impl LlmReranker for MockLlmReranker {
             let mut extra = Vec::new();
             if let Some(hw) = &cfg.hotword {
                 extra.push(Candidate {
+                    language: Default::default(),
                     text: hw.clone(),
                     comment: "热词".into(),
                     source: CandidateSource::Hotword,

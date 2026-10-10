@@ -15,8 +15,8 @@ pub use context::{AppInfo, ContextSnapshot, FieldInfo, FieldKind, PrivacyLevel};
 pub use event::{AsrEvent, InputEvent, InputSource, Key, Modifiers, PinyinScheme, VoiceEvent};
 pub use learning::{LearningEvent, LearningStore};
 pub use render::{
-    Candidate, CandidateSource, CommitRequest, KernelAction, RenderState, RerankJob, RerankOutcome,
-    SideEffect, StatusFlags,
+    Candidate, CandidateLanguage, CandidateSource, CommitRequest, KernelAction, RenderState,
+    RerankJob, RerankOutcome, SideEffect, StatusFlags,
 };
 
 /// 代次。每次输入变化 +1，用于丢弃过期的异步结果（ARCHITECTURE.md §2 的 P3 保障）。

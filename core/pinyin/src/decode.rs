@@ -347,6 +347,8 @@ fn decode_paths(
 /// 解码结果。
 #[derive(Debug, Clone, Default)]
 pub struct DecodeOutput {
+    /// A single dictionary word covers the input, rather than automatic composition.
+    pub has_whole_word: bool,
     /// 已排序去重的候选（完整句候选在前，前缀词候选在后）
     pub candidates: Vec<Candidate>,
     /// 首选路径的音节切分，用于显示 `ni'hao'ma`
@@ -373,6 +375,7 @@ fn word_candidate(edge: &Edge, consumed: usize) -> Option<Candidate> {
         return None;
     };
     Some(Candidate {
+        language: Default::default(),
         text: text.to_string(),
         comment: comment_of(&edge.syllables),
         source: CandidateSource::Local,
@@ -415,6 +418,7 @@ fn path_to_candidate(
     let comment = comment_of(&ids);
     Some((
         Candidate {
+            language: Default::default(),
             text,
             comment,
             source: if has_raw {
@@ -461,6 +465,7 @@ fn prefix_candidates(lattice: &Lattice, path: &[(usize, usize)]) -> Vec<Candidat
             }
         }
         out.push(Candidate {
+            language: Default::default(),
             text: text.clone(),
             comment: comment_of(&ids),
             source: if ids.len() == 1 {
@@ -624,6 +629,7 @@ pub(crate) fn decode_lattice(
         }
     }
     DecodeOutput {
+        has_whole_word,
         candidates,
         syllables: first_syllables,
         matched_syllables: matched,

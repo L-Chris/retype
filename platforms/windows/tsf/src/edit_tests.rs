@@ -759,6 +759,19 @@ fn run_host() -> Result<()> {
             String::from_utf16_lossy(&lock(&data).text),
             "你好你好。ni0你好"
         );
+        let _ = stats::take_test_words();
+        assert!(state.wants(Key::Char('H'), Modifiers::SHIFT));
+        for ch in "Hello".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        request(&state, &context, Work::Key(Key::Char('1'), Modifiers::NONE))?;
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("你好Hello"));
+        assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        assert_eq!(
+            stats::take_test_words(),
+            1,
+            "mixed candidate counts as English"
+        );
         request(&state, &context, Work::Toggle)?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         let _ = stats::take_test_words();
@@ -929,6 +942,10 @@ fn run_host() -> Result<()> {
         lock(&data).reject_write = false;
         // Native popup reuse must update its click generation even when only
         // the composition changes and its visible candidate pixels stay equal.
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: false,
+            spelling: false,
+        });
         source.UnadviseSink(_ui_cookie)?;
         lock(&data).no_text_extent = false;
         session.submit(InputEvent::SetPinyinScheme(

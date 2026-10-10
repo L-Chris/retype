@@ -21,9 +21,19 @@ pub enum CandidateSource {
     Hotword,
 }
 
+/// Language of the committed text, independent of the active input mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CandidateLanguage {
+    #[default]
+    Chinese,
+    English,
+}
+
 /// 一条候选。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
+    /// Language is independent of dictionary/cloud/personal provenance.
+    pub language: CandidateLanguage,
     /// 上屏文字
     pub text: String,
     /// 展示用拼音注释，如 `ni'hao`
@@ -46,6 +56,7 @@ pub struct Candidate {
 impl Candidate {
     pub fn new(text: impl Into<String>, source: CandidateSource) -> Self {
         Self {
+            language: CandidateLanguage::Chinese,
             text: text.into(),
             comment: String::new(),
             source,

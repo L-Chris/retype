@@ -12,6 +12,23 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class WordStatisticsTest {
+  @Test fun englishChosenInChineseModeKeepsEnglishCountsAndSpeed() {
+    val clock = ActivityClock()
+    clock.tick(true, 1000)
+    clock.tick(true, 3400)
+    val counts = clock.commit("你Hello", true)
+    assertEquals(1L, counts.chinese)
+    assertEquals(5L, counts.english)
+    assertEquals(1L, counts.englishWords)
+    assertEquals(400L, counts.chineseMs)
+    assertEquals(2000L, counts.englishWordMs)
+    assertEquals(0L, clock.boundary().englishWords)
+    clock.tick(true, 4000)
+    val next = clock.commit("world", true)
+    assertEquals(0L, next.chinese)
+    assertEquals(1L, next.englishWords)
+    assertEquals(600L, next.englishWordMs)
+  }
   @Test fun committedFragmentsAndBoundariesUseSharedCounter() {
     val clock = ActivityClock()
     clock.tick(false, 1000)

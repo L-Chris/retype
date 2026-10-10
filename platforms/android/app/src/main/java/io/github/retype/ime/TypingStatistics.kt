@@ -291,11 +291,15 @@ class ActivityClock {
     fun backspace() { words(backspace = true) }
 
     fun commit(text: String, chinese: Boolean): Counts {
-        val count = text.codePoints().filter { !Character.isWhitespace(it) && !Character.isISOControl(it) }.count()
+        val chineseCount = text.codePoints().filter { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }.count()
+        val englishCount = text.count { it in 'a'..'z' || it in 'A'..'Z' }.toLong()
         val ms = if (language == chinese) pending else 0
         pending = 0
-        return if (chinese) Counts(chinese = count, chineseMs = ms)
-        else Counts(english = count, englishMs = ms, englishWords = words(text), englishWordMs = ms)
+        val chineseMs = ms * chineseCount / (chineseCount + englishCount).coerceAtLeast(1)
+        val englishMs = if (englishCount > 0) ms - chineseMs else 0
+        return Counts(chinese = chineseCount, english = englishCount,
+            chineseMs = chineseMs, englishMs = englishMs,
+            englishWords = words(text, boundary = chinese), englishWordMs = englishMs)
     }
 
     fun reset() {

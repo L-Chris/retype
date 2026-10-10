@@ -64,13 +64,15 @@ try {
   if ($second.Directory -eq $first.Directory) { throw 'Repair reused a loaded payload directory.' }
   Test-RetypeInstallation $second
   $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  if (-not (Get-ScheduledTask -TaskName "retype-update-$sid")) { throw 'Automatic update task is missing.' }
+  $task = Get-ScheduledTask -TaskName "retype-update-$sid"
+  if (-not $task) { throw 'Automatic update task is missing.' }
+  if ($task.Actions.Execute -ne (Join-Path $root 'retype-update-launcher.exe')) { throw 'Automatic update task must use the native GUI launcher.' }
   cargo test --release --target x86_64-pc-windows-msvc -p retype-tsf installed_tip_ -- --ignored --test-threads=1
   if ($LASTEXITCODE -ne 0) { throw 'Installed TIP activation verification failed.' }
-  $background = Start-Process powershell -ArgumentList ('-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "'+$second.Directory+'\update-ui.ps1" -Background') -WindowStyle Hidden -PassThru
+  $background = Start-Process (Join-Path $second.Directory 'retype-updater.exe') -ArgumentList 'update --background' -WindowStyle Hidden -PassThru
   if (-not $background.WaitForExit(90000)) { $background.Kill(); throw 'Background update check did not exit.' }
   $state = Get-Content "$env:LOCALAPPDATA\retype\updates\state.json" -Raw | ConvertFrom-Json
-  if ($state.Stage -ne 'up_to_date') { throw "Background check failed: $($state.Error)" }
+  if ($state.Error -or -not $state.LastCheck) { throw "Background check failed: $($state.Error)" }
   Write-Output 'Legacy migration, occupied-DLL repair, registration and background update check passed without reboot.'
 } finally {
   if ($heldVersion -ne [IntPtr]::Zero) { [LoadedTip]::FreeLibrary($heldVersion) | Out-Null }

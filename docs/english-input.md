@@ -14,6 +14,12 @@ This first stage adds local word completion, one-edit spelling suggestions and p
 
 Spelling suggestions cover one insertion, deletion, substitution or adjacent transposition, such as `hellp → hello` and `teh → the`. They arrive asynchronously after prefix matches; existing candidates retain their positions while typing. Suggestions never replace your text without selection.
 
+## English candidates in Chinese mode
+
+Full Pinyin and Xiaohe Shuangpin also offer up to two English candidates from the original typed letters. Complete Chinese dictionary words keep priority; an exact English spelling takes priority over a partial Chinese match or an assembled phrase. Prefix completions follow the leading Chinese candidates. Chinese and English frequency scores are not compared directly.
+
+Number keys, Space and clicking select these candidates using the usual Chinese-mode interaction, without adding a trailing space. Capitalization is preserved. English completion can be disabled under Settings > Input; spelling correction remains exclusive to English mode. Selected English words use separate English learning and statistics on both Windows and Android.
+
 ## Data and privacy
 
 The bundled vocabulary is derived from SymSpell's 82,765-entry frequency file, pinned in `data/dict/raw/english/SOURCE.txt`. The index is compiled into shared, read-only module data, with no runtime vocabulary download or heap-sized dictionary construction. This uses the upstream frequency data, not the SymSpell correction algorithm. Notices and licenses are included in the installer.
@@ -35,6 +41,8 @@ The first-pass benchmark excludes asynchronous spelling work and native popup re
 ## 中文说明
 
 第一阶段支持离线单词补全、单次编辑纠错建议、大小写和单词内撇号，以及独立的个人英文词汇学习；暂未加入短语补全、下一个词预测、语法纠正和 AI 写作。
+
+全拼和小鹤双拼模式也支持英文混合候选：按原始字母匹配，每次最多加入两个英文候选，完整中文词条优先；没有完整中文词条时，完整英文拼写优先于中文片段或拼接词，英文补全放在前两个中文候选之后。数字键、空格或点击选词沿用中文交互，不额外补空格，并保留大小写；英文学习和统计独立归类。关闭英文补全也会关闭混合候选；中文模式暂不加入英文拼写纠错。
 
 空格默认上屏原文，Tab 或鼠标选词后自动补一个空格；上下键显式选中后，空格接受候选并添加空格。Enter 选词不补空格，并保留应用原有行为；Escape 保留输入并结束补全。候选显示编号，按 1–8 选用当前页对应候选并补一个空格；没有对应可见候选时数字正常输入，0 和 9 始终直接输入。输入 python3 等字母数字组合时，先在 python 后按 Escape 保留原文并结束补全，再输入 3。标点和快捷键保持原有用途。
 

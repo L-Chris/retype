@@ -114,6 +114,7 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
     let lattice = build_lattice_with(&normalized, lex, opts, options);
     let has_exact_word = lattice.has_whole_word(&normalized);
     let mut output = decode_lattice(&normalized, lattice, opts, lex);
+    output.has_whole_word = has_exact_word;
     if can_preview_tail(normalized.as_bytes()) {
         let preview = build_lattice_with(&normalized, lex, opts, preview_options);
         let has_preview_word = preview.has_whole_word(&normalized);
