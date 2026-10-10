@@ -359,6 +359,13 @@ fun Choice(
 
 @Composable
 private fun InputPage(store: AppStore) {
+  var symbols by remember { mutableStateOf(store.prefs.getBoolean("symbolCompletion", true)) }
+  SettingsCard {
+    ToggleRow("符号自动补全", symbols) {
+      symbols = it
+      store.prefs.edit().putBoolean("symbolCompletion", it).apply()
+    }
+  }
   var flypy by remember { mutableStateOf(store.prefs.getBoolean("flypy", false)) }
   var english by remember { mutableStateOf(store.prefs.getBoolean("english", true)) }
   var spelling by remember { mutableStateOf(store.prefs.getBoolean("spelling", true)) }

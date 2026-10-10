@@ -185,6 +185,10 @@ fn portable() -> Result<BTreeMap<String, Value>> {
             json!(registry("EnglishSpellingDisabled")?.unwrap_or(0) == 0),
         ),
         (
+            "input.symbol_completion".into(),
+            json!(registry("SymbolCompletionDisabled")?.unwrap_or(0) == 0),
+        ),
+        (
             "dictionary.enabled".into(),
             json!(registry("EnabledDictionaryPacks")?.unwrap_or(0) & 0x7f),
         ),
@@ -246,6 +250,7 @@ fn known_key(key: &str) -> bool {
         "input.scheme"
             | "input.english"
             | "input.english_spelling"
+            | "input.symbol_completion"
             | "dictionary.enabled"
             | "updates.auto_check"
             | "shortcuts"
@@ -287,6 +292,11 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
         .map(Value::as_bool)
         .unwrap_or(Some(true))
         .ok_or("英文拼写设置无效")?;
+    let symbols = values
+        .get("input.symbol_completion")
+        .map(Value::as_bool)
+        .unwrap_or(Some(true))
+        .ok_or("符号补全设置无效")?;
     let auto = values
         .get("updates.auto_check")
         .and_then(Value::as_bool)
@@ -364,6 +374,7 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
     set_registry("PinyinScheme", scheme)?;
     set_registry("EnglishDisabled", u32::from(!english))?;
     set_registry("EnglishSpellingDisabled", u32::from(!spelling))?;
+    set_registry("SymbolCompletionDisabled", u32::from(!symbols))?;
     set_registry("EnabledDictionaryPacks", mask)?;
     if previous_mask != mask {
         set_registry(
@@ -633,6 +644,7 @@ mod compatibility_tests {
                 ("input.scheme".into(), json!(1)),
                 ("input.english".into(), json!(true)),
                 ("input.english_spelling".into(), json!(false)),
+                ("input.symbol_completion".into(), json!(false)),
             ]),
         );
         let mut snapshot = Snapshot {

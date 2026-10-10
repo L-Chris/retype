@@ -931,6 +931,18 @@ impl SettingsApp {
     }
 
     fn input_page(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            if switch_row(ui, &mut self.preferences.symbol_completion, "符号自动补全") {
+                if let Err(error) = backend::set(
+                    "SymbolCompletionDisabled",
+                    u32::from(!self.preferences.symbol_completion),
+                ) {
+                    self.preferences.symbol_completion = !self.preferences.symbol_completion;
+                    self.error = Some(format!("保存设置失败：{error}"));
+                }
+            }
+        });
+        ui.add_space(24.0);
         ui.label(RichText::new("拼音方案").strong());
         ui.add_space(4.0);
         egui::Frame::new()

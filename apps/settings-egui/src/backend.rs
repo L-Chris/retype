@@ -119,6 +119,7 @@ pub fn local_root() -> Result<PathBuf> {
 }
 #[derive(Clone)]
 pub struct Preferences {
+    pub symbol_completion: bool,
     pub english: (bool, bool),
     pub scheme: PinyinScheme,
     pub auto_check: bool,
@@ -156,6 +157,7 @@ pub fn preferences() -> Result<Preferences> {
                 .unwrap_or_default()
         });
     Ok(Preferences {
+        symbol_completion: dword_at(KEY, "SymbolCompletionDisabled")?.unwrap_or(0) == 0,
         english: (
             dword_at(KEY, "EnglishDisabled")?.unwrap_or(0) == 0,
             dword_at(KEY, "EnglishSpellingDisabled")?.unwrap_or(0) == 0,

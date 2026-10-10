@@ -137,6 +137,7 @@ pub struct TipState {
     pub thread_mgr: Mutex<Option<ITfThreadMgr>>,
     pub session: Mutex<Option<Arc<Session>>>,
     pub(crate) composition: Mutex<Option<edit::Composition>>,
+    pub(crate) symbol_pairs: Mutex<Vec<crate::symbols::OwnedPair>>,
     pub(crate) pending: AtomicU32,
     pub(crate) refresh_pending: Mutex<Option<(u32, u32)>>,
     pub(crate) epoch: AtomicU32,
@@ -164,6 +165,7 @@ impl TipState {
             thread_mgr: Mutex::new(None),
             session: Mutex::new(None),
             composition: Mutex::new(None),
+            symbol_pairs: Mutex::new(Vec::new()),
             pending: AtomicU32::new(0),
             refresh_pending: Mutex::new(None),
             epoch: AtomicU32::new(0),
@@ -480,6 +482,7 @@ impl TipState {
         }
     }
     pub(crate) fn finish(self: &Arc<Self>, cancel: bool) {
+        lock(&self.symbol_pairs).clear();
         let composition = lock(&self.composition).clone();
         if let Some(c) = composition {
             let _ = edit::request(self, &c.context, edit::Work::Finish(cancel));
@@ -506,6 +509,13 @@ impl TipState {
                 )
             });
         let composing = composing || self.pending.load(Ordering::SeqCst) > 0;
+        if mods.is_plain()
+            && (matches!(key, Key::Char(c) if { let r = retype_types::symbols::rules(c, chinese); r.opening.is_some() || r.closing.is_some() })
+                || key == Key::Backspace && !composing && !lock(&self.symbol_pairs).is_empty())
+            && crate::preferences::symbol_completion()
+        {
+            return true;
+        }
         if !chinese && english {
             if !mods.is_plain() {
                 return false;
@@ -806,6 +816,19 @@ impl KeyEventSink_Impl {
             && matches!(key, Key::Char(ch) if ch.is_ascii_alphabetic());
         if test {
             return Ok((wanted || direct).into());
+        }
+        if wanted
+            && key == Key::Backspace
+            && mods.is_plain()
+            && state.pending.load(Ordering::SeqCst) == 0
+            && state
+                .session()
+                .is_some_and(|s| !s.backend.with_kernel(|k| k.has_composition()))
+            && !lock(&state.symbol_pairs).is_empty()
+        {
+            return Ok(edit::request(&state, ctx, edit::Work::PairBackspace)
+                .is_ok()
+                .into());
         }
         if direct {
             let Key::Char(ch) = key else {

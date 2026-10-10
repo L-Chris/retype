@@ -31,6 +31,7 @@ pub(crate) enum Work {
     Key(Key, Modifiers),
     Boundary(Key, Modifiers),
     Direct(char),
+    PairBackspace,
     Toggle,
     SetChinese(bool),
     Choose(usize, u64),
@@ -44,6 +45,7 @@ impl Work {
     fn profile_name(self) -> &'static str {
         match self {
             Self::Key(Key::Backspace, _) => "backspace",
+            Self::PairBackspace => "symbol_backspace",
             Self::Key(Key::Char(_), _) => "typing",
             Self::Key(_, _) => "navigation",
             Self::Refresh => "layout_refresh",
@@ -71,7 +73,15 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
     } else {
         0
     };
-    let synchronous = matches!(work, Work::Direct(_) | Work::Boundary(..));
+    let synchronous = matches!(
+        work,
+        Work::Direct(_) | Work::Boundary(..) | Work::PairBackspace
+    ) || matches!(work, Work::Key(Key::Char(c), _) if !c.is_ascii_alphanumeric()
+            && state.pending.load(Ordering::SeqCst) == 0
+            && state.session().is_some_and(|s| s.backend.with_kernel(|k| {
+                let rule = retype_types::symbols::rules(c, k.is_chinese());
+                !k.has_composition() && (rule.opening.is_some() || rule.closing.is_some())
+            })) && crate::preferences::symbol_completion());
     let pending_counted = !synchronous;
     let cancelled = Arc::new(AtomicBool::new(false));
     let completed = Arc::new(AtomicBool::new(false));
@@ -88,6 +98,7 @@ pub(crate) fn request(state: &Arc<TipState>, context: &ITfContext, work: Work) -
         cancelled: Arc::clone(&cancelled),
         completed: Arc::clone(&completed),
         pending_counted,
+        synchronous,
         requested: Instant::now(),
         refresh_id,
     }
@@ -130,6 +141,7 @@ struct Edit {
     cancelled: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
     pending_counted: bool,
+    synchronous: bool,
     requested: Instant,
     refresh_id: u32,
 }
@@ -174,10 +186,11 @@ impl ITfEditSession_Impl for Edit_Impl {
             self.state.writing.store(true, Ordering::SeqCst);
             let result = guarded(|| self.run(ec, &mut timing));
             self.state.writing.store(false, Ordering::SeqCst);
-            if result.is_ok() && matches!(self.work, Work::Direct(_) | Work::Boundary(..)) {
+            if result.is_ok() && self.synchronous {
                 self.completed.store(true, Ordering::SeqCst);
             }
-            if result.is_err() {
+            if result.is_err() && !matches!(self.work, Work::PairBackspace) {
+                lock(&self.state.symbol_pairs).clear();
                 // Fail closed: leave existing document text intact, release composition ownership.
                 let current = lock(&self.state.composition).clone();
                 if current.as_ref().is_some_and(|c| c.context == self.context) {
@@ -207,6 +220,17 @@ impl ITfEditSession_Impl for Edit_Impl {
 impl Edit_Impl {
     fn run(&self, ec: u32, timing: &mut crate::input_profile::Timing) -> Result<()> {
         let state = &self.state;
+        if matches!(self.work, Work::PairBackspace) {
+            return if crate::preferences::symbol_completion()
+                && learnable(&self.context, ec)
+                && crate::symbols::backspace(state, &self.context, ec)?
+            {
+                stats::backspace(&state.stats_clock);
+                Ok(())
+            } else {
+                Err(E_FAIL.into())
+            };
+        }
         if matches!(self.work, Work::Refresh) {
             return self.refresh(ec, timing);
         }
@@ -316,9 +340,20 @@ impl Edit_Impl {
                 }
                 InputEvent::ToggleChinese
             }
-            Work::Direct(_) | Work::Finish(_) | Work::Refresh => return Ok(()),
+            Work::Direct(_) | Work::Finish(_) | Work::Refresh | Work::PairBackspace => {
+                return Ok(())
+            }
         };
         let input_chinese = session.backend.with_kernel(|k| k.is_chinese());
+        let symbol_key = match self.work {
+            Work::Key(Key::Char(c), m) if m.is_plain() => Some(c),
+            _ => None,
+        };
+        let symbols_enabled = symbol_key.is_some_and(|c| {
+            let r = retype_types::symbols::rules(c, input_chinese);
+            r.opening.is_some() || r.closing.is_some()
+        }) && crate::preferences::symbol_completion()
+            && learnable(&self.context, ec);
         let allow_learning = countable(&self.context);
         let started = Instant::now();
         let actions = session.submit_in_context(event, allow_learning);
@@ -336,7 +371,15 @@ impl Edit_Impl {
                     KernelAction::Commit(
                         CommitRequest::Text(text) | CommitRequest::ReplaceComposition { text },
                     ) => {
-                        replace(state, &self.context, ec, &text, false)?;
+                        crate::symbols::commit(
+                            state,
+                            &self.context,
+                            ec,
+                            &text,
+                            symbol_key,
+                            input_chinese,
+                            symbols_enabled,
+                        )?;
                         committed.push(text);
                     }
                     KernelAction::Render(render) => {
@@ -364,7 +407,15 @@ impl Edit_Impl {
                 if let Some(literal) = literal {
                     end(state, ec, false)?;
                     state.reset_kernel();
-                    replace(state, &self.context, ec, &literal, false)?;
+                    crate::symbols::commit(
+                        state,
+                        &self.context,
+                        ec,
+                        &literal,
+                        symbol_key,
+                        input_chinese,
+                        symbols_enabled,
+                    )?;
                     committed.push(literal);
                 }
             }
@@ -594,7 +645,7 @@ fn absent_scope(status: windows_core::HRESULT) -> bool {
     )
 }
 
-fn replace(
+pub(crate) fn replace(
     state: &Arc<TipState>,
     ctx: &ITfContext,
     ec: u32,

@@ -33,6 +33,10 @@ pub fn english_options() -> (bool, bool) {
     )
 }
 
+pub fn symbol_completion() -> bool {
+    read_dword(w!("SymbolCompletionDisabled")) == 0
+}
+
 fn read_dword(name: windows_core::PCWSTR) -> u32 {
     let mut value = 0u32;
     let mut size = 4;

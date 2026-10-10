@@ -91,6 +91,7 @@ class AppStore(private val context: Context) {
                     .put("input.scheme", if (prefs.getBoolean("flypy", false)) 1 else 0)
                     .put("input.english", prefs.getBoolean("english", true))
                     .put("input.english_spelling", prefs.getBoolean("spelling", true))
+                    .put("input.symbol_completion", prefs.getBoolean("symbolCompletion", true))
                     .put("dictionary.enabled", prefs.getInt("packs", 0))
                     .put("updates.auto_check", prefs.getBoolean("updatesAutoCheck", true))
                     .put("shortcuts", shortcuts())
@@ -177,6 +178,7 @@ class AppStore(private val context: Context) {
                 .putString("shortcuts", shortcuts.toString())
                 .putBoolean("english", values.optBoolean("input.english", true))
                 .putBoolean("spelling", values.optBoolean("input.english_spelling", true))
+                .putBoolean("symbolCompletion", values.optBoolean("input.symbol_completion", true))
                 .commit()
         }
 }

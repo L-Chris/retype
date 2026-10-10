@@ -1,4 +1,4 @@
-//! A3 blocking work. Called on Android IO workers, never the IME key dispatcher.
+//! Feature operations. IO runs on workers; bounded symbol and counting rules are pure.
 use retype_ai::{
     config::{Config as AiConfig, Provider},
     service,
@@ -20,8 +20,22 @@ type Result<T> = std::result::Result<T, String>;
 fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key].as_str().ok_or_else(|| format!("Missing {key}"))
 }
+
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "symbolRules" => {
+            let key = field(&v, "key")?.chars().next().ok_or("Missing symbol")?;
+            let rules = retype_types::symbols::rules(key, v["chinese"].as_bool().unwrap_or(true));
+            let before = v["before"].as_str().and_then(|s| s.chars().last());
+            let after = v["after"].as_str().and_then(|s| s.chars().next());
+            let opening = rules.opening;
+            let pair = opening.is_some_and(|(left, right)| {
+                retype_types::symbols::eligible(left, right, before, after)
+            });
+            Ok(
+                json!({"left":opening.map(|p|p.0.to_string()),"right":opening.map(|p|p.1.to_string()),"close":rules.closing.map(|c|c.to_string()),"pair":pair}),
+            )
+        }
         "voiceStart" | "voicePush" | "voiceStop" | "voicePoll" | "voiceCancel" => {
             use retype_ai::{voice::Settings, voice_service::Controller};
             use std::sync::{Mutex, OnceLock};
@@ -262,4 +276,28 @@ fn sync(v: Value) -> Result<Value> {
     Ok(
         json!({"awaitingMerge":false,"values":state.values(),"statistics":imported,"conflicts":state.conflicts,"message":if state.conflicts.is_empty(){"同步完成"}else{"数据已同步，有设置冲突需要处理"}}),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod symbol_tests {
+    use super::*;
+    #[test]
+    fn native_rules_preserve_mappings_even_when_pairing_is_ineligible() {
+        let result = perform(
+            json!({"type":"symbolRules", "key":"\"", "chinese":true, "before":"hao", "after":"”"}),
+        )
+        .unwrap();
+        assert_eq!(result["left"], "“");
+        assert_eq!(result["close"], "”");
+        assert_eq!(result["pair"], false);
+        let apostrophe = perform(
+            json!({"type":"symbolRules", "key":"'", "chinese":false, "before":"don", "after":""}),
+        )
+        .unwrap();
+        assert_eq!(apostrophe["pair"], false);
+        let bracket = perform(json!({"type":"symbolRules", "key":"[", "chinese":true})).unwrap();
+        assert_eq!(bracket["right"], "】");
+        assert_eq!(bracket["pair"], true);
+    }
 }

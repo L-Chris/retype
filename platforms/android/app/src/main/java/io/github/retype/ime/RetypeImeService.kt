@@ -57,6 +57,7 @@ class RetypeImeService :
   private var policy = EditorPolicy(false, true, false, false)
   private var connection: InputConnection? = null
   private var composing = false
+  private val symbols = SymbolCompletion()
   private var view: ComposeView? = null
   private var engineJob: Job? = null
   private var state by mutableStateOf(KeyboardState())
@@ -73,6 +74,7 @@ class RetypeImeService :
     TypingStatistics.get(applicationContext).record(activityClock.boundary())
   }
   private fun finishEditorStatistics() {
+    symbols.finish()
     if (composing && connection?.finishComposingText() == true &&
         !state.chinese && !policy.password && !policy.literal) {
       TypingStatistics.get(applicationContext).record(activityClock.commit(state.composition, false))
@@ -151,6 +153,7 @@ class RetypeImeService :
     connection?.finishComposingText()
     connection = currentInputConnection
     composing = false
+    symbols.reset(attribute.initialSelStart, attribute.initialSelEnd)
     val current = ++epoch
     translationJob?.cancel()
     noticeJob?.cancel()
@@ -223,6 +226,7 @@ class RetypeImeService :
     activityClock.reset()
     connection?.finishComposingText()
     connection = null
+    symbols.reset()
     composing = false
     state = KeyboardState()
     jobs.trySend { closeSession() }
@@ -251,6 +255,12 @@ class RetypeImeService :
         }
         return@trySend
       }
+      if (json.optString("type") == "key" && json.optString("value") == "backspace" && json.optInt("mods") and 14 == 0) {
+        val paired = withContext(Dispatchers.Main) {
+          epoch == current && connection === ic && !composing && symbolCompletionEnabled() && symbols.backspace(ic)
+        }
+        if (paired) { withContext(Dispatchers.Main) { activityClock.backspace() }; return@trySend }
+      }
       val update = JSONObject(NativeBridge.dispatch(handle, json.toString()))
       if (switching)
           Log.d(
@@ -271,7 +281,12 @@ class RetypeImeService :
         try {
           for (i in 0 until commits.length()) {
             val text = commits.getString(i)
-            val committed = ic.commitText(text, 1)
+            val raw = if (i == commits.length() - 1) when (json.optString("type")) {
+              "key" -> json.optString("value").takeIf { json.optInt("mods") and 14 == 0 }
+              "literal" -> json.optString("text")
+              else -> null
+            } else null
+            val committed = symbols.commit(ic, text, raw, committedLanguage, symbolCompletionEnabled())
             accepted = committed && accepted
             if (committed && !policy.password && !policy.literal) {
               TypingStatistics.get(applicationContext)
@@ -280,11 +295,12 @@ class RetypeImeService :
           }
           val composition = update.getString("composition")
           if (composition.isNotEmpty()) {
-            accepted = ic.setComposingText(composition, 1) && accepted
+            accepted = symbols.compose(ic, composition) && accepted
             composing = true
           } else {
-            if (composing && commits.length() == 0) accepted = ic.commitText("", 1) && accepted
+            if (composing && commits.length() == 0) accepted = symbols.commit(ic, "", enabled = symbolCompletionEnabled()) && accepted
             ic.finishComposingText()
+            symbols.finish()
             composing = false
           }
           if (update.getBoolean("passThrough")) {
@@ -335,7 +351,7 @@ class RetypeImeService :
   private fun direct(value: String): Boolean {
     val ic = connection ?: return false
     fun commit(text: String): Boolean {
-      val accepted = ic.commitText(text, 1)
+      val accepted = symbols.commit(ic, text, text.takeIf { it.length == 1 }, state.chinese, symbolCompletionEnabled())
       if (accepted && !policy.password && !policy.literal) {
         TypingStatistics.get(applicationContext)
             .record(activityClock.commit(text, state.chinese))
@@ -345,10 +361,18 @@ class RetypeImeService :
     val accepted = when (value) {
       "backspace" -> {
         if (policy.password) sendHostKey(ic, KeyEvent.KEYCODE_DEL)
+        else if (symbolCompletionEnabled() && symbols.backspace(ic)) true
         else {
           val selected = ic.getSelectedText(0)
-          if (!selected.isNullOrEmpty()) ic.commitText("", 1)
-          else ic.deleteSurroundingTextInCodePoints(1, 0)
+          if (!selected.isNullOrEmpty()) symbols.commit(ic, "", enabled = symbolCompletionEnabled())
+          else {
+            val before = if (symbolCompletionEnabled()) ic.getTextBeforeCursor(2, 0)?.toString() else null
+            val deleted = ic.deleteSurroundingTextInCodePoints(1, 0)
+            if (deleted) symbols.deletedBackward(before?.takeIf { it.isNotEmpty() }?.let {
+              Character.charCount(it.codePointBefore(it.length))
+            })
+            deleted
+          }
         }
       }
       "enter" -> {
@@ -378,6 +402,9 @@ class RetypeImeService :
     }
     return accepted
   }
+
+  private fun symbolCompletionEnabled() = !policy.password && !policy.literal && policy.learning &&
+      getSharedPreferences("settings", MODE_PRIVATE).getBoolean("symbolCompletion", true)
 
   private fun sendHostKey(ic: InputConnection, code: Int): Boolean {
     val down = ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
@@ -414,6 +441,7 @@ class RetypeImeService :
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic) return@withContext
         finishEditorStatistics()
+        symbols.reset()
         ic.commitText(value, 1)
         state = state.copy(composition = "", candidates = emptyList())
       }
@@ -467,6 +495,7 @@ class RetypeImeService :
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic || voiceGeneration != generation) return@withContext
         finishEditorStatistics(); ic.finishComposingText(); composing = false
+        symbols.reset()
         val before = ic.getTextBeforeCursor(32,0)?.toString()
         val after = ic.getTextAfterCursor(32,0)?.toString()
         val selected = ic.getSelectedText(0)?.toString()
@@ -508,6 +537,7 @@ class RetypeImeService :
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic) return@withContext
         ic.finishComposingText()
+        symbols.reset()
         composing = false
         state = state.copy(composition = "", candidates = emptyList())
         translationJob =
@@ -564,6 +594,7 @@ class RetypeImeService :
         candidatesEnd,
     )
     if (voiceInput != null && (oldSelStart != newSelStart || oldSelEnd != newSelEnd)) cancelVoice()
+    symbols.selectionChanged(newSelStart, newSelEnd)
     // Cursor movement outside our composition finishes it instead of deleting editor text.
     if (composing && newSelStart != candidatesEnd && oldSelStart != newSelStart) {
       Log.d(

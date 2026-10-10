@@ -21,6 +21,7 @@ struct Data {
     sink: Option<ITextStoreACPSink>,
     reject: bool,
     reject_write: bool,
+    reject_selection_after: Option<u32>,
     defer: bool,
     hidden: bool,
     no_text_extent: bool,
@@ -159,6 +160,13 @@ impl ITextStoreACP_Impl for Store_Impl {
         pselection: *const TS_SELECTION_ACP,
     ) -> windows_core::Result<()> {
         let mut d = lock(&self.data);
+        if let Some(remaining) = d.reject_selection_after.as_mut() {
+            if *remaining == 0 {
+                d.reject_selection_after = None;
+                return Err(E_ACCESSDENIED.into());
+            }
+            *remaining -= 1;
+        }
         unsafe {
             d.start = (*pselection).acpStart;
             d.end = (*pselection).acpEnd;
@@ -978,11 +986,94 @@ fn run_host() -> Result<()> {
         );
         assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('你'));
         assert!(lock(&state.composition).is_none());
+        check_symbol_completion(&state, &context, &data)?;
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;
         Ok(())
     }
+}
+
+fn check_symbol_completion(
+    state: &Arc<TipState>,
+    context: &ITfContext,
+    data: &Arc<Mutex<Data>>,
+) -> Result<()> {
+    let original = String::from_utf16_lossy(&lock(data).text);
+    let original_len = lock(data).text.len() as i32;
+    let type_key = |c| request(state, context, Work::Key(Key::Char(c), Modifiers::NONE));
+    type_key('(')?;
+    assert_eq!(
+        String::from_utf16_lossy(&lock(data).text),
+        format!("{original}（）")
+    );
+    assert_eq!(lock(data).start, original_len + 1);
+    assert_eq!(lock(&state.symbol_pairs).len(), 1);
+    // Empty pairs delete together, through a synchronous native transaction.
+    request(state, context, Work::PairBackspace)?;
+    assert_eq!(String::from_utf16_lossy(&lock(data).text), original);
+    type_key('(')?;
+    type_key('[')?;
+    for c in "nihao".chars() {
+        type_key(c)?;
+    }
+    type_key(']')?;
+    assert_eq!(
+        String::from_utf16_lossy(&lock(data).text),
+        format!("{original}（【你好】）")
+    );
+    assert_eq!(lock(&state.symbol_pairs).len(), 1);
+    // A nonempty pair must pass ordinary Backspace to the app, retaining closer ownership.
+    assert!(request(state, context, Work::PairBackspace).is_err());
+    assert_eq!(lock(&state.symbol_pairs).len(), 1);
+    type_key(')')?;
+    assert_eq!(
+        String::from_utf16_lossy(&lock(data).text),
+        format!("{original}（【你好】）")
+    );
+    assert!(lock(&state.symbol_pairs).is_empty());
+    type_key('"')?;
+    for c in "nihao".chars() {
+        type_key(c)?;
+    }
+    type_key('"')?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("“你好”"));
+    request(state, context, Work::Toggle)?;
+    type_key('(')?;
+    for c in "don't".chars() {
+        type_key(c)?;
+    }
+    type_key(')')?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("(don't)"));
+    assert!(lock(&state.symbol_pairs).is_empty());
+    type_key('\'')?;
+    request(state, context, Work::PairBackspace)?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("(don't)"));
+    // An existing user selection follows the original replacement behavior.
+    {
+        let mut host = lock(data);
+        host.start = host.end - 7;
+    }
+    type_key('[')?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with('['));
+    assert!(lock(&state.symbol_pairs).is_empty());
+    // An editor rejecting the repositioning must keep only the opener.
+    lock(data).reject_selection_after = Some(1);
+    type_key('(')?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("[("));
+    assert!(lock(&state.symbol_pairs).is_empty());
+    // Once a closer already exists, do not duplicate it or adopt it.
+    type_key(')')?;
+    {
+        let mut host = lock(data);
+        host.start -= 1;
+        host.end = host.start;
+    }
+    type_key('(')?;
+    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("[(()"));
+    assert!(lock(&state.symbol_pairs).is_empty());
+    assert!(request(state, context, Work::PairBackspace).is_err());
+    Ok(())
 }
 
 fn check_candidate_getters(
