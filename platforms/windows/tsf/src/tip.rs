@@ -138,6 +138,7 @@ pub struct TipState {
     pub session: Mutex<Option<Arc<Session>>>,
     pub(crate) composition: Mutex<Option<edit::Composition>>,
     pub(crate) symbol_pairs: Mutex<Vec<crate::symbols::OwnedPair>>,
+    pub(crate) symbol_cursor_context: Mutex<Option<ITfContext>>,
     pub(crate) pending: AtomicU32,
     pub(crate) refresh_pending: Mutex<Option<(u32, u32)>>,
     pub(crate) epoch: AtomicU32,
@@ -166,6 +167,7 @@ impl TipState {
             session: Mutex::new(None),
             composition: Mutex::new(None),
             symbol_pairs: Mutex::new(Vec::new()),
+            symbol_cursor_context: Mutex::new(None),
             pending: AtomicU32::new(0),
             refresh_pending: Mutex::new(None),
             epoch: AtomicU32::new(0),
@@ -483,6 +485,7 @@ impl TipState {
     }
     pub(crate) fn finish(self: &Arc<Self>, cancel: bool) {
         lock(&self.symbol_pairs).clear();
+        *lock(&self.symbol_cursor_context) = None;
         let composition = lock(&self.composition).clone();
         if let Some(c) = composition {
             let _ = edit::request(self, &c.context, edit::Work::Finish(cancel));
@@ -907,6 +910,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnTestKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(eaten) = crate::symbol_cursor::routed_event(&state, ctx.ok().ok(), vk.0) {
+                return Ok(eaten);
+            }
+        }
         if settings_host() {
             return Ok(false.into());
         }
@@ -923,6 +931,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         })
     }
     fn OnKeyDown(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(eaten) = crate::symbol_cursor::routed_event(&state, ctx.ok().ok(), vk.0) {
+                return Ok(eaten);
+            }
+        }
         if settings_host() {
             return Ok(false.into());
         }
@@ -940,7 +953,12 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             self.key(ctx, vk, lp, false)
         })
     }
-    fn OnTestKeyUp(&self, _ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(eaten) = crate::symbol_cursor::routed_event(&state, ctx.ok().ok(), vk.0) {
+                return Ok(eaten);
+            }
+        }
         Ok((self.state.upgrade().is_some_and(|state| {
             if right_alt_event(vk, lp) && state.voice_alt_down.load(Ordering::Acquire) {
                 return true;
@@ -954,6 +972,11 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         .into())
     }
     fn OnKeyUp(&self, ctx: Ref<'_, ITfContext>, vk: WPARAM, lp: LPARAM) -> Result<BOOL> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(eaten) = crate::symbol_cursor::routed_event(&state, ctx.ok().ok(), vk.0) {
+                return Ok(eaten);
+            }
+        }
         if let Some(state) = self.state.upgrade() {
             if right_alt_event(vk, lp) && state.voice_alt_down.swap(false, Ordering::AcqRel) {
                 crate::voice::release_hold(&state);

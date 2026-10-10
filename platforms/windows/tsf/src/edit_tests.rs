@@ -28,6 +28,9 @@ struct Data {
     input_scope: Option<InputScope>,
     requested_scope: bool,
     deferred_flags: Option<u32>,
+    chromium: bool,
+    composition_count: usize,
+    committed_caret: Option<i32>,
 }
 
 #[implement(ITfInputScope)]
@@ -74,7 +77,7 @@ fn declared_password_private_and_pin_scopes_never_learn() -> Result<()> {
     assert!(!safe_input_scope(&VARIANT::from(1i32)));
     Ok(())
 }
-#[implement(ITextStoreACP)]
+#[implement(ITextStoreACP, ITfContextOwnerCompositionSink)]
 struct Store {
     data: Arc<Mutex<Data>>,
 }
@@ -104,8 +107,37 @@ impl ITextStoreACP_Impl for Store_Impl {
             return Ok(TS_S_ASYNC);
         }
         let sink = lock(&self.data).sink.clone().ok_or(E_FAIL)?;
+        let initial_selection = {
+            let mut host = lock(&self.data);
+            host.committed_caret = None;
+            (host.start, host.end)
+        };
         unsafe {
             sink.OnLockGranted(TEXT_STORE_LOCK_FLAGS(dwlockflags))?;
+        }
+        {
+            let mut host = lock(&self.data);
+            if host.chromium && host.composition_count == 0 {
+                // Chromium's CommitTextAndEndCompositionIfAny calls InsertText
+                // with kMoveCursorAfterText, ignoring a collapsed SetSelection
+                // during the same TSF lock. Selection-only IME edits are ignored too.
+                if let Some(end) = host.committed_caret.take() {
+                    host.start = end;
+                    host.end = end;
+                } else {
+                    (host.start, host.end) = initial_selection;
+                }
+            }
+            // The test transport forwards arrows only after the host commit;
+            // never inject OS input into the user's active application in tests.
+            for direction in crate::symbol_cursor::take_forwarded() {
+                let step = match direction {
+                    crate::symbol_cursor::Direction::Left => -1,
+                    crate::symbol_cursor::Direction::Right => 1,
+                };
+                host.start = (host.start + step).clamp(0, host.text.len() as i32);
+                host.end = host.start;
+            }
         }
         Ok(HRESULT(0))
     }
@@ -239,6 +271,7 @@ impl ITextStoreACP_Impl for Store_Impl {
             .splice(acpstart as usize..acpend as usize, text.iter().copied());
         d.start = acpstart + cch as i32;
         d.end = d.start;
+        d.committed_caret = Some(d.end);
         Ok(TS_TEXTCHANGE {
             acpStart: acpstart,
             acpOldEnd: acpend,
@@ -437,6 +470,25 @@ impl ITextStoreACP_Impl for Store_Impl {
     }
     fn GetWnd(&self, vcview: u32) -> windows_core::Result<windows::Win32::Foundation::HWND> {
         Ok(HWND::default())
+    }
+}
+
+impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
+    fn OnStartComposition(&self, _: Ref<'_, ITfCompositionView>) -> Result<BOOL> {
+        lock(&self.data).composition_count += 1;
+        Ok(true.into())
+    }
+    fn OnUpdateComposition(
+        &self,
+        _: Ref<'_, ITfCompositionView>,
+        _: Ref<'_, ITfRange>,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn OnEndComposition(&self, _: Ref<'_, ITfCompositionView>) -> Result<()> {
+        let mut data = lock(&self.data);
+        data.composition_count = data.composition_count.saturating_sub(1);
+        Ok(())
     }
 }
 
@@ -987,6 +1039,25 @@ fn run_host() -> Result<()> {
         assert!(String::from_utf16_lossy(&lock(&data).text).ends_with('你'));
         assert!(lock(&state.composition).is_none());
         check_symbol_completion(&state, &context, &data)?;
+        // Run the same nesting, deletion, closer-skip and Pinyin/English cases
+        // against a host that applies Chromium's post-lock caret behavior.
+        request(&state, &context, Work::Toggle)?;
+        {
+            let mut host = lock(&data);
+            host.start = host.text.len() as i32;
+            host.end = host.start;
+            host.chromium = true;
+        }
+        // Native SetSelection succeeds but the commit subsequently overrides it:
+        // reproduce the original Edge/Paseo failure without the compatibility transport.
+        let before = lock(&data).text.len() as i32;
+        request(&state, &context, Work::Key(Key::Char('('), Modifiers::NONE))?;
+        assert_eq!(lock(&data).start, before + 2);
+        lock(&state.symbol_pairs).clear();
+        crate::symbol_cursor::emulate_chromium(true);
+        let outcome = check_symbol_completion(&state, &context, &data);
+        crate::symbol_cursor::emulate_chromium(false);
+        outcome?;
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;

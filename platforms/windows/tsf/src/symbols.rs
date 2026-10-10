@@ -131,6 +131,17 @@ pub(crate) fn commit(
     if let (Some(close), Some(caret)) = (rule.closing, caret.as_ref()) {
         if let Some(index) = owned_at(state, ctx, ec, caret, Some(close)) {
             let pair = lock(&state.symbol_pairs).remove(index);
+            if crate::symbol_cursor::needs_forwarding(ctx) {
+                // Chromium ignores selection-only TSF edits from an IME.
+                // Keep the native caret before the closer and forward one Right.
+                if crate::symbol_cursor::forward(state, ctx, crate::symbol_cursor::Direction::Right)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+                lock(&state.symbol_pairs).push(pair);
+                return Ok(());
+            }
             if set_caret(ctx, ec, &pair.range, TF_ANCHOR_END).is_ok() {
                 return Ok(());
             }
@@ -172,7 +183,8 @@ pub(crate) fn commit(
     if current_before != Some(left) || current_after == Some(right) {
         return Ok(());
     }
-    // SAFETY: Insert and reposition under the same TSF write lock; no simulated arrows.
+    // SAFETY: Insert under the same TSF write lock. Chromium moves the actual
+    // caret to the end on commit regardless of a successful collapsed selection.
     unsafe {
         let insert: ITfInsertAtSelection = match ctx.cast() {
             Ok(i) => i,
@@ -186,10 +198,24 @@ pub(crate) fn commit(
             return Ok(());
         }
         // Exclude future inserts on either side of the closing character.
+        let forwarding = crate::symbol_cursor::needs_forwarding(ctx);
         if range
             .SetGravity(ec, TF_GRAVITY_FORWARD, TF_GRAVITY_BACKWARD)
             .is_err()
-            || set_caret(ctx, ec, &range, TF_ANCHOR_START).is_err()
+            || set_caret(
+                ctx,
+                ec,
+                &range,
+                if forwarding {
+                    TF_ANCHOR_END
+                } else {
+                    TF_ANCHOR_START
+                },
+            )
+            .is_err()
+            || (forwarding
+                && crate::symbol_cursor::forward(state, ctx, crate::symbol_cursor::Direction::Left)
+                    .is_err())
         {
             let _ = range.SetText(ec, 0, &[]);
             let _ = set_caret(ctx, ec, &range, TF_ANCHOR_START);

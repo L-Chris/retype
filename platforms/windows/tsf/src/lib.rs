@@ -33,6 +33,7 @@ pub mod session;
 #[path = "../../common/settings_log.rs"]
 mod settings_log;
 mod stats;
+mod symbol_cursor;
 mod symbols;
 pub mod tip;
 mod translation;
