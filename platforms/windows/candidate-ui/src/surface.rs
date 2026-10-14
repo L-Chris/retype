@@ -308,22 +308,26 @@ impl Surface {
         // Both modes show candidate numbers. Match measure(), retaining one
         // point of rounding slack between measured and available widths.
         let text_padding = 21.0;
-        let galleys = self.context.fonts_mut(|fonts| {
-            state
-                .visible()
-                .iter()
-                .zip(widths)
-                .map(|(candidate, width)| {
-                    fonts.layout(
-                        candidate.text.clone(),
-                        FontId::proportional(CANDIDATE_FONT_SIZE),
-                        INK,
-                        (*width as f32 / scale - text_padding).max(1.0),
-                    )
-                })
-                .collect::<Vec<_>>()
-        });
-        let row = galleys
+        let layout_galleys = |context: &egui::Context| {
+            context.fonts_mut(|fonts| {
+                state
+                    .visible()
+                    .iter()
+                    .zip(widths)
+                    .map(|(candidate, width)| {
+                        fonts.layout(
+                            candidate.text.clone(),
+                            FontId::proportional(CANDIDATE_FONT_SIZE),
+                            INK,
+                            (*width as f32 / scale - text_padding).max(1.0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        // Only scalar metrics may cross begin_pass. It can recreate a full
+        // font atlas, invalidating every previously laid-out galley's glyph UVs.
+        let row = layout_galleys(&self.context)
             .iter()
             .map(|g| (g.size().y * scale).ceil() + (10.0 * scale).round())
             .fold((30.0 * scale).round(), f32::max);
@@ -351,6 +355,8 @@ impl Surface {
         };
         let input = self.input(width as f32 / scale, height as f32 / scale, scale);
         let mut output = self.context.run_ui(input, |ctx| {
+            // Layout against this pass's atlas, just like the candidate numbers.
+            let galleys = layout_galleys(ctx.ctx());
             let painter = ctx.layer_painter(egui::LayerId::background());
             let bounds =
                 Rect::from_min_size(Pos2::ZERO, Vec2::new(width as f32, height as f32) / scale);
@@ -713,6 +719,60 @@ mod tests {
                 .map(|text| Candidate::new(*text, CandidateSource::Local))
                 .collect(),
             ..Default::default()
+        }
+    }
+    #[test]
+    fn candidate_text_survives_font_atlas_recreation() {
+        fn small_atlas(surface: &mut Surface, scale: f32) {
+            let mut input = surface.input(480.0, 38.0, scale);
+            input.max_texture_side = Some(1024);
+            let mut output = surface.context.run_ui(input, |_| {});
+            surface.apply_textures(&mut output.textures_delta);
+            surface.free_textures(&mut output.textures_delta);
+            surface.initialized = true;
+        }
+        for scale in [1.0, 1.5, 2.0] {
+            let current = state(&["你好", "我是", "快捷键", "Rust"]);
+            let available = (472.0 * scale) as i32;
+            let gap = (2.0 * scale) as i32;
+            let viewport = (480.0 * scale) as i32;
+            let mut fresh = Surface::default();
+            small_atlas(&mut fresh, scale);
+            let widths = fresh.measure(&current, available, scale);
+            let expected = fresh.render(&current, &widths, gap, viewport, scale);
+
+            let mut surface = Surface::default();
+            small_atlas(&mut surface, scale);
+            // Populate the atlas outside a paint pass, as measurement does.
+            // Distinct sizes work even on systems without a CJK font. Stop
+            // before overflow; begin_pass recreates it at the real 80% threshold.
+            surface.context.fonts_mut(|fonts| {
+                'fill: for size in 16..80 {
+                    for ch in ' '..='~' {
+                        if fonts.font_atlas_fill_ratio() > 0.82 {
+                            break 'fill;
+                        }
+                        fonts.layout_no_wrap(
+                            ch.to_string(),
+                            FontId::proportional(size as f32),
+                            INK,
+                        );
+                    }
+                }
+                assert!(fonts.font_atlas_fill_ratio() > 0.8);
+            });
+            let widths = surface.measure(&current, available, scale);
+            let actual = surface.render(&current, &widths, gap, viewport, scale);
+            assert_eq!(actual.geometry.width, expected.geometry.width);
+            assert_eq!(actual.geometry.height, expected.geometry.height);
+            assert!(
+                actual.pixels == expected.pixels,
+                "atlas reset at scale {scale}"
+            );
+            assert!(Arc::ptr_eq(
+                &actual,
+                &surface.render(&current, &widths, gap, viewport, scale)
+            ));
         }
     }
     #[test]

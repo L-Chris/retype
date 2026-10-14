@@ -31,6 +31,12 @@ without adding eframe, winit, an OpenGL context or a GPU device to the TSF DLL.
 Each TSF apartment lazily retains one egui context, font cache and atlas across
 compositions. It renders only when candidate state changes. `WM_PAINT` copies the
 cached bitmap, and there is no repaint timer or background render loop.
+Only scalar measurements cross the start of a paint pass. Candidate galleys are
+laid out again inside that pass: egui recreates its font atlas when it exceeds
+80% capacity, so retaining pre-pass glyph UVs can leave candidate numbers visible
+while candidate text disappears or samples unrelated glyphs. The already-rasterized
+bitmap remains safe to reuse. An atlas-pressure regression verifies pixel equality
+with a fresh renderer and bitmap reuse at 100%, 150% and 200% scaling.
 The font backend uses Skrifa and vello_cpu with font hinting enabled by default.
 The font is loaded from Windows' Fonts directory (Microsoft YaHei preferred,
 then Chinese fallback fonts). Microsoft fonts are not bundled in the installer.
