@@ -148,7 +148,9 @@ impl KernelBackend for InlineBackend {
                     KernelAction::Side(SideEffect::EnglishSuggest { gen, input }) => {
                         pending.push_back(InputEvent::EnglishCompleted {
                             gen,
-                            candidates: retype_english::correct(&input, 8),
+                            candidates: lock_or_recover(&self.kernel)
+                                .english_dictionary()
+                                .correct(&input, 8),
                         });
                     }
                     KernelAction::Side(SideEffect::Rerank(job)) => {
@@ -266,11 +268,15 @@ impl LocalBackend {
             .spawn(move || {
                 while let Ok((gen, input)) = english_rx.recv() {
                     let Some(b) = weak.upgrade() else { break };
-                    if lock_or_recover(&b.kernel).generation() != gen {
-                        continue;
-                    }
+                    let vocabulary = {
+                        let kernel = lock_or_recover(&b.kernel);
+                        if kernel.generation() != gen {
+                            continue;
+                        }
+                        kernel.english_dictionary()
+                    };
                     let candidates =
-                        guarded("english", Vec::new(), || retype_english::correct(&input, 8));
+                        guarded("english", Vec::new(), || vocabulary.correct(&input, 8));
                     let actions = lock_or_recover(&b.kernel)
                         .handle(InputEvent::EnglishCompleted { gen, candidates });
                     for action in actions {

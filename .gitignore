@@ -8,13 +8,8 @@ Cargo.lock.bak
 /data/dict/*.tsv
 /dist/
 
-# Flutter (apps/settings)
-**/.dart_tool/
-**/.flutter-plugins
-**/.flutter-plugins-dependencies
+# Android / Gradle build outputs
 **/build/
-**/.pub-cache/
-**/.pub/
 
 # IDE
 .idea/

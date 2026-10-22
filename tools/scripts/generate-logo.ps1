@@ -1,4 +1,4 @@
-# Generate raster icons from the simple geometry in assets/logo.svg.
+# Generate the shared PNG and Windows icon from the geometry in assets/logo.svg.
 # The SVG remains the editable brand source; keep coordinates/colors in sync.
 [CmdletBinding()]
 param()
@@ -39,19 +39,13 @@ function New-LogoPng([int]$size) {
   return ,$bytes
 }
 
-$flutterPath = Join-Path $root 'apps\settings\assets\logo.png'
-New-Item -ItemType Directory -Force -Path (Split-Path $flutterPath) | Out-Null
-[IO.File]::WriteAllBytes($flutterPath, (New-LogoPng 256))
-
-$android = Join-Path $root 'apps\settings\android\app\src\main\res'
-foreach ($entry in @(@('mdpi', 48), @('hdpi', 72), @('xhdpi', 96), @('xxhdpi', 144), @('xxxhdpi', 192))) {
-  $path = Join-Path $android ("mipmap-{0}\ic_launcher.png" -f $entry[0])
-  [IO.File]::WriteAllBytes($path, (New-LogoPng ([int]$entry[1])))
-}
+$pngPath = Join-Path $root 'assets\logo.png'
+New-Item -ItemType Directory -Force -Path (Split-Path $pngPath) | Out-Null
+[IO.File]::WriteAllBytes($pngPath, (New-LogoPng 256))
 
 $sizes = @(16, 20, 24, 32, 40, 48, 64, 128, 256)
 $frames = @($sizes | ForEach-Object { New-LogoPng $_ })
-$iconPath = Join-Path $root 'apps\settings\windows\runner\resources\app_icon.ico'
+$iconPath = Join-Path $root 'assets\retype.ico'
 $file = [IO.File]::Create($iconPath)
 $writer = New-Object IO.BinaryWriter($file)
 try {
@@ -66,4 +60,4 @@ try {
   }
   foreach ($frame in $frames) { $writer.Write([byte[]]$frame) }
 } finally { $writer.Dispose() }
-Write-Host "Generated retype logo assets from assets/logo.svg"
+Write-Host "Generated assets/logo.png and assets/retype.ico from assets/logo.svg geometry"

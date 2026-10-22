@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 class SettingsActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    BaseResources.observe(applicationContext)
     CloudSync.schedule(applicationContext)
     AppUpdates.schedule(applicationContext)
     setContent {
@@ -34,7 +35,7 @@ class SettingsActivity : ComponentActivity() {
                   medium = RoundedCornerShape(16.dp),
                   large = RoundedCornerShape(20.dp)),
       ) {
-        SettingsScreen()
+        SettingsScreen(intent.getBooleanExtra("dictionaries", false), intent.getBooleanExtra("downloadResources", false))
       }
     }
   }

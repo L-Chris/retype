@@ -4,7 +4,7 @@ The main README covers installation and basic contribution steps. This document 
 
 ## Architecture and layout
 
-The platform-independent Rust engine lives under `core/`. `platforms/windows/tsf` is the in-process TSF adapter, and `platforms/windows/updater` performs network work in a separate process. `apps/settings-egui` is the standalone Windows settings application. The former Flutter implementation under `apps/settings` is retained as a reference and asset source; it is no longer built or packaged. See [settings development](../apps/settings-egui/README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the [ADRs](adr/) for design decisions.
+The platform-independent Rust engine lives under `core/`. `platforms/windows/tsf` is the in-process TSF adapter, and `platforms/windows/updater` performs network work in a separate process. `apps/settings-egui` is the standalone Windows settings application; `platforms/android` contains the Kotlin/Compose application and JNI adapter. See [settings development](../apps/settings-egui/README.md), [ARCHITECTURE.md](../ARCHITECTURE.md) and the [ADRs](adr/) for design decisions.
 
 The input thread must not perform network calls, file I/O, dictionary loading, or wait on locks across calls. The local first pass remains usable when optional external services fail; asynchronous candidate updates must not remove text already displayed.
 
@@ -36,4 +36,4 @@ cargo run -p retype-dict-build --release -- --out data/dict/retype-dict.tsv
 - Inno Setup scripts containing Chinese must be saved with a UTF-8 BOM. Without it, the compiler can silently write garbled profile names.
 - A TSF DLL may remain loaded in another application during an upgrade. Install into a new version directory, then update registration; see [automatic updates](auto-update.md).
 
-The editable app mark is [assets/logo.svg](../assets/logo.svg). After changing its geometry, update the matching drawing commands in `tools/scripts/generate-logo.ps1` and run that script to regenerate the Windows icon, Flutter PNG, and Android launcher icons.
+The editable app mark is [assets/logo.svg](../assets/logo.svg). After changing its geometry, update the matching drawing commands in `tools/scripts/generate-logo.ps1` and run that script to regenerate `assets/logo.png` and `assets/retype.ico`. Windows settings embed the PNG; the settings executable, TSF DLL and installer use the ICO. Android uses native vector and adaptive icons under `platforms/android/app/src/main/res`, maintained separately to preserve the launcher mask and safe area.

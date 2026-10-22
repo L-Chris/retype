@@ -57,12 +57,11 @@ jobs:
         run: |
           sdkmanager 'platforms;android-35' 'build-tools;36.0.0' 'ndk;28.2.13676358'
           cargo install cargo-ndk --version 4.1.2 --locked
-      - name: Offline dictionary and JNI
+      - name: JNI libraries
         env:
           RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'
           CARGO_NDK_PLATFORM: '26'
         run: |
-          cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
           cargo ndk -t arm64-v8a -t x86_64 -o platforms/android/build/native build --locked --release -p retype-android
@@ -73,18 +72,25 @@ jobs:
           RETYPE_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           RETYPE_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           RETYPE_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: bash gradlew --no-daemon :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
+        run: bash gradlew --no-daemon -PretypeSplitApks=true :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
       - name: Verify and prepare release files
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify platforms/android/app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 platforms/android/app/build/outputs/apk/release/app-release.apk
           mkdir -p dist/android
-          cp platforms/android/app/build/outputs/apk/release/app-release.apk "dist/android/retype-$VERSION-android.apk"
-          cd dist/android
-          sha256sum "retype-$VERSION-android.apk" > "retype-$VERSION-android.apk.sha256"
+          for abi in arm64-v8a x86_64 universal; do
+            apk="platforms/android/app/build/outputs/apk/release/app-$abi-release.apk"
+            "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+            "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
+            if [[ "$abi" == universal ]]; then
+              name="retype-$VERSION-android.apk"
+            else
+              name="retype-$VERSION-android-$abi.apk"
+            fi
+            cp "$apk" "dist/android/$name"
+            (cd dist/android && sha256sum "$name" > "$name.sha256")
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: android-installer

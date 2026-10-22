@@ -3,7 +3,7 @@ use super::*;
 impl Kernel {
     /// Merge separate ranked streams by match evidence, never by cross-language scores.
     pub(super) fn mix_english(&mut self, chinese_word: bool) {
-        let words = retype_english::mixed(&self.buffer, self.learner.as_ref(), 2);
+        let words = self.english.mixed(&self.buffer, self.learner.as_ref(), 2);
         let chinese_count = self.candidates.len();
         for (offset, word) in words.into_iter().enumerate() {
             if self.candidates.iter().any(|c| c.text == word.text) {
@@ -30,7 +30,9 @@ impl Kernel {
         self.selected = 0;
         self.page_start = 0;
         self.page_starts.clear();
-        self.candidates = retype_english::complete(&self.buffer, self.learner.as_ref(), 24);
+        self.candidates = self
+            .english
+            .complete(&self.buffer, self.learner.as_ref(), 24);
         actions.push(KernelAction::Render(self.render_state()));
         if self.cfg.english_spelling && self.buffer.len() >= 3 {
             actions.push(KernelAction::Side(SideEffect::EnglishSuggest {

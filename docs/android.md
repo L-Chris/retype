@@ -72,8 +72,11 @@ for normal offline typing.
 
 ## Updates and release signing
 
-About checks stable GitHub releases for `retype-<version>-android.apk` and its
-`.sha256` file. Windows-only releases and prereleases are ignored. Automatic
+About checks stable GitHub releases for `retype-<version>-android-<abi>.apk`
+and its `.sha256` file, preferring the device's supported ABI order. It falls
+back to `retype-<version>-android.apk` for older releases. The universal APK
+keeps that name so previous app versions can still update. Windows-only
+releases and prereleases are ignored. Automatic
 checks run at most once per day when settings open, plus a connected daily
 WorkManager job. Android may defer that job. Checks never download or install
 without a button click, and a release without an Android APK is reported explicitly.
@@ -97,7 +100,11 @@ and uploads the matching SHA-256 alongside the APK.
 
 For a local signed release build, set `RETYPE_ANDROID_KEYSTORE` (absolute path),
 `RETYPE_ANDROID_STORE_PASSWORD`, `RETYPE_ANDROID_KEY_ALIAS`, and
-`RETYPE_ANDROID_KEY_PASSWORD`, then run `gradlew :app:assembleRelease`.
+`RETYPE_ANDROID_KEY_PASSWORD`, then run
+`gradlew -PretypeSplitApks=true :app:assembleRelease`.
+Release builds enable R8 optimization and resource shrinking, with JNI classes
+explicitly retained. The workflow publishes arm64-v8a, x86_64 and universal APKs.
+Without the split property, local builds retain the single `app-release.apk` path.
 Debug previews use the local development key and cannot be overwritten by a
 formal release signed with a different key; the updater reports this mismatch.
 The GitHub APK channel is intended for direct APK distribution, not Play Store
@@ -110,14 +117,15 @@ Set `JAVA_HOME` and `ANDROID_HOME`, then run from the repository root:
 
 ```powershell
 rustup target add aarch64-linux-android x86_64-linux-android
-# Generate the offline binary from the tracked Wanxiang sources, if absent:
-cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
 ./platforms/android/build.ps1
 # Also include the emulator ABI:
 ./platforms/android/build.ps1 -Abi arm64-v8a,x86_64
 ```
 
 The debug-signed APK is `platforms/android/app/build/outputs/apk/debug/app-debug.apk`.
+The app APK contains no base vocabulary. In Settings → Dictionary, download it once
+or import the matching release bundle; offline typing is available afterward.
+See [base resources](base-resources.md) for publishing, migration and recovery.
 Enable retype in Android's system keyboard settings, then select it as the current
 input method. In retype Settings > 输入 choose Full Pinyin or
 Xiaohe; changes apply when entering an editor again. Try `nihao` or `nihc`, or
@@ -153,13 +161,15 @@ cd platforms/android
 ```powershell
 cargo test --locked -p retype-android
 cargo test --locked -p retype-learning --features broker
+cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
+cargo run --locked -p retype-resource-build -- --out platforms/android/build/test-resources --check
 cd platforms/android
 ./gradlew.bat :app:lintDebug :app:connectedDebugAndroidTest
 ```
 
 Set `ANDROID_SERIAL` if multiple devices are connected. The connected tests need
 the APK and test APK installation confirmed on phones that restrict ADB installs.
-Native tests exercise the bundled dictionary, both Pinyin schemes, English
+Native tests exercise external test dictionaries, both Pinyin schemes, English
 learning persistence and private sessions. The UI test types only into isolated
 test editors, verifies touch commits and field switching, and restores the
 previous default input method afterward.
@@ -175,10 +185,13 @@ The JNI ABI uses numeric handles, validates stale candidate generations, contain
 Rust panics, and reports failures as Java exceptions. A serial engine dispatcher
 queues keys and commits; main-thread editor calls are gated by an editor epoch
 and the captured connection. SQLite writes run on a separate writer thread.
-Small JSON commands/snapshots are the initial bridge protocol; engine latency
-and allocation costs should be profiled on representative Android hardware before
-changing that transport. A P99 of 6 ms remains a measurement target, not an
-established Android performance claim.
+Normal input uses typed JNI commands and updates, with at most eight preview
+candidates. Unchanged candidate text reuses the existing Kotlin list. Expanded
+candidates are fetched in pages of at most 64, guarded by generation and selected
+by absolute index. Feature operations and compatibility tests retain JSON.
+See [Android performance validation](android-performance.md) for measurement
+commands and release-size results. A P99 of 6 ms remains a measurement target,
+not an established Android performance claim.
 
 The Rust library is linked for 16 KiB ELF alignment. Locally verified builds also
 passed checks of the packaged Compose native library and APK zip alignment. A 16 KiB-page device still

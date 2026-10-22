@@ -17,10 +17,6 @@ try {
     $env:PATH = "$bin;$env:JAVA_HOME\bin;$savedPath"
     Push-Location $repo
     try {
-        if (!(Test-Path (Join-Path $repo 'data/dict/retype-dict.bin'))) {
-            & cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
-            if ($LASTEXITCODE -ne 0) { throw 'Dictionary build failed.' }
-        }
         foreach ($architecture in $Abi) {
             $target = if ($architecture -eq 'arm64-v8a') { 'aarch64-linux-android' } else { 'x86_64-linux-android' }
             $key = $target.Replace('-', '_')

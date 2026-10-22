@@ -1,6 +1,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+#[path = "../../common/base_resources.rs"]
+mod base_resources;
+
+#[cfg(windows)]
 fn serve() -> Result<(), Box<dyn std::error::Error>> {
     use retype_learning::{protocol, store::Store, transport};
     use std::path::PathBuf;
@@ -59,12 +63,36 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
         &db_path,
         Arc::clone(&system) as Arc<dyn retype_pinyin::Lexicon>,
     )?;
-    let dictionary = directory.join("retype-dict.bin");
-    let _ = retype_dict::spawn_loader(
-        dictionary,
-        Arc::clone(&system),
-        retype_dict::FallbackPolicy::SingleChar,
-    );
+    if custom_db.is_none() {
+        let target = Arc::downgrade(&system);
+        let hint = directory.clone();
+        let _ = std::thread::Builder::new()
+            .name("retype-learning-resources".into())
+            .spawn(move || {
+                let Some(root) = base_resources::root() else {
+                    return;
+                };
+                let mut loaded = None;
+                loop {
+                    let Some(system) = target.upgrade() else {
+                        break;
+                    };
+                    if let Some(path) = base_resources::available(&root, Some(&hint))
+                        .filter(|p| Some(p) != loaded.as_ref())
+                    {
+                        if let Ok(dictionary) = retype_dict::binary::open_shared(&path) {
+                            system.install_binary(dictionary);
+                            loaded = Some(path);
+                        }
+                    }
+                    if retype_resources::status(&root).is_ok_and(|s| s.ready) && loaded.is_some() {
+                        break;
+                    }
+                    drop(system);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            });
+    }
     if custom_db.is_none() {
         let sync = directory.join("retype-sync-host.exe");
         if sync.is_file() {

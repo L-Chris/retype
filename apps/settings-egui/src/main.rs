@@ -22,6 +22,13 @@ mod voice;
 
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
+    if std::env::args().any(|arg| arg == "--prepare-resources") {
+        return if backend::prepare_base().is_ok() {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::FAILURE
+        };
+    }
     if std::env::args().any(|arg| arg == "--sync-dictionaries") {
         return if backend::sync_enabled_packs().is_ok() {
             std::process::ExitCode::SUCCESS

@@ -20,7 +20,7 @@ class NativeSessionTest {
         chinese: Boolean = true,
         learn: Boolean = false,
     ): Long {
-        val dictionary = runBlocking { DictionaryAssets.prepare(context) }
+        val dictionary = runBlocking { ResourceFixtures.prepare(context) }
         return NativeBridge.create(
             dictionary.absolutePath,
             File(context.cacheDir, "test-learning.db").absolutePath,

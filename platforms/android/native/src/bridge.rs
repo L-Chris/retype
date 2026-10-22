@@ -2,8 +2,8 @@
 #![allow(unsafe_code)]
 use super::*;
 use jni::{
-    objects::{JClass, JString},
-    sys::{jboolean, jlong, jstring},
+    objects::{JClass, JObject, JObjectArray, JString, JValue},
+    sys::{jboolean, jint, jlong, jobject, jobjectArray, jstring},
     JNIEnv,
 };
 use std::{
@@ -17,6 +17,108 @@ static SESSIONS: OnceLock<Mutex<HashMap<i64, Session>>> = OnceLock::new();
 static NEXT: AtomicI64 = AtomicI64::new(1);
 fn sessions() -> &'static Mutex<HashMap<i64, Session>> {
     SESSIONS.get_or_init(Default::default)
+}
+fn strings<'local>(
+    env: &mut JNIEnv<'local>,
+    values: &[String],
+) -> Result<JObjectArray<'local>, String> {
+    let array = env
+        .new_object_array(values.len() as i32, "java/lang/String", JObject::null())
+        .map_err(|e| e.to_string())?;
+    for (index, value) in values.iter().enumerate() {
+        let string = env.new_string(value).map_err(|e| e.to_string())?;
+        env.set_object_array_element(&array, index as i32, &string)
+            .map_err(|e| e.to_string())?;
+        env.delete_local_ref(string).map_err(|e| e.to_string())?;
+    }
+    Ok(array)
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_dispatchInput(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+    operation: jint,
+    text: JString,
+    argument: jint,
+    generation: jlong,
+    flags: jint,
+) -> jobject {
+    guard(&mut env, |env| {
+        let text: String = env.get_string(&text).map_err(|e| e.to_string())?.into();
+        let command =
+            Command::from_input(operation, text, argument, generation as u64, flags as u8)?;
+        let update = {
+            let mut all = sessions().lock().map_err(|e| e.to_string())?;
+            all.get_mut(&id)
+                .ok_or("closed retype session")?
+                .dispatch_compact(command)
+        };
+        let composition: JObject = env
+            .new_string(&update.composition)
+            .map_err(|e| e.to_string())?
+            .into();
+        let candidates: JObject = match update.candidates {
+            Some(ref values) => strings(env, values)?.into(),
+            None => JObject::null(),
+        };
+        let commits: JObject = strings(env, &update.commits)?.into();
+        Ok(env
+            .new_object(
+                "io/github/retype/ime/NativeUpdate",
+                "(JLjava/lang/String;[Ljava/lang/String;IIIZ[Ljava/lang/String;Z)V",
+                &[
+                    JValue::Long(update.generation as i64),
+                    JValue::Object(&composition),
+                    JValue::Object(&candidates),
+                    JValue::Int(update.candidate_start as i32),
+                    JValue::Int(update.candidate_total as i32),
+                    JValue::Int(update.selected as i32),
+                    JValue::Bool(u8::from(update.chinese)),
+                    JValue::Object(&commits),
+                    JValue::Bool(u8::from(update.pass_through)),
+                ],
+            )
+            .map_err(|e| e.to_string())?
+            .into_raw())
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_candidates(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+    generation: jlong,
+    start: jint,
+    limit: jint,
+) -> jobjectArray {
+    guard(&mut env, |env| {
+        let page = {
+            let all = sessions().lock().map_err(|e| e.to_string())?;
+            let session = all.get(&id).ok_or("closed retype session")?;
+            session.candidate_page(generation as u64, start as usize, limit as usize)
+        };
+        match page {
+            Some(ref values) => Ok(strings(env, values)?.into_raw()),
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_acknowledge(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+    generation: jlong,
+    accepted: jboolean,
+) {
+    guard(&mut env, |_| {
+        let mut all = sessions().lock().map_err(|e| e.to_string())?;
+        all.get_mut(&id)
+            .ok_or("closed retype session")?
+            .acknowledge(generation as u64, accepted != 0);
+        Ok(())
+    });
 }
 fn guard<T: Default>(
     env: &mut JNIEnv<'_>,

@@ -64,8 +64,53 @@ pub struct Update {
     pub commits: Vec<String>,
     pub pass_through: bool,
 }
+/// The normal key path returns only the visible window. An unchanged window
+/// uses None so Kotlin can retain its strings instead of allocating them again.
+#[derive(Debug)]
+pub struct CompactUpdate {
+    pub generation: u64,
+    pub composition: String,
+    pub candidates: Option<Vec<String>>,
+    pub candidate_start: usize,
+    pub candidate_total: usize,
+    pub selected: usize,
+    pub chinese: bool,
+    pub commits: Vec<String>,
+    pub pass_through: bool,
+}
+impl Command {
+    pub fn from_input(
+        operation: i32,
+        text: String,
+        argument: i32,
+        generation: u64,
+        flags: u8,
+    ) -> Result<Self, String> {
+        match operation {
+            1 => Ok(Self::Key {
+                value: text,
+                mods: flags,
+            }),
+            2 => Ok(Self::Literal { text }),
+            3 if argument >= 0 => Ok(Self::Choose {
+                index: argument as usize,
+                generation,
+            }),
+            4 => Ok(Self::Toggle),
+            5 => Ok(Self::Reset),
+            6 => Ok(Self::EnglishOptions {
+                enabled: flags & 1 != 0,
+                spelling: flags & 2 != 0,
+            }),
+            7 => Ok(Self::VoiceLearn { text }),
+            _ => Err("invalid input operation".into()),
+        }
+    }
+}
 pub struct Session {
     kernel: Kernel,
+    render: RenderState,
+    last_window: Option<(usize, usize, Vec<String>)>,
     pending: Vec<Event>,
     awaiting: Option<(u64, Vec<Event>)>,
     writer: Option<mpsc::Sender<Vec<Event>>>,
@@ -202,8 +247,12 @@ impl Session {
             },
             ..Default::default()
         };
+        let kernel = Kernel::new(cfg, dict, learner, offline_cloud(Duration::from_millis(1)));
+        let render = kernel.render_state();
         Ok(Self {
-            kernel: Kernel::new(cfg, dict, learner, offline_cloud(Duration::from_millis(1))),
+            kernel,
+            render,
+            last_window: None,
             pending: Vec::new(),
             awaiting: None,
             writer,
@@ -211,6 +260,73 @@ impl Session {
         })
     }
     pub fn dispatch(&mut self, command: Command) -> Update {
+        let (commits, pass) = self.apply(command);
+        self.snapshot(commits, pass)
+    }
+    pub fn dispatch_compact(&mut self, command: Command) -> CompactUpdate {
+        let (commits, pass_through) = self.apply(command);
+        let state = &self.render;
+        let start = state.page_start.min(state.candidates.len());
+        let visible = &state.candidates[start..(start + 8).min(state.candidates.len())];
+        let unchanged = self
+            .last_window
+            .as_ref()
+            .is_some_and(|(previous_start, total, texts)| {
+                *previous_start == start
+                    && *total == state.candidates.len()
+                    && texts
+                        .iter()
+                        .map(String::as_str)
+                        .eq(visible.iter().map(|c| c.text.as_str()))
+            });
+        let candidates = if unchanged {
+            None
+        } else {
+            let texts: Vec<_> = visible.iter().map(|c| c.text.clone()).collect();
+            self.last_window = Some((start, state.candidates.len(), texts.clone()));
+            Some(texts)
+        };
+        CompactUpdate {
+            generation: state.gen,
+            composition: state.composition.clone(),
+            candidates,
+            candidate_start: start,
+            candidate_total: state.candidates.len(),
+            selected: state.selected,
+            chinese: self.kernel.is_chinese(),
+            commits,
+            pass_through,
+        }
+    }
+    pub fn candidate_page(
+        &self,
+        generation: u64,
+        start: usize,
+        limit: usize,
+    ) -> Option<Vec<String>> {
+        if generation != self.render.gen
+            || start > self.render.candidates.len()
+            || !(1..=64).contains(&limit)
+        {
+            return None;
+        }
+        Some(
+            self.render
+                .candidates
+                .iter()
+                .skip(start)
+                .take(limit)
+                .map(|c| c.text.clone())
+                .collect(),
+        )
+    }
+    pub fn acknowledge(&mut self, generation: u64, accepted: bool) {
+        self.apply(Command::Ack {
+            generation,
+            accepted,
+        });
+    }
+    fn apply(&mut self, command: Command) -> (Vec<String>, bool) {
         let mut commits = Vec::new();
         let mut pass = false;
         let event = match command {
@@ -221,7 +337,7 @@ impl Session {
                         let _ = writer.send(vec![Event::Voice { text }]);
                     }
                 }
-                return self.snapshot(commits, pass);
+                return (commits, pass);
             }
             Command::EnglishOptions { enabled, spelling } => {
                 InputEvent::SetEnglishOptions { enabled, spelling }
@@ -243,13 +359,11 @@ impl Session {
                         }
                     }
                 }
-                return self.snapshot(commits, pass);
+                return (commits, pass);
             }
             Command::Choose { index, generation } => {
-                if generation != self.kernel.generation()
-                    || index >= self.kernel.render_state().candidates.len()
-                {
-                    return self.snapshot(commits, pass);
+                if generation != self.kernel.generation() || index >= self.render.candidates.len() {
+                    return (commits, pass);
                 }
                 InputEvent::CandidateChosen { index }
             }
@@ -285,7 +399,7 @@ impl Session {
                     "right" => Key::Right,
                     _ => match value.chars().next() {
                         Some(c) => Key::Char(c),
-                        None => return self.snapshot(commits, pass),
+                        None => return (commits, pass),
                     },
                 };
                 InputEvent::Key {
@@ -299,6 +413,7 @@ impl Session {
         while let Some(event) = queue.pop_front() {
             for action in self.kernel.handle(event) {
                 match action {
+                    KernelAction::Render(state) => self.render = state,
                     KernelAction::Commit(
                         CommitRequest::Text(text) | CommitRequest::ReplaceComposition { text },
                     ) => commits.push(text),
@@ -311,7 +426,7 @@ impl Session {
                     KernelAction::Side(SideEffect::EnglishSuggest { gen, input }) => queue
                         .push_back(InputEvent::EnglishCompleted {
                             gen,
-                            candidates: retype_english::correct(&input, 8),
+                            candidates: self.kernel.english_dictionary().correct(&input, 8),
                         }),
                     _ => {}
                 }
@@ -320,14 +435,14 @@ impl Session {
         if !commits.is_empty() {
             self.awaiting = Some((self.kernel.generation(), std::mem::take(&mut self.pending)));
         }
-        self.snapshot(commits, pass)
+        (commits, pass)
     }
     fn snapshot(&self, commits: Vec<String>, pass_through: bool) -> Update {
-        let state = self.kernel.render_state();
+        let state = &self.render;
         Update {
             generation: state.gen,
-            composition: state.composition,
-            candidates: state.candidates.into_iter().map(|c| c.text).collect(),
+            composition: state.composition.clone(),
+            candidates: state.candidates.iter().map(|c| c.text.clone()).collect(),
             page_start: state.page_start,
             selected: state.selected,
             chinese: self.kernel.is_chinese(),
@@ -361,6 +476,63 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+    #[test]
+    fn compact_windows_preserve_full_order_stale_guards_and_late_selection() {
+        let words: Vec<_> = (0..150).map(|i| format!("候选{i}")).collect();
+        let (dict, _) = retype_dict::from_pairs(
+            words
+                .iter()
+                .enumerate()
+                .map(|(i, text)| (text.as_str(), "ni", (1000 - i) as f64)),
+        );
+        let mut s = Session::with_lexicon(Arc::new(dict), &temp(), false, true, false).unwrap();
+        s.dispatch_compact(Command::from_input(1, "n".into(), 0, 0, 0).unwrap());
+        let first = s.dispatch_compact(Command::from_input(1, "i".into(), 0, 0, 0).unwrap());
+        assert!(
+            first.candidate_total > 64,
+            "only {} candidates",
+            first.candidate_total
+        );
+        assert_eq!(first.candidates.as_ref().unwrap().len(), 8);
+        let complete = s.snapshot(Vec::new(), false);
+        assert_eq!(
+            first.candidates.as_ref().unwrap(),
+            &complete.candidates[..8]
+        );
+        let mut paged = Vec::new();
+        for start in (0..first.candidate_total).step_by(64) {
+            paged.extend(s.candidate_page(first.generation, start, 64).unwrap());
+        }
+        assert_eq!(paged, complete.candidates);
+        assert!(s.candidate_page(first.generation, 0, 65).is_none());
+        assert!(s.candidate_page(first.generation, usize::MAX, 64).is_none());
+        let repeated = s.dispatch_compact(Command::Choose {
+            index: usize::MAX,
+            generation: first.generation,
+        });
+        assert!(repeated.candidates.is_none());
+        s.dispatch_compact(Command::from_input(1, "x".into(), 0, 0, 0).unwrap());
+        let second =
+            s.dispatch_compact(Command::from_input(1, "backspace".into(), 0, 0, 0).unwrap());
+        assert!(s.candidate_page(first.generation, 0, 64).is_none());
+        let expected = s
+            .candidate_page(second.generation, 64, 1)
+            .unwrap()
+            .remove(0);
+        let stale = s.dispatch_compact(Command::Choose {
+            index: 64,
+            generation: first.generation,
+        });
+        assert!(stale.commits.is_empty());
+        let selected = s.dispatch_compact(Command::Choose {
+            index: 64,
+            generation: second.generation,
+        });
+        assert_eq!(selected.commits, [expected]);
+        assert_eq!(selected.candidate_total, 0);
+        assert!(Command::from_input(3, String::new(), -1, 0, 0).is_err());
+        assert!(Command::from_input(99, String::new(), 0, 0, 0).is_err());
     }
     fn session(path: &Path, flypy: bool, chinese: bool, learn: bool) -> Session {
         let (dict, _) = retype_dict::from_pairs([

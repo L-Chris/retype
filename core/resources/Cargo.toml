@@ -1,0 +1,23 @@
+[package]
+name = "retype-resources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+download = ["dep:ureq"]
+
+[dependencies]
+retype-dict.workspace = true
+retype-english.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+flate2 = "1"
+fs2 = "0.4"
+ureq = { workspace = true, optional = true }
+
+[lints]
+workspace = true

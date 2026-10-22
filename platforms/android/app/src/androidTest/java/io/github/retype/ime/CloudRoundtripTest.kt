@@ -96,7 +96,7 @@ class CloudRoundtripTest {
                 }
                 .apply { start() }
         try {
-            val dict = DictionaryAssets.prepare(context)
+            val dict = ResourceFixtures.prepare(context)
             val a = "a".repeat(32)
             val b = "b".repeat(32)
             fun operation(id: String, scheme: Int, confirm: Boolean = false): JSONObject {

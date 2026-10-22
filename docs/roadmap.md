@@ -30,7 +30,7 @@
 |---|---|
 | `release.yml` 由 tag 触发 | ✅ v0.1.0 3m15s、v0.1.1 4m46s，均发布 Release |
 | 产物命名与 `Platform::asset_suffix()` 对齐 | ✅ v0.1.1 起为 `retype-<版本>-windows-x64-setup.exe` + 同名 `.sha256`（Inno Setup 安装包） |
-| `ci.yml` 四个 job | ✅ 全绿（ubuntu 内核 / windows 全量 / Flutter / 版本一致性） |
+| CI 构建 | ✅ Rust 内核 / Windows / Android / 版本一致性；不再构建 Flutter |
 | 内核在 **ubuntu** 上编译通过 | ✅ 证明 `core/` 确实不含任何平台 API |
 | `retype-updater check` 对真实 release | ✅ `--current 0.0.9` → 退出码 10 且「可安装 = true」；`--current 0.1.0` → 退出码 0，不提示降级 |
 | `retype-updater download` + sha256 校验 | ✅ 从真实 Release 下载 5,783,576 字节，校验通过后落盘 |
@@ -127,7 +127,7 @@
 - [x] 独立版本目录安装，保留正在使用的旧 DLL，不中断旧应用的组字会话
 - [x] 登录后及每日计划任务检查，本地 24 小时限频，可关闭/跳过版本
 - [ ] 旧版本目录自动回收（目前保留到卸载，避免删除仍被旧应用依赖的文件）
-- [ ] Flutter 设置界面（`apps/settings`）：词库管理、热键、隐私白名单、云端开关、日志、检查更新
+- [x] 原生设置界面：Windows 使用 `apps/settings-egui`（Rust/egui），Android 使用 Kotlin/Compose；旧 Flutter 工程已移除
 - [ ] 崩溃上报与延迟打点
 - [x] 小鹤双拼：按原始按键构建音节词格，支持部分选词、退格、零声母、全拼切换
 - [ ] 其他双拼方案（自然码/微软）

@@ -14,7 +14,6 @@ if (-not $iscc) {
     $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
 if (-not $iscc) { throw 'ISCC.exe not found' }
-Copy-Item -LiteralPath .ci\payload\x64\retype-dict.tsv, .ci\payload\x64\retype-dict.bin -Destination data\dict -Force
 & $iscc "/DMyAppVersion=$Version" "/DRepoRoot=$PWD" '/DBaseDir=.ci\payload\x64' '/DX86Dir=.ci\payload\x86' '/DOutDir=dist' platforms\windows\installer\retype.iss
 if ($LASTEXITCODE) { throw 'Installer build failed' }
 $exe = "dist\retype-$Version-windows-x64-setup.exe"

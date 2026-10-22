@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 retype-types.workspace = true
+retype-resources = { path = "../../core/resources", features = ["download"] }
 retype-ai = { path = "../../platforms/windows/ai" }
 retype-sync = { path = "../../platforms/windows/sync" }
 serde_json.workspace = true
@@ -21,7 +22,7 @@ ureq.workspace = true
 # Production uses Glow; wgpu is an opt-in comparison build.
 eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow"] }
 png = "0.17"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_Controls_Dialogs", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi"] }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 

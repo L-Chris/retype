@@ -302,7 +302,7 @@ platforms/windows/
 
 platforms/android/               Kotlin IME + Compose 键盘／设置 + retype-android JNI 会话
 apps/settings-egui/              Windows 设置界面
-apps/settings/                   早期 Flutter 设置原型（未用于 Android 预览）
+assets/                         共享品牌资源（SVG、PNG、Windows ICO）
 tools/dict-build/                词库构建：词频表 + 拼音 → dict.bin
 data/dict/                       词库源数据
 ```

@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 retype-types = { workspace = true }
+retype-resources = { path = "../../../core/resources" }
 retype-pinyin = { workspace = true }
 retype-dict = { workspace = true }
 retype-context = { workspace = true }
@@ -56,3 +57,6 @@ workspace = true
 
 [build-dependencies]
 winres = "0.1.12"
+
+[dev-dependencies]
+retype-english = { path = "../../../core/english", features = ["test-data"] }

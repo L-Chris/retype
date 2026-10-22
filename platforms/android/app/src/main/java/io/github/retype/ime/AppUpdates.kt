@@ -64,7 +64,7 @@ internal object AppUpdates {
     return p[0] * 10000 + p[1] * 100 + p[2]
   }
 
-  internal fun parseReleases(text: String): AndroidRelease? {
+  internal fun parseReleases(text: String, supportedAbis: List<String> = Build.SUPPORTED_ABIS.toList()): AndroidRelease? {
     val releases = JSONArray(text)
     val available = mutableListOf<AndroidRelease>()
     for (i in 0 until releases.length()) {
@@ -74,24 +74,24 @@ internal object AppUpdates {
       if (!tag.startsWith("v")) continue
       val version = tag.substring(1)
       val code = runCatching { versionCode(version) }.getOrNull() ?: continue
-      val name = "retype-$version-android.apk"
       val assets = r.optJSONArray("assets") ?: continue
-      var apk: JSONObject? = null
-      var hash: JSONObject? = null
-      for (a in 0 until assets.length()) {
-        val asset = assets.getJSONObject(a)
-        if (asset.optString("name") == name) apk = asset
-        if (asset.optString("name") == "$name.sha256") hash = asset
-      }
-      if (apk == null || hash == null) continue
       val prefix = "https://github.com/L-Chris/retype/releases/download/$tag/"
-      val url = apk.optString("browser_download_url")
-      val hashUrl = hash.optString("browser_download_url")
-      val size = apk.optLong("size")
-      if (url != prefix + name || hashUrl != prefix + "$name.sha256" || size !in 1..MAX_APK)
-          continue
-      available +=
-          AndroidRelease(version, code, url, hashUrl, size, r.optString("body").take(24000))
+      for (name in AndroidPackages.names(version, supportedAbis)) {
+        var apk: JSONObject? = null
+        var hash: JSONObject? = null
+        for (a in 0 until assets.length()) {
+          val asset = assets.getJSONObject(a)
+          if (asset.optString("name") == name) apk = asset
+          if (asset.optString("name") == "$name.sha256") hash = asset
+        }
+        if (apk == null || hash == null) continue
+        val url = apk.optString("browser_download_url")
+        val hashUrl = hash.optString("browser_download_url")
+        val size = apk.optLong("size")
+        if (url != prefix + name || hashUrl != prefix + "$name.sha256" || size !in 1..MAX_APK) continue
+        available += AndroidRelease(version, code, url, hashUrl, size, r.optString("body").take(24000))
+        break
+      }
     }
     return available.maxByOrNull { it.code }
   }
@@ -177,6 +177,7 @@ internal object AppUpdates {
             val ready =
                 newer != null &&
                     prefs.getInt("downloadCode", 0) == newer.code &&
+                    prefs.getString("downloadUrl", newer.url) == newer.url &&
                     File(context.cacheDir, "updates/update.apk").isFile
             mutableStatus.value =
                 UpdateStatus(
@@ -238,6 +239,7 @@ internal object AppUpdates {
                       .prefs
                       .edit()
                       .putString("downloadHash", expected)
+                      .putString("downloadUrl", release.url)
                       .putInt("downloadCode", release.code)
                       .apply()
                 } finally {
@@ -384,6 +386,7 @@ internal object AppUpdates {
         if (release.code > BuildConfig.VERSION_CODE) {
           val ready =
               prefs.getInt("downloadCode", 0) == release.code &&
+                  prefs.getString("downloadUrl", release.url) == release.url &&
                   File(context.cacheDir, "updates/update.apk").isFile
           mutableStatus.value =
               UpdateStatus(

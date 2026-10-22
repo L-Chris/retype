@@ -13,7 +13,7 @@ A Chinese input method for Windows and [Android](docs/android.md), built around 
 - Windows TSF input method for 64-bit and 32-bit desktop applications.
 - An Android keyboard with offline input, personal learning, optional dictionaries, typing statistics, AI translation and WebDAV sync; see [Android](docs/android.md).
 - Full Pinyin and Xiaohe Shuangpin, selectable from the language bar; incomplete Shuangpin codes preview matching characters and phrases.
-- A locally bundled Wanxiang Base dictionary with word-specific pronunciations and phrase weights.
+- A downloadable Wanxiang Base dictionary with word-specific pronunciations and phrase weights; typing works offline after installation.
 - A compact horizontal candidate window with keyboard and mouse selection.
 - Chinese/English mode switching from the language bar.
 - Offline English word completion and spelling suggestions, with case preservation and persistent personal vocabulary; see [English input](docs/english-input.md).
@@ -28,6 +28,8 @@ A Chinese input method for Windows and [Android](docs/android.md), built around 
 The M1 desktop preview has passed a dedicated RichEdit input test. Compatibility across common applications and modern Windows app environments is still being evaluated; see the [validation record](docs/m1-validation.md).
 
 ## Install and use
+
+On first use, open **Settings → Dictionary** to download the Chinese and English base dictionaries. They are separate from the installer and remain available offline afterward. Upgrades reuse compatible local dictionaries; [local import](docs/base-resources.md) is also available.
 
 Download the Windows installer from the [latest release](https://github.com/L-Chris/retype/releases/latest). It includes both 64-bit and 32-bit input components. If an earlier installer has a pending restart, complete that restart before upgrading.
 

@@ -18,6 +18,7 @@ crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+retype-english = { path = "../english", features = ["test-data"] }
 futures = { workspace = true }
 
 [lints]

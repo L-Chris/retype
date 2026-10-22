@@ -157,6 +157,20 @@ if (-not $Uninstall) {
   Set-Acl -LiteralPath $dictionaryRoot -AclObject $packAcl
   Set-ItemProperty -Path $preferences -Name 'DictionaryRoot' -Value $dictionaryRoot
 
+  # Public base images share read access only; personal learning stays private.
+  $baseRoot = Join-Path $env:LOCALAPPDATA 'retype\dictionaries'
+  New-Item -ItemType Directory -Path $baseRoot -Force | Out-Null
+  $baseAcl = Get-Acl -LiteralPath $baseRoot
+  $baseAcl.SetAccessRule($packRead)
+  Set-Acl -LiteralPath $baseRoot -AclObject $baseAcl
+  Set-ItemProperty -Path $preferences -Name 'BaseDictionaryRoot' -Value $baseRoot
+  # Migrate a compatible older dictionary without starting the UI or using the network.
+  $resourceSettings = Join-Path $PSScriptRoot 'settings\retype.exe'
+  if (Test-Path -LiteralPath $resourceSettings) {
+    $resourceProcess = Start-Process -FilePath $resourceSettings -ArgumentList '--prepare-resources' -WindowStyle Hidden -Wait -PassThru
+    if ($resourceProcess.ExitCode) { Write-Warning 'Base dictionary migration is incomplete; retry in Settings.' }
+  }
+
   # The broker alone owns word-bearing learning files. AppContainers get pipe access,
   # never permission to open this directory. The native broker also enforces this ACL.
   $learning = Join-Path $env:LOCALAPPDATA 'retype\learning'

@@ -17,8 +17,9 @@ removed from the production app. `tools/scripts/test-settings-egui.ps1` is an
 optional manual check of pages, window reuse and install-path isolation; it does
 not measure startup speed. Ordinary launches never run a UI test sequence.
 
-The older Flutter diagnostics below describe the archived reference app only;
-they do not apply to the production Windows package.
+The older Flutter diagnostics below describe the historical implementation,
+whose source remains in Git history. They do not apply to the production Windows
+package; the obsolete project has been removed from the working tree.
 
 # Historical Flutter startup diagnostics
 

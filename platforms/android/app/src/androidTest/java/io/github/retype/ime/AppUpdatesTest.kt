@@ -17,8 +17,8 @@ import org.junit.runner.RunWith
 class AppUpdatesTest {
   private val context = InstrumentationRegistry.getInstrumentation().targetContext
 
-  private fun release(v: String, prerelease: Boolean = false, apk: Boolean = true): JSONObject {
-    val name = "retype-$v-android.apk"
+  private fun release(v: String, prerelease: Boolean = false, apk: Boolean = true, abi: String? = null): JSONObject {
+    val name = "retype-$v-android${abi?.let { "-$it" } ?: ""}.apk"
     val prefix = "https://github.com/L-Chris/retype/releases/download/v$v/"
     val assets = JSONArray()
     if (apk)
@@ -33,6 +33,21 @@ class AppUpdatesTest {
             .put("browser_download_url", prefix + "$name.sha256")
             .put("size", 100))
     return JSONObject().put("tag_name", "v$v").put("prerelease", prerelease).put("assets", assets)
+  }
+
+  @Test fun matchingArchitectureWinsAndOtherArchitecturesAreNeverSelected() {
+    val universal = release("0.8.0")
+    val arm = release("0.8.0", abi = "arm64-v8a")
+    val x86 = release("0.8.0", abi = "x86_64")
+    val combined = universal.getJSONArray("assets")
+    for (r in listOf(arm, x86)) for (i in 0 until r.getJSONArray("assets").length()) combined.put(r.getJSONArray("assets").getJSONObject(i))
+    val json = JSONArray().put(universal).toString()
+    assertTrue(AppUpdates.parseReleases(json, listOf("arm64-v8a"))!!.url.endsWith("-arm64-v8a.apk"))
+    assertTrue(AppUpdates.parseReleases(json, listOf("x86_64"))!!.url.endsWith("-x86_64.apk"))
+    assertNull(AppUpdates.parseReleases(JSONArray().put(arm).toString(), listOf("x86_64")))
+    arm.getJSONArray("assets").getJSONObject(0).put("browser_download_url", "https://example.com/retype.apk")
+    assertNull(AppUpdates.parseReleases(JSONArray().put(arm).toString(), listOf("arm64-v8a")))
+    assertTrue(AppUpdates.parseReleases(JSONArray().put(release("0.8.0")).toString(), listOf("arm64-v8a"))!!.url.endsWith("-android.apk"))
   }
 
   @Test

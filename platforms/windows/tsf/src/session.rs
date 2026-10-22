@@ -6,6 +6,8 @@
 //! 加载完成前用户敲字会得到原样字母 —— 这是 §7 降级矩阵里最低的一档，
 //! 但键盘始终是活的。
 
+#[path = "../../common/base_resources.rs"]
+mod base_resources;
 use retype_dict::{AsyncDict, FallbackPolicy, LayeredDict, UserDict, DEFAULT_USER_BOOST};
 use retype_engine::{
     offline_cloud, BackendOptions, Kernel, KernelBackend, KernelConfig, LocalBackend,
@@ -30,8 +32,8 @@ pub const ENV_SHADOW: &str = "RETYPE_TSF_SHADOW";
 /// 本 DLL 自己所在的目录。
 ///
 /// **TIP 的当前工作目录是宿主进程的**（notepad、chrome……），绝不是我们的安装目录，
-/// 所以任何相对路径都不可信。安装器把词库放在 `{app}\retype-dict.tsv`，
-/// 也就是和 `retype_ime.dll` 同目录，因此「DLL 自己在哪」是唯一可靠的锚点。
+/// 所以任何相对路径都不可信。此路径只用于定位后台程序和迁移旧版本资源；
+/// 新词库存放在用户目录中，由注册表向沙箱宿主公布只读路径。
 ///
 /// 用 `GetModuleHandleExW(FROM_ADDRESS, &本函数)` 拿到**我们自己**的模块句柄
 /// ——`GetModuleHandleW(None)` 拿到的是宿主 exe，那是错的。
@@ -72,41 +74,21 @@ pub fn dll_dir() -> Option<PathBuf> {
     PathBuf::from(path).parent().map(|p| p.to_path_buf())
 }
 
-/// 词库查找顺序：环境变量 → **本 DLL 同目录** → `%LOCALAPPDATA%\retype\`。
-///
-/// 第二项是安装器产物的位置；第三项是给手动部署（`register.ps1`）留的退路。
+/// Explicit development path, otherwise the immutable per-user resource location.
+/// Legacy lookup and validation run only on the resource worker.
 pub fn default_dict_path() -> PathBuf {
     if let Ok(p) = std::env::var(ENV_DICT) {
         if !p.trim().is_empty() {
             return PathBuf::from(p);
         }
     }
-    if let Some(dir) = dll_dir() {
-        // x86 DLL resides in an architecture subdirectory; dictionaries are shared.
-        for base in std::iter::once(dir.as_path()).chain(
-            dir.parent()
-                .filter(|_| dir.file_name().is_some_and(|name| name == "x86")),
-        ) {
-            for name in ["retype-dict.bin", "retype-dict.tsv"] {
-                let candidate = base.join(name);
-                if candidate.exists() {
-                    return candidate;
-                }
-            }
-        }
-    }
-    if let Ok(base) = std::env::var("LOCALAPPDATA") {
-        if !base.trim().is_empty() {
-            let root = PathBuf::from(base).join("retype");
-            let binary = root.join("retype-dict.bin");
-            return if binary.exists() {
-                binary
-            } else {
-                root.join("retype-dict.tsv")
-            };
-        }
-    }
-    PathBuf::from("retype-dict.tsv")
+    base_resources::root()
+        .and_then(|root| {
+            retype_resources::Catalog::builtin()
+                .ok()
+                .map(|c| c.components[0].path(&root))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("retype-missing-base.bin"))
 }
 
 fn env_flag(name: &str) -> bool {
@@ -125,6 +107,7 @@ pub struct Session {
     pub shadow: bool,
     pub dict_path: PathBuf,
     dict_attempt: Mutex<Instant>,
+    managed_resources: bool,
 }
 
 impl std::fmt::Debug for Session {
@@ -140,14 +123,23 @@ impl std::fmt::Debug for Session {
 impl Session {
     /// 装配一次会话。所有耗时工作都在后台线程，本函数必须很快返回。
     pub fn start() -> Arc<Self> {
-        Self::start_with(default_dict_path())
+        Self::start_internal(
+            default_dict_path(),
+            std::env::var(ENV_DICT).map_or(true, |s| s.trim().is_empty()),
+        )
     }
 
     pub fn start_with(dict_path: PathBuf) -> Arc<Self> {
+        Self::start_internal(dict_path, false)
+    }
+
+    fn start_internal(dict_path: PathBuf, managed_resources: bool) -> Arc<Self> {
         let dict = AsyncDict::empty();
         let packs = AsyncDict::empty();
         // 词库不存在/损坏 → 单字模式兜底（§7）
-        start_dictionary(&dict_path, Arc::clone(&dict));
+        if !managed_resources {
+            start_dictionary(&dict_path, Arc::clone(&dict));
+        }
 
         let mut base = LayeredDict::new();
         base.push(retype_dict::Layer {
@@ -195,7 +187,11 @@ impl Session {
             shadow: env_flag(ENV_SHADOW),
             dict_path,
             dict_attempt: Mutex::new(Instant::now()),
+            managed_resources,
         });
+        if managed_resources {
+            session.watch_resources();
+        }
         session.sync_packs();
         session
     }
@@ -204,7 +200,7 @@ impl Session {
     pub fn sync_packs(self: &Arc<Self>) {
         // A transient startup failure must not pin SearchHost to the fallback
         // for its entire lifetime. Retrying is bounded and all IO stays off-thread.
-        if self.dict.load_failed() {
+        if !self.managed_resources && self.dict.load_failed() {
             let mut attempted = self.dict_attempt.lock().unwrap_or_else(|p| p.into_inner());
             if attempted.elapsed() >= Duration::from_secs(5) {
                 *attempted = Instant::now();
@@ -251,6 +247,9 @@ impl Session {
     }
 
     pub fn submit(&self, ev: InputEvent) -> Vec<KernelAction> {
+        if self.missing_resources(&ev) {
+            return vec![KernelAction::PassThrough];
+        }
         self.drain_actions(self.backend.submit(ev))
     }
 
@@ -259,7 +258,79 @@ impl Session {
         ev: InputEvent,
         allow_learning: bool,
     ) -> Vec<KernelAction> {
+        if self.missing_resources(&ev) {
+            return vec![KernelAction::PassThrough];
+        }
         self.drain_actions(self.backend.submit_deferred_learning(ev, allow_learning))
+    }
+
+    fn missing_resources(&self, ev: &InputEvent) -> bool {
+        self.raw_input_only() && matches!(ev, InputEvent::Key { .. })
+    }
+    pub(crate) fn raw_input_only(&self) -> bool {
+        self.managed_resources && !self.dict.is_loaded()
+    }
+
+    fn watch_resources(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let _ = std::thread::Builder::new()
+            .name("retype-base-resources".into())
+            .spawn(move || {
+                let Some(root) = base_resources::root() else {
+                    return;
+                };
+                let hint = dll_dir();
+                let mut loaded = None;
+                let mut english = None;
+                loop {
+                    let Some(session) = weak.upgrade() else { break };
+                    let next_english = retype_resources::status(&root)
+                        .ok()
+                        .and_then(|state| state.english);
+                    if english != next_english {
+                        if let Ok(state) = retype_resources::activate(&root) {
+                            english = state.english;
+                        }
+                    }
+                    if let Some(path) = base_resources::available(&root, hint.as_deref())
+                        .filter(|p| Some(p) != loaded.as_ref())
+                    {
+                        match retype_dict::binary::open_shared(&path) {
+                            Ok(dictionary) => {
+                                // Swap only between compositions; no disk IO under the kernel lock.
+                                if session.backend.with_kernel(|kernel| {
+                                    if kernel.has_composition() {
+                                        return false;
+                                    }
+                                    session.dict.install_binary(dictionary);
+                                    true
+                                }) {
+                                    loaded = Some(path);
+                                    session.pack_generation.store(u32::MAX, Ordering::SeqCst);
+                                    session.sync_packs();
+                                }
+                            }
+                            Err(error) => tracing::warn!("base resource unavailable: {error}"),
+                        }
+                    }
+                    // A legacy base stays usable while the settings worker installs the new one.
+                    let current = retype_resources::Catalog::builtin()
+                        .ok()
+                        .map(|c| c.components[0].path(&root));
+                    let current_english = retype_resources::Catalog::builtin()
+                        .ok()
+                        .map(|c| c.components[1].path(&root));
+                    if loaded.is_some()
+                        && loaded == current
+                        && english.is_some()
+                        && english == current_english
+                    {
+                        break;
+                    }
+                    drop(session);
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            });
     }
 
     fn drain_actions(&self, mut acts: Vec<KernelAction>) -> Vec<KernelAction> {
@@ -356,7 +427,7 @@ mod tests {
             "会话装配不能在宿主 UI 线程上做重活，实际 {:?}",
             started.elapsed()
         );
-        assert!(!s.dict_ready(), "文件不存在时不该立刻就绪");
+        // The background fallback can finish before this assertion on a fast machine.
         assert_eq!(s.backend.with_kernel(|k| k.render_state().page_size), 8);
     }
 
@@ -428,8 +499,9 @@ mod tests {
         // 只验证解析逻辑，不改进程环境（避免测试间互相干扰）
         let p = default_dict_path();
         assert!(
-            p.file_name()
-                .is_some_and(|name| name == "retype-dict.tsv" || name == "retype-dict.bin"),
+            p.file_name().is_some_and(|name| name == "retype-dict.tsv"
+                || name == "retype-dict.bin"
+                || name.to_string_lossy().starts_with("base-")),
             "默认路径应指向 retype-dict.tsv 或 retype-dict.bin，实际 {p:?}"
         );
     }

@@ -27,6 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_DICT: &str = "data/dict/retype-dict.tsv";
+#[cfg(windows)]
+#[path = "../../common/base_resources.rs"]
+mod base_resources;
 
 struct Cli {
     dict: String,
@@ -803,7 +806,8 @@ fn explain(cli: &Cli, input: &str) {
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let cli = match parse_args(&argv) {
+    #[allow(unused_mut)]
+    let mut cli = match parse_args(&argv) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}\n");
@@ -812,6 +816,24 @@ fn main() {
         }
     };
 
+    #[cfg(windows)]
+    if let Some(root) = base_resources::root() {
+        let _ = retype_resources::activate(&root);
+        if !argv.iter().any(|arg| arg == "--dict") && !std::path::Path::new(DEFAULT_DICT).exists() {
+            if let Some(path) = base_resources::available(
+                &root,
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                    .as_deref(),
+            ) {
+                cli.dict = path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if let Some(path) = std::env::var_os("RETYPE_ENGLISH_DICT") {
+        let _ = retype_english::install(std::path::Path::new(&path));
+    }
     if let Some(input) = &cli.explain {
         explain(&cli, input);
         return;

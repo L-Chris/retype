@@ -24,10 +24,13 @@ data class KeyboardState(
     val generation: Long = 0,
     val composition: String = "",
     val candidates: List<String> = emptyList(),
+    val candidateTotal: Int = 0,
+    val candidatePages: Map<Int, List<String>> = emptyMap(),
     val pageStart: Int = 0,
     val selected: Int = 0,
     val chinese: Boolean = true,
     val ready: Boolean = false,
+    val resourcesMissing: Boolean = false,
     val password: Boolean = false,
     val numeric: Boolean = false,
     val enterLabel: String = "换行",
@@ -85,6 +88,15 @@ class RetypeImeService :
 
   override fun onCreate() {
     super.onCreate()
+    BaseResources.observe(applicationContext)
+    scope.launch {
+      BaseResources.state.collect { resources ->
+        if (state.resourcesMissing && resources.base != null && connection != null && !policy.literal) {
+          state = state.copy(ready = false, resourcesMissing = false)
+          initializeSession(epoch, policy, state.chinese, getSharedPreferences("settings", MODE_PRIVATE).getBoolean("flypy", false))
+        }
+      }
+    }
     saved.performAttach()
     saved.performRestore(null)
     registry.currentState = Lifecycle.State.RESUMED
@@ -126,6 +138,8 @@ class RetypeImeService :
               ::startVoice,
               { voiceInput?.finish() },
               ::cancelVoice,
+              ::requestCandidates,
+              { startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("dictionaries", true).putExtra("downloadResources", true)) },
           )
         }
       }
@@ -184,11 +198,21 @@ class RetypeImeService :
                   else -> "换行"
                 },
         )
+    initializeSession(current, fieldPolicy, chinese, flypy)
+  }
+
+  private fun initializeSession(current: Long, fieldPolicy: EditorPolicy, chinese: Boolean, flypy: Boolean) {
+    val preferences = getSharedPreferences("settings", MODE_PRIVATE)
     jobs.trySend {
       closeSession()
       if (fieldPolicy.literal || epoch != current) return@trySend
       try {
-        val file = DictionaryAssets.prepare(applicationContext)
+        val started = System.nanoTime()
+        val file = DictionaryAssets.available(applicationContext) ?: run {
+          withContext(Dispatchers.Main) { if (epoch == current) state = state.copy(ready = true, resourcesMissing = true) }
+          return@trySend
+        }
+        val dictionaryReady = System.nanoTime()
         handle =
             NativeBridge.create(
                 file.absolutePath,
@@ -198,19 +222,13 @@ class RetypeImeService :
                 fieldPolicy.learning,
                 DictionaryPacks.paths(applicationContext),
             )
-        NativeBridge.dispatch(
-            handle,
-            JSONObject()
-                .put("type", "englishOptions")
-                .put("enabled", preferences.getBoolean("english", true))
-                .put("spelling", preferences.getBoolean("spelling", true))
-                .toString(),
-        )
-        withContext(Dispatchers.Main) { if (epoch == current) state = state.copy(ready = true) }
+        NativeBridge.send(handle, NativeCommand.english(preferences.getBoolean("english", true), preferences.getBoolean("spelling", true)))
+        InputPerformance.startup(started, dictionaryReady, System.nanoTime())
+        withContext(Dispatchers.Main) { if (epoch == current) state = state.copy(ready = true, resourcesMissing = false) }
       } catch (e: Exception) {
         Log.e("retype", "Session initialization failed", e)
         withContext(Dispatchers.Main) {
-          if (epoch == current) state = state.copy(error = "词库加载失败，暂用直接输入", ready = true)
+          if (epoch == current) state = state.copy(error = "词库加载失败，暂用直接输入", ready = true, resourcesMissing = true)
         }
       }
     }
@@ -240,10 +258,11 @@ class RetypeImeService :
     }
   }
 
-  private fun command(json: JSONObject, passthrough: (() -> Boolean)? = null) {
+  private fun command(command: NativeCommand, passthrough: (() -> Boolean)? = null) {
+    val queuedAt = System.nanoTime()
     val current = epoch
     val ic = connection ?: return
-    val switching = json.optString("type") == "toggle"
+    val switching = command.operation == 4
     jobs.trySend {
       if (epoch != current) {
         if (switching) Log.d("retype", "mode switch discarded after editor change")
@@ -255,35 +274,42 @@ class RetypeImeService :
         }
         return@trySend
       }
-      if (json.optString("type") == "key" && json.optString("value") == "backspace" && json.optInt("mods") and 14 == 0) {
+      if (command.operation == 1 && command.text == "backspace" && command.flags and 14 == 0) {
         val paired = withContext(Dispatchers.Main) {
           epoch == current && connection === ic && !composing && symbolCompletionEnabled() && symbols.backspace(ic)
         }
         if (paired) { withContext(Dispatchers.Main) { activityClock.backspace() }; return@trySend }
       }
-      val update = JSONObject(NativeBridge.dispatch(handle, json.toString()))
+      val nativeStarted = System.nanoTime()
+      android.os.Trace.beginSection("retype.native_input")
+      val update = try { NativeBridge.send(handle, command) } finally { android.os.Trace.endSection() }
+      val nativeFinished = System.nanoTime()
       if (switching)
           Log.d(
               "retype",
-              "mode result chinese=${update.getBoolean("chinese")} epoch=$current",
+              "mode result chinese=${update.chinese} epoch=$current",
           )
-      val generation = update.getLong("generation")
-      Log.d(
+      val generation = update.generation
+      if (BuildConfig.DEBUG) Log.d(
           "retype",
-          "candidate update epoch=$current generation=$generation letters=${update.getString("composition").length} candidates=${update.getJSONArray("candidates").length()}")
+          "candidate update epoch=$current generation=$generation letters=${update.composition.length} candidates=${update.candidateTotal}")
       var accepted = false
+      var editorStarted = 0L
+      var editorFinished = 0L
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic) return@withContext
-        val commits = update.getJSONArray("commits")
+        val commits = update.commits
         val committedLanguage = state.chinese
         accepted = true
         ic.beginBatchEdit()
+        editorStarted = System.nanoTime()
+        android.os.Trace.beginSection("retype.editor_apply")
         try {
-          for (i in 0 until commits.length()) {
-            val text = commits.getString(i)
-            val raw = if (i == commits.length() - 1) when (json.optString("type")) {
-              "key" -> json.optString("value").takeIf { json.optInt("mods") and 14 == 0 }
-              "literal" -> json.optString("text")
+          for (i in commits.indices) {
+            val text = commits[i]
+            val raw = if (i == commits.lastIndex) when (command.operation) {
+              1 -> command.text.takeIf { command.flags and 14 == 0 }
+              2 -> command.text
               else -> null
             } else null
             val committed = symbols.commit(ic, text, raw, committedLanguage, symbolCompletionEnabled())
@@ -293,36 +319,26 @@ class RetypeImeService :
                   .record(activityClock.commit(text, committedLanguage))
             }
           }
-          val composition = update.getString("composition")
+          val composition = update.composition
           if (composition.isNotEmpty()) {
             accepted = symbols.compose(ic, composition) && accepted
             composing = true
           } else {
-            if (composing && commits.length() == 0) accepted = symbols.commit(ic, "", enabled = symbolCompletionEnabled()) && accepted
+            if (composing && commits.isEmpty()) accepted = symbols.commit(ic, "", enabled = symbolCompletionEnabled()) && accepted
             ic.finishComposingText()
             symbols.finish()
             composing = false
           }
-          if (update.getBoolean("passThrough")) {
+          if (update.passThrough) {
             passthrough?.invoke()
           }
-          val key = json.optString("value")
+          val key = command.text
           if (!policy.password && !policy.literal && accepted &&
-              (switching || json.optString("type") == "choose" ||
+              (switching || command.operation == 3 ||
                key in setOf("space", "enter", "tab", "left", "right", "up", "down"))) {
             finishStatistics()
           }
-          val candidates = update.getJSONArray("candidates")
-          state =
-              state.copy(
-                  generation = generation,
-                  composition = composition,
-                  candidates = List(candidates.length()) { candidates.getString(it) },
-                  pageStart = update.getInt("pageStart"),
-                  selected = update.getInt("selected"),
-                  chinese = update.getBoolean("chinese"),
-                  ready = true,
-              )
+          state = state.withNativeUpdate(update)
           if (switching)
               getSharedPreferences("settings", MODE_PRIVATE)
                   .edit()
@@ -334,17 +350,14 @@ class RetypeImeService :
                   "mode UI chinese=${state.chinese} lifecycle=${registry.currentState}",
               )
         } finally {
-          ic.endBatchEdit()
+          try { ic.endBatchEdit() } finally {
+            android.os.Trace.endSection()
+            editorFinished = System.nanoTime()
+          }
         }
       }
-      NativeBridge.dispatch(
-          handle,
-          JSONObject()
-              .put("type", "ack")
-              .put("generation", generation)
-              .put("accepted", accepted)
-              .toString(),
-      )
+      NativeBridge.acknowledge(handle, generation, accepted)
+      InputPerformance.record(queuedAt, nativeStarted, nativeFinished, editorStarted, editorFinished, update.candidateTotal)
     }
   }
 
@@ -421,7 +434,7 @@ class RetypeImeService :
       direct(value)
       return
     }
-    command(JSONObject().put("type", "key").put("value", value).put("mods", mods)) { direct(value) }
+    command(NativeCommand.key(value, mods)) { direct(value) }
   }
 
   private fun literal(value: String) {
@@ -429,7 +442,7 @@ class RetypeImeService :
       direct(value)
       return
     }
-    command(JSONObject().put("type", "literal").put("text", value)) { direct(value) }
+    command(NativeCommand.literal(value)) { direct(value) }
   }
 
   private fun paste(value: String) {
@@ -437,26 +450,46 @@ class RetypeImeService :
     val ic = connection ?: return
     jobs.trySend {
       if (epoch != current) return@trySend
-      if (handle != 0L) NativeBridge.dispatch(handle, JSONObject().put("type", "reset").toString())
+      if (handle != 0L) NativeBridge.send(handle, NativeCommand.reset())
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic) return@withContext
         finishEditorStatistics()
         symbols.reset()
         ic.commitText(value, 1)
-        state = state.copy(composition = "", candidates = emptyList())
+        state = state.copy(composition = "", candidates = emptyList(), candidateTotal = 0, candidatePages = emptyMap())
       }
     }
   }
 
   private fun choose(index: Int, generation: Long) {
     if (!policy.password) activityClock.tick(state.chinese)
-    command(JSONObject().put("type", "choose").put("index", index).put("generation", generation))
+    command(NativeCommand.choose(index, generation))
   }
 
   private fun toggle() {
     Log.d("retype", "mode switch requested epoch=$epoch literal=${policy.literal}")
     if (policy.literal) return
-    command(JSONObject().put("type", "toggle"))
+    if (state.resourcesMissing) {
+      finishStatistics()
+      state = state.copy(chinese = !state.chinese)
+      getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("chinese", state.chinese).apply()
+      return
+    }
+    command(NativeCommand.toggle())
+  }
+
+  private fun requestCandidates(generation: Long, start: Int) {
+    val current = epoch
+    if (generation != state.generation || start < 0 || start >= state.candidateTotal || state.candidatePages.containsKey(start)) return
+    jobs.trySend {
+      if (epoch != current || handle == 0L) return@trySend
+      val page = NativeBridge.candidates(handle, generation, start, 64) ?: return@trySend
+      withContext(Dispatchers.Main) {
+        if (epoch == current && state.generation == generation) {
+          state = state.copy(candidatePages = state.candidatePages + (start to page.asList()))
+        }
+      }
+    }
   }
 
   private fun openSettings() {
@@ -488,10 +521,10 @@ class RetypeImeService :
     }
     val current = epoch; val ic = connection ?: return
     val generation = ++voiceGeneration; voicePending = true
-    if (state.composition.isNotEmpty()) command(JSONObject().put("type", "key").put("value", if (state.chinese) "space" else "enter"))
+    if (state.composition.isNotEmpty()) command(NativeCommand.key(if (state.chinese) "space" else "enter"))
     jobs.trySend {
       if (epoch != current || voiceGeneration != generation) return@trySend
-      if (handle != 0L) NativeBridge.dispatch(handle,JSONObject().put("type","reset").toString())
+      if (handle != 0L) NativeBridge.send(handle, NativeCommand.reset())
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic || voiceGeneration != generation) return@withContext
         finishEditorStatistics(); ic.finishComposingText(); composing = false
@@ -500,7 +533,7 @@ class RetypeImeService :
         val after = ic.getTextAfterCursor(32,0)?.toString()
         val selected = ic.getSelectedText(0)?.toString()
         if (before == null || after == null) { voicePending = false; notice("应用不允许确认输入位置"); return@withContext }
-        state = state.copy(composition="",candidates=emptyList(),voice=VoiceState())
+        state = state.copy(composition="",candidates=emptyList(),candidateTotal=0,candidatePages=emptyMap(),voice=VoiceState())
         voicePending = false
         voiceInput = VoiceInput(applicationContext,scope,
           { snapshot -> if(epoch == current && connection === ic && voiceGeneration == generation) state = state.copy(voice=snapshot) },
@@ -511,7 +544,7 @@ class RetypeImeService :
               } else if (ic.commitText(text,1)) {
                 voiceInput = null; state = state.copy(voice=null)
                 TypingStatistics.get(applicationContext).recordVoice(text)
-                jobs.trySend { if(epoch == current && handle != 0L) NativeBridge.dispatch(handle,JSONObject().put("type","voiceLearn").put("text",text).toString()) }
+                jobs.trySend { if(epoch == current && handle != 0L) NativeBridge.send(handle, NativeCommand.voiceLearn(text)) }
               } else state = state.copy(voice=VoiceState("Error",text,error="应用拒绝上屏，识别文字保留在此处"))
             }
           }).also { it.start() }
@@ -533,13 +566,13 @@ class RetypeImeService :
     // Drain preceding keys, then capture the editor on its required main thread.
     jobs.trySend {
       if (epoch != current) return@trySend
-      if (handle != 0L) NativeBridge.dispatch(handle, JSONObject().put("type", "reset").toString())
+      if (handle != 0L) NativeBridge.send(handle, NativeCommand.reset())
       withContext(Dispatchers.Main) {
         if (epoch != current || connection !== ic) return@withContext
         ic.finishComposingText()
         symbols.reset()
         composing = false
-        state = state.copy(composition = "", candidates = emptyList())
+        state = state.copy(composition = "", candidates = emptyList(), candidateTotal = 0, candidatePages = emptyMap())
         translationJob =
             scope.launch {
               try {
@@ -602,8 +635,8 @@ class RetypeImeService :
           "composition reset by editor selection epoch=$epoch selection=$newSelStart:$newSelEnd composing=$candidatesStart:$candidatesEnd")
       finishEditorStatistics()
       composing = false
-      state = state.copy(composition = "", candidates = emptyList())
-      command(JSONObject().put("type", "reset"))
+      state = state.copy(composition = "", candidates = emptyList(), candidateTotal = 0, candidatePages = emptyMap())
+      command(NativeCommand.reset())
     }
   }
 
@@ -635,7 +668,7 @@ class RetypeImeService :
       finishEditorStatistics()
       connection?.finishComposingText()
       composing = false
-      command(JSONObject().put("type", "reset"))
+      command(NativeCommand.reset())
       return super.onKeyDown(keyCode, event)
     }
     val value =

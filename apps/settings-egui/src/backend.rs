@@ -1,5 +1,7 @@
 //! Settings persistence and blocking operations, independent of the UI.
 use crate::statistics;
+#[path = "../../../platforms/windows/common/base_resources.rs"]
+mod base_resources;
 use retype_types::PinyinScheme;
 use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
@@ -27,6 +29,45 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub const KEY: &str = "Software\\retype";
 pub fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain([0]).collect()
+}
+pub fn prepare_base() -> std::result::Result<retype_resources::Status, String> {
+    let root = base_resources::root().ok_or("找不到基础词库目录")?;
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .map(|p| {
+            if p.file_name().is_some_and(|name| name == "settings") {
+                p.parent().map_or(p.clone(), Path::to_path_buf)
+            } else {
+                p
+            }
+        });
+    retype_resources::migrate(&root, &base_resources::legacy(directory.as_deref()))
+}
+#[allow(unsafe_code)]
+pub fn choose_resource_bundle() -> Result<Option<PathBuf>> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+    let filter = wide("retype 词库包\0*.retype-resources\0所有文件\0*.*\0");
+    let mut filename = [0u16; 32768];
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(filename.as_mut_ptr()),
+        nMaxFile: filename.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    // SAFETY: buffers remain alive and writable for the synchronous native picker.
+    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
+        return Ok(None);
+    }
+    let length = filename
+        .iter()
+        .position(|c| *c == 0)
+        .unwrap_or(filename.len());
+    Ok(Some(PathBuf::from(String::from_utf16_lossy(
+        &filename[..length],
+    ))))
 }
 
 #[allow(unsafe_code)]
@@ -536,6 +577,8 @@ fn elevate(installer: &Path) -> Result<u32> {
 }
 
 pub enum Task {
+    BaseStatus,
+    BaseInstall(Option<PathBuf>, Arc<AtomicBool>),
     Packs,
     SetPack(usize, bool, Arc<AtomicBool>),
     Statistics,
@@ -544,6 +587,9 @@ pub enum Task {
     Skip(String),
 }
 pub enum Event {
+    BaseStatus(std::result::Result<retype_resources::Status, String>),
+    BaseProgress(f32),
+    BaseDone(std::result::Result<retype_resources::Status, String>),
     Packs(Vec<bool>),
     PackProgress(f32),
     PackDone(std::result::Result<(), String>),
@@ -582,6 +628,15 @@ pub fn worker(
             worker_busy.store(true, Ordering::Relaxed);
             let _guard = BusyGuard(Arc::clone(&worker_busy));
             match task {
+                Task::BaseStatus => emit(Event::BaseStatus(prepare_base())),
+                Task::BaseInstall(source, cancel) => emit(Event::BaseDone((|| {
+                    let root = base_resources::root().ok_or("找不到基础词库目录")?;
+                    if let Some(source) = source {
+                        retype_resources::import_bundle(&root, &source, &cancel)
+                    } else {
+                        retype_resources::download(&root, &cancel, |p| emit(Event::BaseProgress(p)))
+                    }
+                })())),
                 Task::Packs => match packs() {
                     Ok(packs) => emit(Event::Packs(
                         packs

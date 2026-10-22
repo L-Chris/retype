@@ -46,6 +46,7 @@ jobs:
             -p retype-cloud \
             -p retype-engine \
             -p retype-english \
+            -p retype-resources --features retype-resources/download \
             -p retype-updater \
             -p retype-ffi
 
@@ -61,6 +62,7 @@ jobs:
             -p retype-cloud \
             -p retype-engine \
             -p retype-english \
+            -p retype-resources --features retype-resources/download \
             -p retype-updater \
             -p retype-ffi \
             -- -D warnings

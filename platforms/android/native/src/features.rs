@@ -23,6 +23,39 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "resourceCatalog" => {
+            let catalog = retype_resources::Catalog::builtin()?;
+            Ok(
+                json!({"components":catalog.components.iter().map(|c|json!({"id":c.id,"url":c.url(),"bytes":c.bytes,"sha256":c.sha256,"compressedBytes":c.compressed_bytes,"compressedSha256":c.compressed_sha256})).collect::<Vec<_>>()}),
+            )
+        }
+        "resourceStatus" | "resourcePrepare" | "resourceInstall" | "resourceImport" => {
+            let root = Path::new(field(&v, "root")?);
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let state = match field(&v, "type")? {
+                "resourcePrepare" => {
+                    let paths: Vec<std::path::PathBuf> =
+                        serde_json::from_value(v["legacy"].clone()).unwrap_or_default();
+                    retype_resources::migrate(root, &paths)?
+                }
+                "resourceInstall" => retype_resources::install_archive(
+                    root,
+                    field(&v, "id")?,
+                    Path::new(field(&v, "source")?),
+                    &cancelled,
+                )?,
+                "resourceImport" => retype_resources::import_bundle(
+                    root,
+                    Path::new(field(&v, "source")?),
+                    &cancelled,
+                )?,
+                _ => retype_resources::status(root)?,
+            };
+            if let Some(english) = &state.english {
+                retype_english::install(english)?;
+            }
+            serde_json::to_value(state).map_err(|e| e.to_string())
+        }
         "symbolRules" => {
             let key = field(&v, "key")?.chars().next().ok_or("Missing symbol")?;
             let rules = retype_types::symbols::rules(key, v["chinese"].as_bool().unwrap_or(true));
@@ -251,8 +284,12 @@ fn sync(v: Value) -> Result<Value> {
     let learning = {
         let _lock = super::LEARNING_IO.lock().unwrap_or_else(|p| p.into_inner());
         let system: Arc<dyn retype_pinyin::Lexicon> =
-            retype_dict::binary::open_shared(Path::new(field(&v, "dictionary")?))
-                .map_err(|e| e.to_string())?;
+            match v["dictionary"].as_str().filter(|p| !p.is_empty()) {
+                Some(path) => {
+                    retype_dict::binary::open_shared(Path::new(path)).map_err(|e| e.to_string())?
+                }
+                None => Arc::new(retype_dict::MemoryDict::default()),
+            };
         let mut store =
             retype_learning_store::store::Store::open(Path::new(field(&v, "database")?), system)
                 .map_err(|e| e.to_string())?;

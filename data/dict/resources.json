@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "components": [
+    {
+      "id": "base",
+      "format": "RTDICT02",
+      "bytes": 99357604,
+      "sha256": "c4575294b796ee7ac36f6b6a7ecf0d38f66ad86a2597d38fe1f4955774b4633a",
+      "compressedBytes": 32230991,
+      "compressedSha256": "33ebb1e31638d11c678058f40fbcea4cffc39daf018e6e02ff06f2a4d2bc3d42"
+    },
+    {
+      "id": "english",
+      "format": "RTENGL01",
+      "bytes": 3044297,
+      "sha256": "e1098fbaa665d52788f6ed1fde2a00eb8145e459c41583f5e59f4678db7619bc",
+      "compressedBytes": 1009861,
+      "compressedSha256": "98911e25fb8362094a791f516356861858fe9aa2899e622e61aa13230e8c8009"
+    }
+  ]
+}

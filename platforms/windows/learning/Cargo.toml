@@ -17,6 +17,7 @@ path = "src/main.rs"
 required-features = ["broker"]
 
 [dependencies]
+retype-resources = { path = "../../../core/resources" }
 retype-learning-store = { path = "../../../core/learning" }
 retype-dict.workspace = true
 retype-pinyin.workspace = true
@@ -27,6 +28,7 @@ tracing.workspace = true
 rusqlite = { version = "0.40", features = ["bundled", "backup"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Registry"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Isolation",
     "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes",

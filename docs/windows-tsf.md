@@ -9,8 +9,8 @@
 Windows 输入法必须是 **TSF（Text Services Framework）Text Input Processor**：一个 COM in-proc DLL，由系统注入到**每一个**需要文本输入的进程里，实现 `ITfTextInputProcessorEx`。
 
 - Flutter Windows 只能产出独立 `.exe`（Win32 + ANGLE/Direct3D），**无法注册为 TIP**。
-- 因此 Flutter 在本项目里只承担 `apps/settings`（设置界面）。
-- Android 端同理：必须是 `InputMethodService`（Kotlin），Flutter 只能做设置页。
+- 当前 Windows 设置程序使用 `apps/settings-egui` 中的 Rust/egui 实现；旧 Flutter 工程已移除，历史实现可从 Git 历史查看。
+- Android 使用 `platforms/android` 中的 Kotlin `InputMethodService` 与 Compose 键盘、设置页面。
 
 ---
 

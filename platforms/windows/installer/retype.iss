@@ -39,9 +39,6 @@
 #ifndef X86Dir
   #define X86Dir "target\i686-pc-windows-msvc\release"
 #endif
-#ifndef DictFile
-  #define DictFile "data\dict\retype-dict.tsv"
-#endif
 
 ; ---- 固定标识 ------------------------------------------------
 #define MyAppName        "retype 输入法"
@@ -87,7 +84,7 @@ OutputDir={#RepoRoot}\{#OutDir}
 OutputBaseFilename=retype-{#MyAppVersion}-windows-x64-setup
 ; [Files] 里 Source 的相对路径统一以 RepoRoot 为基准
 SourceDir={#RepoRoot}
-SetupIconFile={#RepoRoot}\apps\settings\windows\runner\resources\app_icon.ico
+SetupIconFile={#RepoRoot}\assets\retype.ico
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={code:GetPayloadDir}\retype.ico
 LicenseFile={#RepoRoot}\LICENSE
@@ -112,7 +109,7 @@ RestartApplications=no
 [Files]
 Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "platforms\windows\installer\refresh-hosts.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-Source: "apps\settings\windows\runner\resources\app_icon.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
+Source: "assets\retype.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
 ; Standalone Rust settings; keep the installed name compatible with older TIPs.
 Source: "{#BaseDir}\retype-settings-egui.exe"; DestDir: "{code:GetPayloadDir}\settings"; DestName: "retype.exe"; Flags: ignoreversion
 ; 路径都相对 SourceDir（= RepoRoot）
@@ -133,9 +130,7 @@ Source: "{#BaseDir}\retype-sync-host.exe"; DestDir: "{code:GetPayloadDir}"; Flag
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; Converts optional dictionaries downloaded later in Settings. No optional data is bundled.
 Source: "{#BaseDir}\retype-dict-build.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-; 万象 Base 已注音词库
-Source: "{#DictFile}"; DestDir: "{code:GetPayloadDir}"; DestName: "retype-dict.tsv"; Flags: ignoreversion
-Source: "data\dict\retype-dict.bin"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+; Base dictionaries are downloaded by Settings; the installer contains no vocabulary.
 ; 许可与第三方数据署名（万象词库为 CC BY 4.0）
 Source: "LICENSE"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "NOTICE.txt"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
@@ -158,7 +153,7 @@ Root: HKLM; Subkey: "{#TipRegKey}\InprocServer32"; Flags: deletekey
 [Icons]
 Name: "{group}\retype 设置"; Filename: "{code:GetPayloadDir}\settings\retype.exe"; Comment: "调整输入方案和更新设置"
 Name: "{group}\添加到当前用户的键盘列表"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{code:GetPayloadDir}\user-profile.ps1"""; Comment: "为当前登录用户添加 retype，不更改默认输入法"
-Name: "{group}\retype 调试台"; Filename: "{code:GetPayloadDir}\retype-diag.exe"; Parameters: "--dict ""{code:GetPayloadDir}\retype-dict.tsv"""; Comment: "在终端里体验完整输入链路（不需要注销）"
+Name: "{group}\retype 调试台"; Filename: "{code:GetPayloadDir}\retype-diag.exe"; Parameters: ""; Comment: "在终端里体验完整输入链路（不需要注销）"
 Name: "{group}\检查更新"; Filename: "{code:GetPayloadDir}\settings\retype.exe"; Parameters: "--updates"; Comment: "在设置的关于页面检查更新"
 Name: "{group}\许可与署名"; Filename: "{code:GetPayloadDir}\NOTICE.txt"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
@@ -282,7 +277,7 @@ begin
       UpdateMessage + #13#10 +
       'Windows 搜索等宿主已刷新；其他正在运行的应用会在下次打开时加载新版。' + #13#10 + #13#10 +
       '【当前版本的能力边界】' + #13#10 +
-      'M1 预览已接入中文组字、候选窗和本地词库，包含 32 位与 64 位输入组件。' + #13#10 +
+      '首次使用请在「设置 → 词库」下载基础词库；升级会复用已有词库。下载完成后可离线输入。' + #13#10 +
       '语言栏「中 / A」可点击切换中英，右键「设置」可切换全拼 / 小鹤双拼。' + #13#10 +
       '全拼输入 nihao，小鹤输入 nihc，空格选「你好」；1–8 或鼠标选词，- / = 翻页，Esc 取消，回车输入原拼音。' + #13#10 +
       '应用兼容性仍在验证中。';

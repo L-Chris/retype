@@ -1,6 +1,8 @@
 # ADR-0003 · monorepo 布局，Flutter 降级为设置界面
 
-**状态**：已接受 · **日期**：M0
+**状态**：部分已取代 · **日期**：M0
+
+monorepo 与跨平台 Rust 内核的决定仍有效；下文的 Flutter 设置界面方案已由 Windows Rust/egui 与 Android Kotlin/Compose 取代。旧工程已移除，品牌资源迁至 `assets/`。当前结构见 [ARCHITECTURE.md](../../ARCHITECTURE.md) 与 [设置程序说明](../../apps/settings-egui/README.md)；以下保留原决策记录。
 
 ## 背景
 

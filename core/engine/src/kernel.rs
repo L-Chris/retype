@@ -106,6 +106,7 @@ pub struct Kernel {
     decoder: Decoder,
     dict: Arc<dyn Lexicon>,
     learner: Arc<dyn LearningStore>,
+    english: Arc<retype_english::Vocabulary>,
     cloud: Arc<CloudClient>,
 
     ctx: ContextSnapshot,
@@ -168,6 +169,7 @@ impl Kernel {
             cfg,
             dict,
             learner,
+            english: retype_english::current(),
             cloud,
             ctx: ContextSnapshot::empty(),
             gen: 0,
@@ -359,6 +361,9 @@ impl Kernel {
         source: InputSource,
         actions: &mut Vec<KernelAction>,
     ) {
+        if !self.has_composition() {
+            self.english = retype_english::current();
+        }
         if !self.is_chinese() && self.cfg.english_enabled {
             self.on_english_key(key, mods, actions);
             return;
@@ -1032,6 +1037,10 @@ impl Kernel {
     }
 
     /// 学习器句柄（后端执行 `SideEffect::Learn` 时用）。
+    pub fn english_dictionary(&self) -> Arc<retype_english::Vocabulary> {
+        Arc::clone(&self.english)
+    }
+
     pub fn learner(&self) -> &Arc<dyn LearningStore> {
         &self.learner
     }

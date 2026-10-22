@@ -793,6 +793,12 @@ impl KeyEventSink_Impl {
             }
             return Ok(result.is_ok().into());
         }
+        if state
+            .session()
+            .is_some_and(|session| session.raw_input_only())
+        {
+            return Ok(false.into());
+        }
         let Some(key) =
             keymap::translate_event((vk.0 & 0xffff) as u16, ((lp.0 >> 16) & 0xff) as u32)
         else {

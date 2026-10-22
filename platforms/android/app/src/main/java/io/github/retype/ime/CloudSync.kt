@@ -46,10 +46,10 @@ object CloudSync {
                         .put("config", cfg)
                         .put("password", password)
                 if (!test) {
-                    val dictionary = DictionaryAssets.prepare(context)
+                    val dictionary = DictionaryAssets.available(context)
                     operation
                         .put("root", File(context.filesDir, "sync").absolutePath)
-                        .put("dictionary", dictionary.absolutePath)
+                        .put("dictionary", dictionary?.absolutePath ?: "")
                         .put("database", File(context.filesDir, "learning.db").absolutePath)
                         .put("values", base)
                         .put("statistics", TypingStatistics.get(context).export())

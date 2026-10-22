@@ -73,6 +73,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v7
+        if: matrix.arch == 'x64'
+        with:
+          name: dictionary-resources
+          retention-days: 7
+          path: |
+            .ci/dictionaries/*.gz
+            .ci/dictionaries/*.retype-resources
+            .ci/dictionaries/resources.json
+          if-no-files-found: error
+
   settings:
     name: Settings release binary
     runs-on: windows-latest

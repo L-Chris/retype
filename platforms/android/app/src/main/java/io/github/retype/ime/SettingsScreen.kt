@@ -1,6 +1,8 @@
 package io.github.retype.ime
 
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
@@ -25,11 +27,15 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.*
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(startDictionary: Boolean = false, downloadResources: Boolean = false) {
   val context = LocalContext.current
   val store = remember { AppStore(context) }
   val scope = rememberCoroutineScope()
-  var page by rememberSaveable { mutableIntStateOf(-1) }
+  var page by rememberSaveable { mutableIntStateOf(if (startDictionary) 1 else -1) }
+  LaunchedEffect(Unit) {
+    BaseResources.observe(context)
+    if (downloadResources) BaseResources.start(context)
+  }
   var revision by remember { mutableIntStateOf(0) }
   var busy by remember { mutableStateOf(false) }
   var message by remember { mutableStateOf<String?>(null) }
@@ -110,6 +116,7 @@ fun SettingsScreen() {
                     .padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
+              if (page < 0 || page == 1) BaseResourceSection()
               if (page < 0) {
                 Text(
                     "设置",
@@ -423,6 +430,34 @@ private fun PacksPage(busy: Boolean, work: (suspend () -> String) -> Unit) {
           "${p.getString("description")} · %.1f MB".format(p.getLong("bytes") / 1048576.0),
           style = MaterialTheme.typography.bodySmall,
       )
+    }
+  }
+}
+
+@Composable
+private fun BaseResourceSection() {
+  val context = LocalContext.current
+  val resources by BaseResources.state.collectAsState()
+  val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    if (uri != null) {
+      runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+      BaseResources.start(context, uri)
+    }
+  }
+  if (resources.checked && !resources.ready) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text(if (resources.base == null) "下载基础词库后即可离线输入" else "补充基础词库资源", style = MaterialTheme.typography.titleSmall)
+      if (resources.busy) {
+        LinearProgressIndicator(progress = { resources.progress }, modifier = Modifier.fillMaxWidth())
+        Text(resources.message, style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = { BaseResources.cancel(context) }) { Text("取消") }
+      } else {
+        if (resources.message.isNotEmpty()) Text(resources.message, style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Button(onClick = { BaseResources.start(context) }) { Text("下载词库 · %.1f MiB".format(resources.bytes / 1048576.0)) }
+          TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("本地导入") }
+        }
+      }
     }
   }
 }

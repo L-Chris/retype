@@ -5,7 +5,7 @@
 .DESCRIPTION
   产物落在 dist\windows\：
     retype_ime.dll        TSF TIP（64 位）
-    retype-dict.tsv       已注音词库
+    基础词库独立输出至 dist\dictionaries，不打入安装器
     retype-diag.exe       终端调试台
 
   同时产出 i686（32 位）DLL —— 32 位进程只会加载 32 位 TIP，
@@ -73,6 +73,9 @@ if (-not $NoTest) {
   Step "3/5 跳过自检"
 }
 
+cargo run --release -p retype-resource-build -- --out dist/dictionaries --check
+if ($LASTEXITCODE -ne 0) { throw "资源构建失败" }
+
 Step "4/5 首刷延迟基准"
 $diag = Join-Path $repoRoot 'target\release\retype-diag.exe'
 if (Test-Path $dictTsv) {
@@ -87,13 +90,11 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item (Join-Path $repoRoot 'target\release\retype_ime.dll') $dist -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $dist 'x86') | Out-Null
 Copy-Item (Join-Path $repoRoot 'target\i686-pc-windows-msvc\release\retype_ime.dll') (Join-Path $dist 'x86') -Force
-Copy-Item (Join-Path $repoRoot 'data\dict\retype-dict.bin') $dist -Force
 Copy-Item $diag $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-learning-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-ai-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-sync-host.exe') $dist -Force
 Copy-Item (Join-Path $repoRoot 'target\release\retype-dict-build.exe') $dist -Force
-if (Test-Path $dictTsv) { Copy-Item $dictTsv $dist -Force }
 Copy-Item (Join-Path $repoRoot 'LICENSE') $dist -Force
 Copy-Item (Join-Path $repoRoot 'NOTICE.txt') $dist -Force
 Copy-Item (Join-Path $repoRoot 'data\dict\raw\wanxiang-base\LICENSE') (Join-Path $dist 'LICENSE-wanxiang') -Force

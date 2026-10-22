@@ -22,6 +22,10 @@ Number keys, Space and clicking select these candidates using the usual Chinese-
 
 ## Data and privacy
 
+The base English vocabulary is downloaded separately from the application and
+read from a validated, read-only mapping. Install it once in Settings → Dictionary;
+subsequent completion is offline. See [base resources](base-resources.md).
+
 The bundled vocabulary is derived from SymSpell's 82,765-entry frequency file, pinned in `data/dict/raw/english/SOURCE.txt`. The index is compiled into shared, read-only module data, with no runtime vocabulary download or heap-sized dictionary construction. This uses the upstream frequency data, not the SymSpell correction algorithm. Notices and licenses are included in the installer.
 
 Successfully committed English words accumulate local usage counts separately from Chinese learning. A word becomes a personal suggestion after at least two observations; one-off input is not immediately promoted. Personal vocabulary is bounded to 10,000 words and persists through the existing learning broker. Existing WebDAV sync also carries English usage and input preferences; repeated synchronization merges per-device counts without double counting.

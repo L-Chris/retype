@@ -24,6 +24,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -65,6 +66,8 @@ fun Keyboard(
     onVoice: () -> Unit = {},
     onVoiceFinish: () -> Unit = {},
     onVoiceCancel: () -> Unit = {},
+    onRequestCandidates: (Long, Int) -> Unit = { _, _ -> },
+    onInstallResources: () -> Unit = onSettings,
 ) {
   val context = LocalContext.current
   val clipboard = remember { LanClipboard.get(context) }
@@ -72,6 +75,15 @@ fun Keyboard(
   var uppercase by remember { mutableStateOf(false) }
   var symbols by remember { mutableStateOf(false) }
   var expanded by remember { mutableStateOf(false) }
+  val grid = rememberLazyGridState()
+  LaunchedEffect(expanded, state.generation) {
+    if (expanded) {
+      grid.scrollToItem(0)
+      snapshotFlow { grid.layoutInfo.visibleItemsInfo.map { it.index / 64 * 64 }.distinct().ifEmpty { listOf(0) } }
+          .distinctUntilChanged()
+          .collect { pages -> pages.forEach { onRequestCandidates(state.generation, it) } }
+    }
+  }
   LaunchedEffect(state.password, state.numeric) {
     symbols = state.numeric
     uppercase = false
@@ -111,6 +123,7 @@ fun Keyboard(
                     state.voice != null -> "语音输入"
                     state.translation != null -> state.translation
                     state.password -> "安全输入"
+                    state.resourcesMissing -> "下载基础词库"
                     state.error != null -> state.error
                     !state.ready -> "加载词库…"
                     else -> null
@@ -135,7 +148,7 @@ fun Keyboard(
                 else if (status != null)
                   Text(
                     status,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).clickable(enabled = state.resourcesMissing, onClick = onInstallResources),
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -149,7 +162,7 @@ fun Keyboard(
                 Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
               ) {
-                state.candidates.drop(state.pageStart).take(8).forEachIndexed { index, text ->
+                state.candidates.forEachIndexed { index, text ->
                   Candidate(text, index, state.pageStart + index == state.selected) {
                     onChoose(state.pageStart + index, state.generation)
                   }
@@ -178,20 +191,23 @@ fun Keyboard(
           } else if (expanded) {
             Box(Modifier.fillMaxWidth().height(205.dp)) {
               LazyVerticalGrid(
+                  state = grid,
                   columns = GridCells.Adaptive(72.dp),
                   modifier = Modifier.fillMaxSize(),
                   contentPadding = PaddingValues(bottom = 48.dp)) {
-                    itemsIndexed(state.candidates) { index, text ->
+                    items(state.candidateTotal) { index ->
+                      val text = state.candidatePages[index / 64 * 64]?.getOrNull(index % 64)
+                          ?: state.candidates.getOrNull(index - state.pageStart)
                       Box(
                           Modifier.heightIn(min = 48.dp)
-                              .semantics { contentDescription = "candidate-$text" }
-                              .clickable {
+                              .semantics { contentDescription = if (text == null) "加载候选" else "candidate-$text" }
+                              .clickable(enabled = text != null) {
                                 expanded = false
                                 onChoose(index, state.generation)
                               }
                               .padding(horizontal = 8.dp, vertical = 12.dp),
                           contentAlignment = Alignment.Center) {
-                            Text(text, fontSize = 18.sp)
+                            Text(text ?: "", fontSize = 18.sp)
                           }
                     }
                   }

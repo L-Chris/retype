@@ -13,7 +13,7 @@ New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 # Keep the injected DLL separate from the helpers' broker/service feature union.
 $packages = @('-p', 'retype-tsf')
-if ($arch -eq 'x64') { $packages += @('-p', 'retype-diag', '-p', 'retype-dict-build') }
+if ($arch -eq 'x64') { $packages += @('-p', 'retype-diag', '-p', 'retype-dict-build', '-p', 'retype-resource-build') }
 cargo build --locked --release --target $Target @packages
 if ($LASTEXITCODE) { throw 'TIP payload build failed' }
 Copy-Item -LiteralPath "$binaryDir\retype_ime.dll" -Destination $stage -Force
@@ -69,9 +69,11 @@ foreach ($name in @('retype-diag.exe', 'retype-dict-build.exe', 'retype-updater.
 # Execute the existing dictionary builder, avoiding another Cargo feature graph.
 & "$stage\retype-dict-build.exe" --out data\dict\retype-dict.tsv
 if ($LASTEXITCODE) { throw 'Dictionary build failed' }
-Copy-Item -LiteralPath data\dict\retype-dict.tsv, data\dict\retype-dict.bin -Destination $stage -Force
+& "$binaryDir\retype-resource-build.exe" --out .ci/dictionaries --check
+if ($LASTEXITCODE) { throw 'Resource catalog or archive build failed' }
+$env:RETYPE_ENGLISH_DICT = Join-Path $PWD '.ci/dictionaries/english.bin'
 foreach ($scheme in @('full', 'flypy')) {
-    & "$stage\retype-diag.exe" --bench --scheme $scheme --dict "$stage\retype-dict.bin" | Tee-Object -FilePath "$stage\bench.txt" -Append
+    & "$stage\retype-diag.exe" --bench --scheme $scheme --dict "data\dict\retype-dict.bin" | Tee-Object -FilePath "$stage\bench.txt" -Append
     if ($LASTEXITCODE) { throw "Benchmark failed: $scheme" }
 }
 if (Select-String -Path "$stage\bench.txt" -Pattern 'P99 超预算' -Quiet) { throw 'First-pass P99 exceeds 6ms' }

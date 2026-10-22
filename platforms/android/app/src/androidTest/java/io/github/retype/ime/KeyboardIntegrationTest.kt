@@ -12,6 +12,7 @@ class KeyboardIntegrationTest {
   @Test
   fun touchCompositionEnglishAndPrivateFieldSwitch() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
+    kotlinx.coroutines.runBlocking { ResourceFixtures.prepare(instrumentation.targetContext) }
     val device = UiDevice.getInstance(instrumentation)
     // Compose updates render correctly, but an in-process instrumentation runner can
     // retain old accessibility nodes. Query a fresh tree after every input change.
@@ -39,7 +40,7 @@ class KeyboardIntegrationTest {
       assertEquals(words, statistics.summary(0).current.englishWords)
     }
     val oldIme = device.executeShellCommand("settings get secure default_input_method").trim()
-    val ime = "io.github.retype.ime/.RetypeImeService"
+    val ime = android.content.ComponentName(instrumentation.targetContext, RetypeImeService::class.java).flattenToShortString()
     val wasEnabled =
         device.executeShellCommand("ime list -s").lineSequence().any { it.trim() == ime }
     try {
@@ -47,7 +48,7 @@ class KeyboardIntegrationTest {
       device.executeShellCommand("ime enable $ime")
       device.executeShellCommand("ime set $ime")
       val launched =
-          device.executeShellCommand("am start -W -n io.github.retype.ime/.EditorFixtureActivity")
+          device.executeShellCommand("am start -W -n ${instrumentation.targetContext.packageName}/io.github.retype.ime.EditorFixtureActivity")
       assertFalse(launched, launched.contains("Error:"))
       val editor = find(By.desc("editor-normal"), 10000)
       assertNotNull(editor)
@@ -65,7 +66,7 @@ class KeyboardIntegrationTest {
       assertNotNull("woui must match 我是", phrase)
       phrase!!.click()
       assertNotNull("Choosing a word must restore the keyboard", find(By.text("q")))
-      assertEquals("我是", find(By.desc("editor-normal"))!!.text)
+      assertNotNull("Chinese selection must reach the editor", find(By.desc("editor-normal").text("我是")))
       find(By.text("⌫"))!!.click()
       find(By.text("⌫"))!!.click()
       for (letter in "nihc") find(By.text(letter.toString()))!!.click()
@@ -85,10 +86,12 @@ class KeyboardIntegrationTest {
       }
       assertTrue("English mode must update the keyboard", switched)
       for (letter in "hel") find(By.text(letter.toString()))!!.click()
+      // Personal learning can move a long word outside the compact viewport.
+      find(By.desc("展开候选"))!!.click()
       val hello = find(By.desc("candidate-hello"))
       assertNotNull(hello)
       hello!!.click()
-      assertEquals("你好hello ", find(By.desc("editor-normal"))!!.text)
+      assertNotNull("English selection must reach the editor", find(By.desc("editor-normal").text("你好hello ")))
       expectWords(initialWords + 1)
       for (letter in "ni") find(By.text(letter.toString()))!!.click()
       find(By.desc("editor-password"))!!.click()

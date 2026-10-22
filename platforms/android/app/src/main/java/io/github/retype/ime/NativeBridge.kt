@@ -19,5 +19,14 @@ object NativeBridge {
 
     @JvmStatic external fun dispatch(handle: Long, command: String): String
 
+    @JvmStatic external fun dispatchInput(handle: Long, operation: Int, text: String, argument: Int, generation: Long, flags: Int): NativeUpdate
+
+    internal fun send(handle: Long, command: NativeCommand): NativeUpdate =
+        dispatchInput(handle, command.operation, command.text, command.argument, command.generation, command.flags)
+
+    @JvmStatic external fun candidates(handle: Long, generation: Long, start: Int, limit: Int): Array<String>?
+
+    @JvmStatic external fun acknowledge(handle: Long, generation: Long, accepted: Boolean)
+
     @JvmStatic external fun destroy(handle: Long)
 }

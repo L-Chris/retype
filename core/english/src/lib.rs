@@ -1,45 +1,9 @@
-//! Immutable English vocabulary embedded in the module's file-backed image.
-//! No runtime dictionary building or full-vocabulary heap allocations.
+//! Read-only English vocabulary loaded by platform resource workers.
 #![forbid(unsafe_code)]
 use retype_types::{Candidate, CandidateLanguage, CandidateSource, LearningStore};
 use std::collections::{BinaryHeap, HashSet};
-
-const DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/english.bin"));
-fn u32_at(at: usize) -> usize {
-    u32::from_le_bytes([DATA[at], DATA[at + 1], DATA[at + 2], DATA[at + 3]]) as usize
-}
-fn count() -> usize {
-    u32_at(0)
-}
-fn size() -> usize {
-    u32_at(4)
-}
-fn word(id: usize) -> &'static str {
-    let at = 8 + id * 16;
-    let arena = 8 + count() * 16 + size() * 8;
-    std::str::from_utf8(&DATA[arena + u32_at(at)..arena + u32_at(at) + u32_at(at + 4)])
-        .unwrap_or("")
-}
-fn frequency(id: usize) -> u64 {
-    let at = 16 + id * 16;
-    u64::from_le_bytes(DATA[at..at + 8].try_into().unwrap_or([0; 8]))
-}
-fn lower_bound(input: &str) -> usize {
-    let (mut lo, mut hi) = (0, count());
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if word(mid) < input {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-fn find(input: &str) -> Option<usize> {
-    let i = lower_bound(input);
-    (i < count() && word(i) == input).then_some(i)
-}
+mod image;
+pub use image::{compile, current, install, Vocabulary, MAGIC, MAX_BYTES};
 pub fn valid_word(input: &str) -> bool {
     !input.is_empty()
         && input.len() <= 64
@@ -74,149 +38,204 @@ fn casing(word: &str, input: &str) -> String {
         word.into()
     }
 }
-fn candidate(id: usize, input: &str) -> Candidate {
-    let mut c = Candidate::new(casing(word(id), input), CandidateSource::Local);
-    c.language = CandidateLanguage::English;
-    c.consumed = input.len();
-    c.score = (frequency(id) as f64).ln() as f32;
-    c
-}
-/// Top-frequency prefix results via a precompiled range-max tree.
-pub fn complete(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<Candidate> {
-    if !valid_word(input) {
-        return Vec::new();
+
+impl Vocabulary {
+    fn lower_bound(&self, input: &str) -> usize {
+        let (mut lo, mut hi) = (0, self.count());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.word(mid) < input {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
     }
-    let key = input.to_ascii_lowercase();
-    let lo = lower_bound(&key);
-    let hi = lower_bound(&format!("{key}{{"));
-    let (mut l, mut r) = (lo + size(), hi + size());
-    let mut heap = BinaryHeap::new();
-    let push = |heap: &mut BinaryHeap<_>, node: usize| {
-        let id = u32_at(8 + count() * 16 + node * 4);
-        if id < count() {
-            heap.push((frequency(id), std::cmp::Reverse(id), node));
-        }
-    };
-    while l < r {
-        if l % 2 == 1 {
-            push(&mut heap, l);
-            l += 1;
-        }
-        if r % 2 == 1 {
-            r -= 1;
-            push(&mut heap, r);
-        }
-        l /= 2;
-        r /= 2;
+    fn find(&self, input: &str) -> Option<usize> {
+        let i = self.lower_bound(input);
+        (i < self.count() && self.word(i) == input).then_some(i)
     }
-    let mut hits = Vec::new();
-    while hits.len() < limit {
-        let Some((_, _, node)) = heap.pop() else {
-            break;
+    fn candidate(&self, id: usize, input: &str) -> Candidate {
+        let mut c = Candidate::new(casing(self.word(id), input), CandidateSource::Local);
+        c.language = CandidateLanguage::English;
+        c.consumed = input.len();
+        c.score = (self.frequency(id) as f64).ln() as f32;
+        c
+    }
+    /// Top-frequency prefix results via a precompiled range-max tree.
+    pub fn complete(
+        &self,
+        input: &str,
+        learner: &dyn LearningStore,
+        limit: usize,
+    ) -> Vec<Candidate> {
+        if !valid_word(input) {
+            return Vec::new();
+        }
+        let key = input.to_ascii_lowercase();
+        let lo = self.lower_bound(&key);
+        let hi = self.lower_bound(&format!("{key}{{"));
+        let (mut l, mut r) = (lo + self.size(), hi + self.size());
+        let mut heap = BinaryHeap::new();
+        let push = |heap: &mut BinaryHeap<_>, node: usize| {
+            let id = self.u32_at(16 + self.count() * 16 + node * 4);
+            if id < self.count() {
+                heap.push((self.frequency(id), std::cmp::Reverse(id), node));
+            }
         };
-        if node >= size() {
-            hits.push(candidate(node - size(), input));
-        } else {
-            push(&mut heap, node * 2);
-            push(&mut heap, node * 2 + 1);
+        while l < r {
+            if l % 2 == 1 {
+                push(&mut heap, l);
+                l += 1;
+            }
+            if r % 2 == 1 {
+                r -= 1;
+                push(&mut heap, r);
+            }
+            l /= 2;
+            r /= 2;
         }
-    }
-    // Empirical personal counts form a smoothed distribution, rather than a
-    // fixed per-selection bonus. Keep the vocabulary prior for known words.
-    let total: f64 = hits
-        .iter()
-        .map(|c| f64::from(c.score).exp())
-        .sum::<f64>()
-        .max(1.);
-    for c in &mut hits {
-        c.score -= total.ln() as f32;
-    }
-    for (text, uses) in learner.english_words(&key, limit) {
-        let normalized = text.to_ascii_lowercase();
-        let prior = find(&normalized).map_or(0., |id| frequency(id) as f64);
-        let score = (prior / total + uses as f64).ln() as f32;
-        let text = casing(&text, input);
-        if let Some(existing) = hits.iter_mut().find(|c| c.text == text) {
-            existing.score = score;
-            existing.source = CandidateSource::User;
-        } else {
-            let mut c = Candidate::new(text, CandidateSource::User);
-            c.language = CandidateLanguage::English;
-            c.consumed = input.len();
-            c.score = score;
-            hits.push(c);
+        let mut hits = Vec::new();
+        while hits.len() < limit {
+            let Some((_, _, node)) = heap.pop() else {
+                break;
+            };
+            if node >= self.size() {
+                hits.push(self.candidate(node - self.size(), input));
+            } else {
+                push(&mut heap, node * 2);
+                push(&mut heap, node * 2 + 1);
+            }
         }
+        // Empirical personal counts form a smoothed distribution, rather than a
+        // fixed per-selection bonus. Keep the vocabulary prior for known words.
+        let total: f64 = hits
+            .iter()
+            .map(|c| f64::from(c.score).exp())
+            .sum::<f64>()
+            .max(1.);
+        for c in &mut hits {
+            c.score -= total.ln() as f32;
+        }
+        for (text, uses) in learner.english_words(&key, limit) {
+            let normalized = text.to_ascii_lowercase();
+            let prior = self
+                .find(&normalized)
+                .map_or(0., |id| self.frequency(id) as f64);
+            let score = (prior / total + uses as f64).ln() as f32;
+            let text = casing(&text, input);
+            if let Some(existing) = hits.iter_mut().find(|c| c.text == text) {
+                existing.score = score;
+                existing.source = CandidateSource::User;
+            } else {
+                let mut c = Candidate::new(text, CandidateSource::User);
+                c.language = CandidateLanguage::English;
+                c.consumed = input.len();
+                c.score = score;
+                hits.push(c);
+            }
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.text.cmp(&b.text))
+        });
+        hits.truncate(limit);
+        hits
     }
-    hits.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.text.cmp(&b.text))
-    });
-    hits.truncate(limit);
-    hits
+
+    /// A small mixed-language stream, exact spelling before frequency-ranked completions.
+    /// Exact matches are looked up separately so a high-frequency completion cannot hide one.
+    pub fn mixed(&self, input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<Candidate> {
+        if input.len() < 2 || limit == 0 || !valid_word(input) {
+            return Vec::new();
+        }
+        let mut hits = self.complete(input, learner, limit);
+        if let Some(id) = self.find(&input.to_ascii_lowercase()) {
+            if !hits.iter().any(|c| c.text.eq_ignore_ascii_case(input)) {
+                hits.push(self.candidate(id, input));
+            }
+        }
+        hits.sort_by_key(|c| !c.text.eq_ignore_ascii_case(input));
+        hits.truncate(limit);
+        hits
+    }
+    /// One-edit spelling suggestions (insertion/deletion/substitution/transposition).
+    /// Called on the background worker, never while holding the kernel lock.
+    pub fn correct(&self, input: &str, limit: usize) -> Vec<Candidate> {
+        if !valid_word(input) || input.len() < 3 {
+            return Vec::new();
+        }
+        let key = input.to_ascii_lowercase();
+        let mut ids = HashSet::new();
+        let mut add = |s: &str| {
+            if s != key {
+                if let Some(id) = self.find(s) {
+                    ids.insert(id);
+                }
+            }
+        };
+        for i in 0..key.len() {
+            add(&format!("{}{}", &key[..i], &key[i + 1..]));
+            if i + 1 < key.len() {
+                let mut swapped = key.as_bytes().to_vec();
+                swapped.swap(i, i + 1);
+                if let Ok(s) = std::str::from_utf8(&swapped) {
+                    add(s);
+                }
+            }
+            for c in b'a'..=b'z' {
+                add(&format!("{}{}{}", &key[..i], c as char, &key[i + 1..]));
+            }
+        }
+        for i in 0..=key.len() {
+            for c in b'a'..=b'z' {
+                add(&format!("{}{}{}", &key[..i], c as char, &key[i..]));
+            }
+        }
+        let mut ids: Vec<_> = ids.into_iter().collect();
+        ids.sort_by(|a, b| {
+            self.frequency(*b)
+                .cmp(&self.frequency(*a))
+                .then_with(|| a.cmp(b))
+        });
+        ids.into_iter()
+            .take(limit)
+            .map(|id| {
+                let mut c = self.candidate(id, input);
+                c.comment = "spelling".into();
+                c
+            })
+            .collect()
+    }
 }
 
-/// A small mixed-language stream, exact spelling before frequency-ranked completions.
-/// Exact matches are looked up separately so a high-frequency completion cannot hide one.
+pub fn complete(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<Candidate> {
+    current().complete(input, learner, limit)
+}
 pub fn mixed(input: &str, learner: &dyn LearningStore, limit: usize) -> Vec<Candidate> {
-    if input.len() < 2 || limit == 0 || !valid_word(input) {
-        return Vec::new();
-    }
-    let mut hits = complete(input, learner, limit);
-    if let Some(id) = find(&input.to_ascii_lowercase()) {
-        if !hits.iter().any(|c| c.text.eq_ignore_ascii_case(input)) {
-            hits.push(candidate(id, input));
-        }
-    }
-    hits.sort_by_key(|c| !c.text.eq_ignore_ascii_case(input));
-    hits.truncate(limit);
-    hits
+    current().mixed(input, learner, limit)
 }
-/// One-edit spelling suggestions (insertion/deletion/substitution/transposition).
-/// Called on the background worker, never while holding the kernel lock.
 pub fn correct(input: &str, limit: usize) -> Vec<Candidate> {
-    if !valid_word(input) || input.len() < 3 {
-        return Vec::new();
-    }
-    let key = input.to_ascii_lowercase();
-    let mut ids = HashSet::new();
-    let mut add = |s: &str| {
-        if s != key {
-            if let Some(id) = find(s) {
-                ids.insert(id);
-            }
-        }
-    };
-    for i in 0..key.len() {
-        add(&format!("{}{}", &key[..i], &key[i + 1..]));
-        if i + 1 < key.len() {
-            let mut swapped = key.as_bytes().to_vec();
-            swapped.swap(i, i + 1);
-            if let Ok(s) = std::str::from_utf8(&swapped) {
-                add(s);
-            }
-        }
-        for c in b'a'..=b'z' {
-            add(&format!("{}{}{}", &key[..i], c as char, &key[i + 1..]));
-        }
-    }
-    for i in 0..=key.len() {
-        for c in b'a'..=b'z' {
-            add(&format!("{}{}{}", &key[..i], c as char, &key[i..]));
-        }
-    }
-    let mut ids: Vec<_> = ids.into_iter().collect();
-    ids.sort_by(|a, b| frequency(*b).cmp(&frequency(*a)).then_with(|| a.cmp(b)));
-    ids.into_iter()
-        .take(limit)
-        .map(|id| {
-            let mut c = candidate(id, input);
-            c.comment = "spelling".into();
-            c
-        })
-        .collect()
+    current().correct(input, limit)
 }
-
+#[cfg(test)]
+fn count() -> usize {
+    current().count()
+}
+#[cfg(test)]
+fn word(id: usize) -> String {
+    current().word(id).to_owned()
+}
+#[cfg(test)]
+fn frequency(id: usize) -> u64 {
+    current().frequency(id)
+}
+#[cfg(test)]
+fn find(input: &str) -> Option<usize> {
+    current().find(input)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

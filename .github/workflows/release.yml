@@ -121,6 +121,10 @@ jobs:
         with:
           name: android-installer
           path: dist/android
+      - uses: actions/download-artifact@v8
+        with:
+          name: dictionary-resources
+          path: dist/dictionaries
       - uses: softprops/action-gh-release@v3
         # Include Android when stable signing credentials have been configured.
         with:
@@ -130,6 +134,9 @@ jobs:
           files: |
             dist/*-setup.exe
             dist/*.sha256
+            dist/dictionaries/*.gz
+            dist/dictionaries/*.retype-resources
+            dist/dictionaries/resources.json
             ${{ needs.android.result == 'success' && 'dist/android/*.apk' || '' }}
             ${{ needs.android.result == 'success' && 'dist/android/*.sha256' || '' }}
           fail_on_unmatched_files: true

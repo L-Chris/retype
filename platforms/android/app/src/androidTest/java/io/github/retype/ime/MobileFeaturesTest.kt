@@ -238,7 +238,7 @@ class MobileFeaturesTest {
                     .toString()
             )
             assertTrue(binary.setReadOnly())
-            val dict = DictionaryAssets.prepare(context)
+            val dict = ResourceFixtures.prepare(context)
             val handle =
                 NativeBridge.create(
                     dict.absolutePath,

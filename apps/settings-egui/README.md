@@ -2,8 +2,8 @@
 
 The production Windows settings application uses egui/eframe in its own process.
 The installer places it at `settings/retype.exe`, preserving older input-method
-launchers and update shortcuts. Flutter is no longer part of the Windows package.
-The original `apps/settings` sources remain as a reference and asset source.
+launchers and update shortcuts. Shared branding files live in
+[`assets/`](../../assets): `logo.svg`, `logo.png` and `retype.ico`.
 
 ## Features
 

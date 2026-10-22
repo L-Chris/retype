@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['platforms/android/**', 'platforms/windows/ai/**', 'platforms/windows/sync/**', 'platforms/windows/learning/**', 'core/**', 'tools/dict-build/**', 'apps/settings-egui/dictionary-packs.json', 'Cargo.toml', 'Cargo.lock', 'data/dict/raw/**', '.github/workflows/android.yml']
+    paths: ['platforms/android/**', 'platforms/windows/ai/**', 'platforms/windows/sync/**', 'platforms/windows/learning/**', 'core/**', 'tools/dict-build/**', 'tools/resource-build/**', 'data/dict/resources.json', 'apps/settings-egui/dictionary-packs.json', 'Cargo.toml', 'Cargo.lock', 'data/dict/raw/**', '.github/workflows/android.yml']
   pull_request:
-    paths: ['platforms/android/**', 'platforms/windows/ai/**', 'platforms/windows/sync/**', 'platforms/windows/learning/**', 'core/**', 'tools/dict-build/**', 'apps/settings-egui/dictionary-packs.json', 'Cargo.toml', 'Cargo.lock', 'data/dict/raw/**', '.github/workflows/android.yml']
+    paths: ['platforms/android/**', 'platforms/windows/ai/**', 'platforms/windows/sync/**', 'platforms/windows/learning/**', 'core/**', 'tools/dict-build/**', 'tools/resource-build/**', 'data/dict/resources.json', 'apps/settings-egui/dictionary-packs.json', 'Cargo.toml', 'Cargo.lock', 'data/dict/raw/**', '.github/workflows/android.yml']
 permissions:
   contents: read
 concurrency:
@@ -37,10 +37,11 @@ jobs:
         run: |
           sdkmanager 'platforms;android-35' 'build-tools;36.0.0' 'ndk;28.2.13676358'
           cargo install cargo-ndk --version 4.1.2 --locked
-      - name: Session regression tests and offline dictionary
+      - name: Session regression tests and test dictionary resources
         run: |
           cargo test --locked -p retype-android -p retype-ai -p retype-dict-build --features retype-ai/service
           cargo run --locked --release -p retype-dict-build -- --out data/dict/retype-dict.tsv
+          cargo run --locked --release -p retype-resource-build -- --out platforms/android/build/test-resources --check
       - name: JNI libraries
         env:
           RUSTFLAGS: '-C link-arg=-Wl,-z,max-page-size=16384'

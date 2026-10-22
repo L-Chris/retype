@@ -111,7 +111,7 @@ fn write_scheme_at(key: &str, scheme: PinyinScheme) -> AppResult<()> {
 }
 fn logo() -> AppResult<egui::ColorImage> {
     let mut reader = png::Decoder::new(std::io::Cursor::new(include_bytes!(
-        "../../settings/assets/logo.png"
+        "../../../assets/logo.png"
     )))
     .read_info()?;
     let mut pixels = vec![0; reader.output_buffer_size()];
@@ -180,6 +180,10 @@ struct SettingsApp {
     packs: Vec<backend::Pack>,
     installed_packs: Vec<bool>,
     busy_pack: Option<usize>,
+    base_status: Option<retype_resources::Status>,
+    base_busy: bool,
+    base_progress: f32,
+    base_message: String,
     pack_progress: f32,
     pack_can_cancel: bool,
     cancel_download: Arc<AtomicBool>,
@@ -207,6 +211,9 @@ impl SettingsApp {
         match page {
             Page::Dictionary => {
                 let _ = self.tasks.send(Task::Packs);
+                if !self.base_busy {
+                    let _ = self.tasks.send(Task::BaseStatus);
+                }
             }
             Page::Cloud => {
                 if self.cloud.is_none() {
@@ -251,6 +258,7 @@ impl SettingsApp {
         }
         if self.options.idle_exit.is_zero()
             && self.busy_pack.is_none()
+            && !self.base_busy
             && !self.updating
             && !self.installing
         {
@@ -329,6 +337,21 @@ impl SettingsApp {
         }
         while let Ok(event) = self.events.try_recv() {
             match event {
+                Event::BaseProgress(progress) => self.base_progress = progress,
+                Event::BaseStatus(result) => match result {
+                    Ok(state) => self.base_status = Some(state),
+                    Err(error) => self.error = Some(error),
+                },
+                Event::BaseDone(result) => {
+                    self.base_busy = false;
+                    match result {
+                        Ok(state) => {
+                            self.base_status = Some(state);
+                            self.base_message.clear();
+                        }
+                        Err(error) => self.base_message = error,
+                    }
+                }
                 Event::Packs(installed) => self.installed_packs = installed,
                 Event::PackProgress(progress) => self.pack_progress = progress,
                 Event::PackDone(result) => {
@@ -399,6 +422,7 @@ impl SettingsApp {
         if let Some(hidden) = self.hidden_since {
             if hidden.elapsed() >= self.options.idle_exit
                 && self.busy_pack.is_none()
+                && !self.base_busy
                 && !self.updating
                 && !self.installing
             {
@@ -443,7 +467,69 @@ impl SettingsApp {
         }
     }
 
+    fn base_resources_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(status) = &self.base_status else {
+            return;
+        };
+        if status.ready {
+            return;
+        }
+        let size = status.download_bytes as f64 / (1024.0 * 1024.0);
+        let title = if status.base.is_some() {
+            "补全基础词库"
+        } else {
+            "下载基础词库"
+        };
+        egui::Frame::new()
+            .fill(Color32::WHITE)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(14)
+            .inner_margin(20)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(title).strong());
+                ui.label(RichText::new("下载一次后即可离线输入中英文。").color(MUTED));
+                ui.add_space(8.0);
+                if self.base_busy {
+                    ui.add(egui::ProgressBar::new(self.base_progress).show_percentage());
+                    if ui.button("取消").clicked() {
+                        self.cancel_download.store(true, Ordering::Relaxed);
+                    }
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button(format!("下载 · {size:.1} MB")).clicked() {
+                            self.install_base(None);
+                        }
+                        if ui.button("从文件导入").clicked() {
+                            match backend::choose_resource_bundle() {
+                                Ok(Some(path)) => self.install_base(Some(path)),
+                                Ok(None) => {}
+                                Err(e) => self.base_message = e.to_string(),
+                            }
+                        }
+                    });
+                }
+                if !self.base_message.is_empty() {
+                    ui.label(RichText::new(&self.base_message).color(MUTED));
+                }
+            });
+        ui.add_space(16.0);
+    }
+    fn install_base(&mut self, source: Option<PathBuf>) {
+        if self.busy_pack.is_some() {
+            return;
+        }
+        self.base_busy = true;
+        self.base_progress = 0.0;
+        self.base_message.clear();
+        self.cancel_download.store(false, Ordering::Relaxed);
+        let _ = self
+            .tasks
+            .send(Task::BaseInstall(source, Arc::clone(&self.cancel_download)));
+    }
+
     fn dictionary_page(&mut self, ui: &mut egui::Ui) {
+        self.base_resources_ui(ui);
         if self.installed_packs.is_empty() {
             ui.spinner();
             ui.label("正在读取词库…");
@@ -484,7 +570,9 @@ impl SettingsApp {
                             let mut next_enabled = enabled;
                             let changed = ui
                                 .add_enabled_ui(
-                                    self.busy_pack.is_none() && !self.installed_packs.is_empty(),
+                                    self.busy_pack.is_none()
+                                        && !self.base_busy
+                                        && !self.installed_packs.is_empty(),
                                     |ui| {
                                         toggle(
                                             ui,
@@ -853,6 +941,7 @@ impl SettingsApp {
         let error = None;
         let page = options.page;
         let (tasks, events, busy) = backend::worker(cc.egui_ctx.clone());
+        let _ = tasks.send(Task::BaseStatus);
         let handle = cc.window_handle()?.as_raw();
         let raw_window_handle::RawWindowHandle::Win32(handle) = handle else {
             return Err("Unsupported window handle".into());
@@ -902,6 +991,10 @@ impl SettingsApp {
             packs: backend::packs()?,
             installed_packs: Vec::new(),
             busy_pack: None,
+            base_status: None,
+            base_busy: false,
+            base_progress: 0.0,
+            base_message: String::new(),
             pack_progress: 0.0,
             pack_can_cancel: false,
             cancel_download: Arc::new(AtomicBool::new(false)),
@@ -931,6 +1024,7 @@ impl SettingsApp {
     }
 
     fn input_page(&mut self, ui: &mut egui::Ui) {
+        self.base_resources_ui(ui);
         ui.label(RichText::new("拼音方案").strong());
         ui.add_space(4.0);
         egui::Frame::new()

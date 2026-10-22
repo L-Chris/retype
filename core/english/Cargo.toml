@@ -8,6 +8,11 @@ publish.workspace = true
 
 [dependencies]
 retype-types.workspace = true
+retype-file-map = { path = "../file-map" }
+
+[features]
+# Test fixtures are read from source files at runtime, never embedded in releases.
+test-data = []
 
 [lints]
 workspace = true
