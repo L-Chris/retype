@@ -82,6 +82,10 @@ WorkManager job. Android may defer that job. Checks never download or install
 without a button click, and a release without an Android APK is reported explicitly.
 
 Downloads stream into private cache with bounded size and a progress indicator.
+APK and checksum downloads use GitHub's official release-asset API with binary
+content negotiation, supporting direct responses and redirects without using
+browser download links. Legacy cached browser links are discarded and refreshed
+on the next allowed update check.
 Before exposing the APK to the system installer, retype checks the SHA-256,
 package name, increasing version code and the installed app's signing certificate.
 The installer receives a temporary read grant through a provider restricted to

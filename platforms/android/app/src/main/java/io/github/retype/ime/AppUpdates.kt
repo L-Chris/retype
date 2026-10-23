@@ -50,6 +50,8 @@ internal data class UpdateStatus(
 
 internal object AppUpdates {
   private const val API = "https://api.github.com/repos/L-Chris/retype/releases?per_page=30"
+  private const val ASSET_API = "https://api.github.com/repos/L-Chris/retype/releases/assets/"
+  private const val API_VERSION = "2026-03-10"
   private const val MAX_APK = 256L * 1024 * 1024
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val mutex = Mutex()
@@ -75,7 +77,6 @@ internal object AppUpdates {
       val version = tag.substring(1)
       val code = runCatching { versionCode(version) }.getOrNull() ?: continue
       val assets = r.optJSONArray("assets") ?: continue
-      val prefix = "https://github.com/L-Chris/retype/releases/download/$tag/"
       for (name in AndroidPackages.names(version, supportedAbis)) {
         var apk: JSONObject? = null
         var hash: JSONObject? = null
@@ -85,10 +86,10 @@ internal object AppUpdates {
           if (asset.optString("name") == "$name.sha256") hash = asset
         }
         if (apk == null || hash == null) continue
-        val url = apk.optString("browser_download_url")
-        val hashUrl = hash.optString("browser_download_url")
+        val url = assetUrl(apk) ?: continue
+        val hashUrl = assetUrl(hash) ?: continue
         val size = apk.optLong("size")
-        if (url != prefix + name || hashUrl != prefix + "$name.sha256" || size !in 1..MAX_APK) continue
+        if (url == hashUrl || size !in 1..MAX_APK) continue
         available += AndroidRelease(version, code, url, hashUrl, size, r.optString("body").take(24000))
         break
       }
@@ -96,13 +97,39 @@ internal object AppUpdates {
     return available.maxByOrNull { it.code }
   }
 
-  private fun connection(url: String): HttpURLConnection {
+  private fun assetUrl(asset: JSONObject): String? {
+    val id = asset.optLong("id")
+    return "$ASSET_API$id".takeIf { id > 0 && asset.optString("url") == it }
+  }
+
+  private fun isAssetUrl(url: String): Boolean {
+    val id = url.removePrefix(ASSET_API).toLongOrNull() ?: return false
+    return id > 0 && url == "$ASSET_API$id"
+  }
+
+  internal fun cachedRelease(text: String): AndroidRelease? = runCatching {
+    val cached = JSONObject(text)
+    AndroidRelease(
+        cached.getString("version"), cached.getInt("code"), cached.getString("url"),
+        cached.getString("hashUrl"), cached.getLong("size"), cached.getString("notes"))
+        .takeIf {
+          it.code == versionCode(it.version) && it.size in 1..MAX_APK &&
+              isAssetUrl(it.url) && isAssetUrl(it.hashUrl) && it.url != it.hashUrl
+        }
+  }.getOrNull()
+
+  internal fun connection(
+      url: String,
+      asset: Boolean = false,
+      open: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection }
+  ): HttpURLConnection {
+    require(!asset || isAssetUrl(url)) { "更新附件地址无效，请重新检查更新" }
     var current = url
     repeat(6) {
       val u = URL(current)
       require(
           u.protocol == "https" &&
-              u.userInfo == null &&
+              u.userInfo == null && u.port in setOf(-1, 443) && u.ref == null &&
               u.host in
                   setOf(
                       "api.github.com",
@@ -111,11 +138,15 @@ internal object AppUpdates {
                       "objects.githubusercontent.com")) {
             "更新地址无效"
           }
-      val c = u.openConnection() as HttpURLConnection
+      val c = open(u)
       c.connectTimeout = 15000
       c.readTimeout = 30000
       c.instanceFollowRedirects = false
+      c.useCaches = false
       c.setRequestProperty("User-Agent", "retype-android/${BuildConfig.VERSION_NAME}")
+      c.setRequestProperty("Accept", if (asset) "application/octet-stream" else "application/vnd.github+json")
+      c.setRequestProperty("Accept-Encoding", "identity")
+      if (u.host == "api.github.com") c.setRequestProperty("X-GitHub-Api-Version", API_VERSION)
       val response =
           try {
             c.responseCode
@@ -141,8 +172,8 @@ internal object AppUpdates {
     error("更新下载重定向过多")
   }
 
-  private suspend fun read(url: String, limit: Int): String {
-    val c = connection(url)
+  internal suspend fun read(url: String, limit: Int, asset: Boolean = false): String {
+    val c = connection(url, asset)
     try {
       return c.inputStream.use { input ->
         val output = java.io.ByteArrayOutputStream()
@@ -216,14 +247,14 @@ internal object AppUpdates {
             withContext(Dispatchers.IO) {
               mutex.withLock {
                 val expected =
-                    read(release.hashUrl, 8192).trim().split(Regex("\\s+"))[0].lowercase()
+                    read(release.hashUrl, 8192, asset = true).trim().split(Regex("\\s+"))[0].lowercase()
                 check(expected.matches(Regex("[0-9a-f]{64}"))) { "更新校验信息无效" }
                 val directory = File(app.cacheDir, "updates").apply { mkdirs() }
                 val staging = File(directory, "download.tmp")
                 val target = File(directory, "update.apk")
                 target.delete()
                 try {
-                  val c = connection(release.url)
+                  val c = connection(release.url, asset = true)
                   try {
                     c.inputStream.use { input ->
                       copyVerified(input, staging, release.size, expected) { progress ->
@@ -374,15 +405,12 @@ internal object AppUpdates {
     if (status.value.release == null && !status.value.busy) {
       runCatching {
         val prefs = AppStore(context).prefs
-        val cached = JSONObject(prefs.getString("androidRelease", null) ?: return@runCatching)
-        val release =
-            AndroidRelease(
-                cached.getString("version"),
-                cached.getInt("code"),
-                cached.getString("url"),
-                cached.getString("hashUrl"),
-                cached.getLong("size"),
-                cached.getString("notes"))
+        val cached = prefs.getString("androidRelease", null) ?: return@runCatching
+        val release = cachedRelease(cached) ?: run {
+          // Old browser download links have no asset IDs; refresh metadata through the API.
+          prefs.edit().remove("androidRelease").putLong("lastUpdateCheck", 0).apply()
+          return@runCatching
+        }
         if (release.code > BuildConfig.VERSION_CODE) {
           val ready =
               prefs.getInt("downloadCode", 0) == release.code &&
