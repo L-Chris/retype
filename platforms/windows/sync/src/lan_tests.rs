@@ -145,11 +145,64 @@ impl Drop for Fixture {
         if let Ok(state) = self.state.lock() {
             for peer in &state.config.peers {
                 let _ = retype_ai::secrets::save_cloud_password(&credential(&peer.id), "");
+                let _ =
+                    retype_ai::secrets::save_cloud_password(&format!("lan-client-{}", peer.id), "");
             }
         }
         let _ = std::fs::remove_file(self.root.join("config.json"));
         let _ = std::fs::remove_dir(&self.root);
     }
+}
+
+#[test]
+fn desktop_client_pairs_with_certificate_proofs_and_synchronizes_both_directions() -> Result<()> {
+    let server = Fixture::new()?;
+    let client = Fixture::new()?;
+    client.state.lock().map_err(|_| "lock")?.status.mode = "join".into();
+    let remote = server.state.lock().map_err(|_| "lock")?.config.id.clone();
+    let state = Arc::clone(&client.state);
+    let stop = Arc::clone(&client.stop);
+    let incoming = Arc::clone(&client.incoming);
+    let folder = client.root.clone();
+    let id = remote.clone();
+    let address = server.address;
+    let worker = std::thread::spawn(move || {
+        outbound::connect(address, &id, &state, &stop, &incoming, &folder)
+    });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !client
+        .state
+        .lock()
+        .map_err(|_| "lock")?
+        .status
+        .online
+        .contains(&remote)
+    {
+        if Instant::now() > deadline {
+            client.stop.store(true, Ordering::Relaxed);
+            let result = worker.join().map_err(|_| "client worker")?;
+            return Err(format!("desktop client did not pair: {result:?}"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client.publish("Mac → desktop 中文")?;
+    assert_eq!(
+        server.receive(Duration::from_secs(3))?.text,
+        "Mac → desktop 中文"
+    );
+    server.publish("desktop → Mac 👋")?;
+    assert_eq!(
+        client.receive(Duration::from_secs(3))?.text,
+        "desktop → Mac 👋"
+    );
+    let saved = retype_ai::secrets::cloud_password(&format!("lan-client-{remote}"))
+        .map_err(|e| e.to_string())?;
+    let identity: Value = serde_json::from_str(&saved).map_err(|e| e.to_string())?;
+    assert_eq!(identity["pin"], crate::hash(&server.cert));
+    assert_eq!(identity["token"].as_str().map(str::len), Some(64));
+    client.stop.store(true, Ordering::Relaxed);
+    worker.join().map_err(|_| "client worker")??;
+    Ok(())
 }
 fn write(client: &mut Client, message: Value) -> Result<()> {
     client

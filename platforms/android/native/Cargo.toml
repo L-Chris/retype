@@ -11,6 +11,7 @@ name = "retype_android"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+retype-services = { path = "../../../core/services" }
 retype-engine.workspace = true
 retype-dict.workspace = true
 retype-pinyin.workspace = true

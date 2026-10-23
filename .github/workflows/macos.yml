@@ -1,0 +1,60 @@
+name: macOS preview
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/macos/**'
+      - 'platforms/windows/ai/**'
+      - 'platforms/windows/sync/**'
+      - 'apps/settings-egui/dictionary-packs.json'
+      - 'core/**'
+      - 'Cargo.*'
+      - 'assets/logo.png'
+      - '.github/workflows/macos.yml'
+  pull_request:
+    paths:
+      - 'platforms/macos/**'
+      - 'platforms/windows/ai/**'
+      - 'platforms/windows/sync/**'
+      - 'apps/settings-egui/dictionary-packs.json'
+      - 'core/**'
+      - 'Cargo.*'
+      - '.github/workflows/macos.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-universal
+      - name: Bridge and input engine regression tests
+        run: cargo test --locked -p retype-macos -p retype-engine -p retype-file-map -p retype-resources
+      - name: Bridge lint
+        run: cargo clippy --locked -p retype-macos --all-targets -- -D warnings
+      - name: Build and verify universal InputMethodKit bundle
+        run: bash platforms/macos/build.sh
+      - name: Native settings and candidate UI smoke checks
+        run: bash platforms/macos/test-ui.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-settings-screenshots
+          path: target/macos-ui-validation/data/screenshots/*.png
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-preview
+          path: dist/macos/retype-*.zip*
+          if-no-files-found: error

@@ -1,0 +1,34 @@
+[package]
+name = "retype-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "retype_macos"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+retype-services = { path = "../../../core/services" }
+retype-ai = { path = "../../windows/ai", features = ["service"] }
+retype-sync = { path = "../../windows/sync" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+sha2.workspace = true
+ureq.workspace = true
+retype-engine.workspace = true
+retype-dict.workspace = true
+retype-pinyin.workspace = true
+retype-types.workspace = true
+retype-updater.workspace = true
+retype-resources = { path = "../../../core/resources", features = ["download"] }
+retype-learning-store = { path = "../../../core/learning", features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+retype-english = { path = "../../../core/english", features = ["test-data"] }
+
+[lints]
+workspace = true

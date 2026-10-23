@@ -1,0 +1,2 @@
+platforms/macos/*.sh text eol=lf
+platforms/macos/*.command text eol=lf

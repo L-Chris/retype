@@ -20,6 +20,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(any(target_os = "macos", test))]
+#[path = "lan_client.rs"]
+mod outbound;
 #[cfg(test)]
 #[path = "lan_tests.rs"]
 mod tests;
@@ -44,7 +47,13 @@ impl Default for Config {
             enabled: false,
             port: 0,
             id: uuid::Uuid::new_v4().simple().to_string(),
-            name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
+            name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") {
+                    "Mac".into()
+                } else {
+                    "Windows".into()
+                }
+            }),
             peers: Vec::new(),
         }
     }
@@ -114,7 +123,11 @@ impl Drop for SessionGuard<'_> {
     }
 }
 fn now() -> u64 {
-    crate::runtime::now().saturating_mul(1000)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 pub fn root() -> Result<PathBuf> {
     Ok(config::root()?.join("lan"))
@@ -134,13 +147,128 @@ pub fn status_at(root: &Path) -> Status {
 }
 pub fn command(command: Command) -> Result<()> {
     let root = root()?;
-    retype_learning::transport::private_directory(
-        &root,
-        &retype_learning::transport::user_sid().map_err(|_| "无法识别用户")?,
-    )
-    .map_err(|_| "无法保护跨设备目录")?;
+    private_directory(&root)?;
     config::write_json(&root.join("command.json"), &command)?;
-    crate::runtime::launch()
+    #[cfg(windows)]
+    {
+        crate::runtime::launch()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_start()
+    }
+}
+
+fn private_directory(root: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        retype_learning::transport::private_directory(
+            root,
+            &retype_learning::transport::user_sid().map_err(|_| "无法识别用户")?,
+        )
+        .map_err(|_| "无法保护跨设备目录".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(root).map_err(|_| "无法创建跨设备目录")?;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "无法保护跨设备目录".into())
+    }
+}
+fn host_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    let file = options.open(root.join("host.lock"))?;
+    #[cfg(target_os = "macos")]
+    fs2::FileExt::try_lock_exclusive(&file)?;
+    Ok(file)
+}
+#[cfg(target_os = "macos")]
+fn macos_start() -> Result<()> {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("retype-mac-lan".into())
+        .spawn(|| {
+            let _ = serve();
+            RUNNING.store(false, Ordering::Release);
+        })
+        .map(|_| ())
+        .map_err(|_| {
+            RUNNING.store(false, Ordering::Release);
+            "无法启动跨设备服务".into()
+        })
+}
+#[cfg(target_os = "macos")]
+pub mod macos {
+    use std::{ffi::c_char, sync::OnceLock};
+    pub type Read = unsafe extern "C" fn(*mut u8, usize, *mut u64) -> isize;
+    pub type Write = unsafe extern "C" fn(*const c_char, u64, *mut u64) -> bool;
+    pub static CLIPBOARD: OnceLock<(Read, Write)> = OnceLock::new();
+    pub fn register(read: Read, write: Write) {
+        let _ = CLIPBOARD.set((read, write));
+    }
+}
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
+    let Some((read, write)) = macos::CLIPBOARD.get() else {
+        return;
+    };
+    let mut last = 0;
+    let mut own = 0;
+    let mut buffer = vec![0u8; crate::clipboard_protocol::MAX_TEXT + 1];
+    // Seed the sequence without sending clipboard contents copied before enabling sync.
+    unsafe {
+        read(buffer.as_mut_ptr(), buffer.len(), &mut last);
+    }
+    while !stop.load(Ordering::Relaxed) {
+        let mut sequence = last;
+        let count = unsafe { read(buffer.as_mut_ptr(), buffer.len(), &mut sequence) };
+        let enabled = shared.lock().is_ok_and(|s| s.config.enabled);
+        if sequence != last && sequence != own {
+            if let Ok(mut pending) = incoming.lock() {
+                pending.take();
+            }
+            if let Ok(mut state) = shared.lock() {
+                state.journal.latest = None;
+            }
+            if enabled && count > 0 && (count as usize) <= crate::clipboard_protocol::MAX_TEXT {
+                if let Ok(text) = std::str::from_utf8(&buffer[..count as usize]) {
+                    if let Ok(mut state) = shared.lock() {
+                        state.seq = state.seq.saturating_add(1);
+                        let seq = state.seq;
+                        let id = state.config.id.clone();
+                        if let Some(clip) = state.journal.local(&id, seq, text.into(), now()) {
+                            broadcast(&mut state, &clip);
+                        }
+                    }
+                }
+            }
+        }
+        last = sequence;
+        let clip = incoming.lock().ok().and_then(|mut p| p.take());
+        if let Some(clip) = clip {
+            if enabled {
+                if let Ok(text) = std::ffi::CString::new(clip.text) {
+                    let mut new = last;
+                    if unsafe { write(text.as_ptr(), last, &mut new) } {
+                        own = new;
+                        last = new;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 fn credential(id: &str) -> String {
     format!("lan-peer-{id}")
@@ -438,23 +566,10 @@ fn session(
 }
 
 pub fn serve() -> Result<()> {
-    use std::os::windows::fs::OpenOptionsExt;
     let root = root()?;
-    retype_learning::transport::private_directory(
-        &root,
-        &retype_learning::transport::user_sid().map_err(|_| "无法识别用户")?,
-    )
-    .map_err(|_| "无法保护跨设备目录")?;
-    let _lock = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(root.join("host.lock"))
-    {
-        Ok(lock) => lock,
-        Err(_) => return Ok(()),
+    private_directory(&root)?;
+    let Ok(_lock) = host_lock(&root) else {
+        return Ok(());
     };
     let stop_file = root.join("stop");
     let _ = std::fs::remove_file(&stop_file);
@@ -465,13 +580,21 @@ pub fn serve() -> Result<()> {
         pair_until: None,
         pending_until: None,
         journal: Journal::default(),
-        seq: crate::runtime::now().saturating_mul(1000),
+        seq: now(),
         senders: Vec::new(),
         pair_code: String::new(),
         attempts: 0,
     }));
     let stop = Arc::new(AtomicBool::new(false));
     let clip_tx: Mailbox = Arc::new(Mutex::new(None));
+    #[cfg(target_os = "macos")]
+    {
+        let state = Arc::clone(&shared);
+        let quit = Arc::clone(&stop);
+        let mailbox = Arc::clone(&clip_tx);
+        let folder = root.clone();
+        std::thread::spawn(move || outbound::watch(state, quit, mailbox, folder));
+    }
     let mut clip_rx = Some(Arc::clone(&clip_tx));
     let mut listener = None;
     let mut identity = None;
@@ -485,6 +608,7 @@ pub fn serve() -> Result<()> {
             stop.store(true, Ordering::Relaxed);
             break;
         }
+        #[cfg(windows)]
         if let Some(active) = retype_learning::transport::read_machine_registry("ActiveDir") {
             if std::env::current_exe()
                 .ok()
@@ -547,6 +671,11 @@ pub fn serve() -> Result<()> {
                     Command::Remove(id) => {
                         s.config.peers.retain(|p| p.id != id);
                         let _ = retype_ai::secrets::save_cloud_password(&credential(&id), "");
+                        #[cfg(target_os = "macos")]
+                        let _ = retype_ai::secrets::save_cloud_password(
+                            &format!("lan-client-{id}"),
+                            "",
+                        );
                     }
                 }
                 config::write_json(&root.join("config.json"), &s.config)?;
@@ -580,6 +709,14 @@ pub fn serve() -> Result<()> {
                     [
                         ("id", s.config.id.as_str()),
                         ("version", "2"),
+                        (
+                            "platform",
+                            if cfg!(target_os = "macos") {
+                                "macos"
+                            } else {
+                                "windows"
+                            },
+                        ),
                         ("mode", s.status.mode.as_str()),
                     ]
                     .as_slice(),
@@ -620,6 +757,14 @@ pub fn serve() -> Result<()> {
                     [
                         ("id", s.config.id.as_str()),
                         ("version", "2"),
+                        (
+                            "platform",
+                            if cfg!(target_os = "macos") {
+                                "macos"
+                            } else {
+                                "windows"
+                            },
+                        ),
                         ("mode", s.status.mode.as_str()),
                     ]
                     .as_slice(),
@@ -707,6 +852,7 @@ fn local_addresses(port: u16) -> Vec<String> {
 }
 
 #[allow(unsafe_code)]
+#[cfg(windows)]
 fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
     use windows_sys::Win32::{
         Foundation::*,

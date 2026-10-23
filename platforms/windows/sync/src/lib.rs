@@ -1,6 +1,6 @@
 pub mod clipboard_protocol;
 pub mod config;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub mod lan;
 pub mod model;
 pub mod pairing;

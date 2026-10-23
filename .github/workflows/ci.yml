@@ -48,7 +48,9 @@ jobs:
             -p retype-english \
             -p retype-resources --features retype-resources/download \
             -p retype-updater \
-            -p retype-ffi
+            -p retype-ffi \
+            -p retype-services \
+            -p retype-macos
 
       - name: 内核 crate clippy
         # 注意：`-p` 必须放在 `--` 之前。`--` 之后的参数是传给 clippy-driver/rustc 的，
@@ -65,6 +67,8 @@ jobs:
             -p retype-resources --features retype-resources/download \
             -p retype-updater \
             -p retype-ffi \
+            -p retype-services \
+            -p retype-macos \
             -- -D warnings
 
   windows:

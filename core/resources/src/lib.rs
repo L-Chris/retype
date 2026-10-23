@@ -99,7 +99,8 @@ impl Component {
         fs::metadata(self.path(root)).is_ok_and(|m| {
             m.is_file()
                 && m.len() == self.bytes
-                && (!cfg!(target_os = "android") || m.permissions().readonly())
+                && (!cfg!(any(target_os = "android", target_os = "macos"))
+                    || m.permissions().readonly())
         })
     }
 }

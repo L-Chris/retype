@@ -6,6 +6,8 @@ This project was developed by Qwen3.8 Max.
 
 A Chinese input method for Windows and [Android](docs/android.md), built around a shared Rust input engine.
 
+A native [macOS preview](docs/macos.md) is also in development, with AppKit candidate and settings windows, AI translation and voice input, statistics, cloud sync, and LAN clipboard sharing. Mac runtime validation is still pending.
+
 [简体中文](README.zh-CN.md) · [Latest release](https://github.com/L-Chris/retype/releases/latest) · [Roadmap](docs/roadmap.md)
 
 ## Features

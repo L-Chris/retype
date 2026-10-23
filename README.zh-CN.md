@@ -6,6 +6,8 @@
 
 基于共享 Rust 输入内核的中文输入法，支持 Windows 和 [Android](docs/android.md)。
 
+新增开发中的 [macOS 原生预览版](docs/macos.md)，提供 AppKit 候选窗和设置页面、AI 翻译与语音输入、统计、云同步及局域网文字粘贴，尚待 Mac 真机验收。
+
 [English](README.md) · [最新版本](https://github.com/L-Chris/retype/releases/latest) · [路线图](docs/roadmap.md)
 
 ## 当前功能

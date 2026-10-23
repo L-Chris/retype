@@ -2709,6 +2709,7 @@ dependencies = [
  "retype-learning-store",
  "retype-pinyin",
  "retype-resources",
+ "retype-services",
  "retype-sync",
  "retype-types",
  "serde",
@@ -2852,6 +2853,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "retype-macos"
+version = "0.7.6"
+dependencies = [
+ "chrono",
+ "retype-ai",
+ "retype-dict",
+ "retype-engine",
+ "retype-english",
+ "retype-learning-store",
+ "retype-pinyin",
+ "retype-resources",
+ "retype-services",
+ "retype-sync",
+ "retype-types",
+ "retype-updater",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ureq",
+]
+
+[[package]]
 name = "retype-pinyin"
 version = "0.7.6"
 dependencies = [
@@ -2884,6 +2907,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "retype-services"
+version = "0.7.6"
+dependencies = [
+ "base64 0.22.1",
+ "retype-ai",
+ "retype-dict",
+ "retype-english",
+ "retype-learning-store",
+ "retype-pinyin",
+ "retype-resources",
+ "retype-sync",
+ "retype-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "retype-settings-egui"
 version = "0.7.6"
 dependencies = [
@@ -2909,6 +2949,7 @@ name = "retype-sync"
 version = "0.7.6"
 dependencies = [
  "base64 0.22.1",
+ "fs2",
  "hmac",
  "if-addrs",
  "mdns-sd",

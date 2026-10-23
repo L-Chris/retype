@@ -12,13 +12,12 @@ use retype_types::*;
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
-    sync::Mutex,
     sync::{mpsc, Arc},
     thread,
     time::Duration,
 };
 pub mod features;
-static LEARNING_IO: Mutex<()> = Mutex::new(());
+use retype_services::LEARNING_IO;
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
