@@ -8,6 +8,7 @@ NSString *RTDataRoot(void);
 NSDictionary *RTFeature(NSDictionary *command);
 NSString *RTSecret(NSString *account);
 BOOL RTSaveSecret(NSString *account, NSString *value);
+dispatch_queue_t RTSecretQueue(void);
 NSUInteger RTModifiers(NSEventModifierFlags flags);
 NSString *RTShortcutLabel(NSDictionary *binding);
 void RTRegisterHooks(void);
@@ -47,6 +48,7 @@ void RTRegisterHooks(void);
 @end
 @interface RTAppDelegate (Features)
 - (void)feature:(NSDictionary *)request completion:(void (^)(NSDictionary *))completion;
+- (void)feature:(NSDictionary *)request secretAccount:(NSString *)account field:(NSString *)field completion:(void (^)(NSDictionary *))completion;
 - (void)reloadRuntime;
 - (void)translate;
 - (void)voiceStartForTest:(BOOL)test;

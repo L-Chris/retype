@@ -1,5 +1,13 @@
 #import "App.h"
 #import <Security/Security.h>
+#ifdef RT_UI_SMOKE
+NSString *(^RTTestSecretRead)(NSString *);
+BOOL (^RTTestSecretSave)(NSString *,NSString *);
+#endif
+dispatch_queue_t RTSecretQueue(void) {
+    static dispatch_queue_t queue;static dispatch_once_t once;
+    dispatch_once(&once,^{queue=dispatch_queue_create("retype.keychain",DISPATCH_QUEUE_SERIAL);});return queue;
+}
 
 NSDictionary *RTFeature(NSDictionary *command) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:command options:0 error:NULL];
@@ -8,7 +16,7 @@ NSDictionary *RTFeature(NSDictionary *command) {
 }
 NSString *RTSecret(NSString *account) {
     #ifdef RT_UI_SMOKE
-    (void)account;return @"";
+    return RTTestSecretRead?RTTestSecretRead(account):@"";
     #else
     NSDictionary *query = @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService:@"io.github.retype.inputmethod.Retype", (__bridge id)kSecAttrAccount:account,
@@ -23,7 +31,7 @@ NSString *RTSecret(NSString *account) {
 }
 BOOL RTSaveSecret(NSString *account, NSString *value) {
     #ifdef RT_UI_SMOKE
-    (void)account;(void)value;return YES;
+    return RTTestSecretSave?RTTestSecretSave(account,value):YES;
     #else
     NSDictionary *query = @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService:@"io.github.retype.inputmethod.Retype", (__bridge id)kSecAttrAccount:account};

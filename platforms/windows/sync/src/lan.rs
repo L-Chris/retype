@@ -129,6 +129,32 @@ fn now() -> u64 {
         .as_millis()
         .min(u64::MAX as u128) as u64
 }
+// Bounded diagnostics contain connection metadata only, never clipboard text,
+// pairing codes, authentication tokens, or certificate private keys.
+fn diagnostic(root: &Path, event: &str, details: Value) {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let Ok(_guard) = LOCK.lock() else { return };
+    let path = root.join("diagnostics.jsonl");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= 256 * 1024) {
+        let previous = root.join("diagnostics.previous.jsonl");
+        let _ = std::fs::remove_file(&previous);
+        let _ = std::fs::rename(&path, previous);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
+        let _ = writeln!(
+            file,
+            "{}",
+            json!({"time_ms":now(),"event":event,"details":details})
+        );
+    }
+}
 pub fn root() -> Result<PathBuf> {
     Ok(config::root()?.join("lan"))
 }
@@ -198,7 +224,11 @@ fn macos_start() -> Result<()> {
     std::thread::Builder::new()
         .name("retype-mac-lan".into())
         .spawn(|| {
-            let _ = serve();
+            if let Err(error) = serve() {
+                if let Ok(root) = root() {
+                    diagnostic(&root, "service_error", json!({"message":error}));
+                }
+            }
             RUNNING.store(false, Ordering::Release);
         })
         .map(|_| ())
@@ -516,6 +546,7 @@ fn session(
                 state.status.code.clear();
                 state.status.mode.clear();
                 state.status.expires = 0;
+                diagnostic(root, "pairing_succeeded", json!({"peer":peer}));
                 state.status.message = "关联成功".into();
                 send(
                     &mut stream,
@@ -636,6 +667,7 @@ pub fn serve() -> Result<()> {
                         }
                     }
                     Command::Pair => {
+                        diagnostic(&root, "pairing_started", json!({"mode":"show"}));
                         s.config.enabled = true;
                         s.pair_until = Some(Instant::now() + Duration::from_secs(120));
                         s.pair_code = crate::pairing::new_code();
@@ -648,6 +680,7 @@ pub fn serve() -> Result<()> {
                     }
                     Command::Join(code) => {
                         if crate::pairing::valid_code(&code) {
+                            diagnostic(&root, "pairing_started", json!({"mode":"join"}));
                             s.config.enabled = true;
                             s.pair_until = Some(Instant::now() + Duration::from_secs(120));
                             s.pair_code = code;
@@ -721,7 +754,12 @@ pub fn serve() -> Result<()> {
                     ]
                     .as_slice(),
                 ) {
-                    let _ = mdns.register(info.enable_addr_auto());
+                    let registered = mdns.register(info.enable_addr_auto()).is_ok();
+                    diagnostic(
+                        &root,
+                        "advertisement_requested",
+                        json!({"success":registered,"port":port}),
+                    );
                 }
                 discovery = Some(mdns);
             }
@@ -735,6 +773,11 @@ pub fn serve() -> Result<()> {
                 s.status.message = "等待已关联设备连接".into();
             }
             drop(s);
+            diagnostic(
+                &root,
+                "listening",
+                json!({"port":port,"addresses":local_addresses(port)}),
+            );
             listener = Some(socket);
             if let Some(rx) = clip_rx.take() {
                 let quit = Arc::clone(&stop);
@@ -769,7 +812,12 @@ pub fn serve() -> Result<()> {
                     ]
                     .as_slice(),
                 ) {
-                    let _ = mdns.register(info.enable_addr_auto());
+                    let registered = mdns.register(info.enable_addr_auto()).is_ok();
+                    diagnostic(
+                        &root,
+                        "advertisement_requested",
+                        json!({"success":registered,"port":s.status.port,"mode":s.status.mode}),
+                    );
                 }
                 advertised_mode = s.status.mode.clone();
             }
@@ -788,7 +836,20 @@ pub fn serve() -> Result<()> {
                 let root = root.clone();
                 let clipboard = Arc::clone(&clip_tx);
                 std::thread::spawn(move || {
-                    let _ = session(connection, tls, &cert, &shared, &root, &quit, &clipboard);
+                    diagnostic(
+                        &root,
+                        "incoming_connection",
+                        json!({"address":address.to_string()}),
+                    );
+                    if let Err(error) =
+                        session(connection, tls, &cert, &shared, &root, &quit, &clipboard)
+                    {
+                        diagnostic(
+                            &root,
+                            "incoming_error",
+                            json!({"address":address.to_string(),"message":error}),
+                        );
+                    }
                     slots.fetch_sub(1, Ordering::Relaxed);
                 });
             }

@@ -12,9 +12,47 @@ static NSTextField *RTLabel(NSString *text, CGFloat size) {
     label.font = [NSFont systemFontOfSize:size]; label.textColor = RTInk(); label.selectable = NO;
     return label;
 }
+// Metadata only: no field values, provider URLs, credentials or input text.
+static void RTSettingsLog(NSString *event, NSInteger page, CFAbsoluteTime started, BOOL success) {
+    double elapsed=MAX(0,(CFAbsoluteTimeGetCurrent()-started)*1000);
+    NSDictionary *entry=@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":event,@"page":@(page),@"duration_ms":@(elapsed),@"success":@(success)};
+    static dispatch_queue_t queue;static dispatch_once_t once;
+    dispatch_once(&once,^{queue=dispatch_queue_create("retype.settings.diagnostics",DISPATCH_QUEUE_SERIAL);});
+    dispatch_async(queue,^{
+        NSString *directory=[RTDataRoot() stringByAppendingPathComponent:@"logs"];
+        NSFileManager *files=NSFileManager.defaultManager;
+        [files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:NULL];
+        NSString *path=[directory stringByAppendingPathComponent:@"settings-performance.jsonl"];
+        if([[files attributesOfItemAtPath:path error:NULL][NSFileSize] unsignedLongLongValue]>=262144){
+            NSString *previous=[path stringByAppendingString:@".previous"];
+            [files removeItemAtPath:previous error:NULL];[files moveItemAtPath:path toPath:previous error:NULL];
+        }
+        if(![files fileExistsAtPath:path])[files createFileAtPath:path contents:nil attributes:@{NSFilePosixPermissions:@0600}];
+        NSFileHandle *handle=[NSFileHandle fileHandleForWritingAtPath:path];
+        @try{[handle seekToEndOfFile];[handle writeData:[NSJSONSerialization dataWithJSONObject:entry options:0 error:NULL]];[handle writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];}@catch(NSException *e){(void)e;}@finally{[handle closeFile];}
+    });
+}
+static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
+    if([view isKindOfClass:NSSecureTextField.class]&&[view.identifier isEqual:path]){
+        NSSecureTextField *field=(NSSecureTextField *)view;field.enabled=value!=nil;
+        field.stringValue=value?:@"";field.placeholderString=value?@"":@"无法读取，请重新打开此页重试";
+    }
+    for(NSView *child in view.subviews)RTUpdateSecretFields(child,path,value);
+}
 @interface RTFlipped : NSView @end
 @implementation RTFlipped
 - (BOOL)isFlipped { return YES; }
+@end
+@interface RTNavigationCell : NSButtonCell @end
+@implementation RTNavigationCell
+- (NSRect)imageRectForBounds:(NSRect)bounds {
+    return NSMakeRect(NSMinX(bounds)+12,NSMidY(bounds)-9,18,18);
+}
+- (NSRect)titleRectForBounds:(NSRect)bounds {
+    NSRect rect=[super titleRectForBounds:bounds];
+    rect.origin.x=NSMinX(bounds)+38;rect.size.width=MAX(0,NSWidth(bounds)-50);
+    return rect;
+}
 @end
 @interface RTLightScroller : NSScroller @end
 @implementation RTLightScroller
@@ -121,6 +159,11 @@ static NSTextField *RTLabel(NSString *text, CGFloat size) {
 @property(nonatomic, strong) NSTimer *pageTimer;
 @property(nonatomic) BOOL lanLoading;
 @property(nonatomic, strong) NSProgressIndicator *progress;
+@property(nonatomic, strong) NSMutableDictionary *secretValues;
+@property(nonatomic, strong) NSMutableDictionary<NSString *,NSNumber *> *secretVersions;
+@property(nonatomic, strong) NSMutableSet<NSString *> *secretLoading;
+@property(nonatomic, strong) dispatch_queue_t secretQueue;
+@property(nonatomic, strong) NSTimer *performanceTimer;
 @end
 static RTSettings *RTLoadedSettings;
 @implementation RTSettings
@@ -146,6 +189,8 @@ static RTSettings *RTLoadedSettings;
     }); return controller;
 }
 - (void)setup {
+    self.secretValues=NSMutableDictionary.dictionary;self.secretVersions=NSMutableDictionary.dictionary;self.secretLoading=NSMutableSet.set;
+    self.secretQueue=RTSecretQueue();
     NSView *root = self.window.contentView; root.wantsLayer = YES;
     root.layer.backgroundColor = [NSColor colorWithCalibratedRed:246/255. green:249/255. blue:250/255. alpha:1].CGColor;
     NSView *sidebar = [[NSView alloc] initWithFrame:NSMakeRect(0,0,190,660)]; sidebar.wantsLayer = YES;
@@ -157,12 +202,16 @@ static RTSettings *RTLoadedSettings;
     NSArray *icons = @[@"keyboard",@"books.vertical",@"cpu",@"character.bubble",@"mic",@"command",@"chart.bar",@"cloud",@"doc.on.clipboard",@"info.circle"];
     self.navigation = [[NSStackView alloc] initWithFrame:NSMakeRect(12,68,166,490)];
     self.navigation.orientation = NSUserInterfaceLayoutOrientationVertical; self.navigation.spacing = 6; self.navigation.distribution = NSStackViewDistributionFillEqually;
+    self.navigation.alignment = NSLayoutAttributeLeading;
     [sidebar addSubview:self.navigation];
     for (NSUInteger i = 0; i < titles.count; i++) {
-        NSButton *button = [NSButton buttonWithTitle:titles[i] image:[NSImage imageWithSystemSymbolName:icons[i] accessibilityDescription:titles[i]] target:self action:@selector(navigate:)];
+        NSButton *button = [NSButton new];button.cell=[RTNavigationCell new];
+        button.title=titles[i];button.image=[NSImage imageWithSystemSymbolName:icons[i] accessibilityDescription:titles[i]];button.target=self;button.action=@selector(navigate:);
         button.tag = (NSInteger)i; button.bordered = NO; button.alignment = NSTextAlignmentLeft; button.imagePosition = NSImageLeft;
         button.font = [NSFont systemFontOfSize:14]; button.contentTintColor = RTInk(); button.wantsLayer = YES; button.layer.cornerRadius = 10;
         [self.navigation addArrangedSubview:button];
+        button.translatesAutoresizingMaskIntoConstraints=NO;
+        [button.widthAnchor constraintEqualToAnchor:self.navigation.widthAnchor].active=YES;
     }
     self.titleLabel = RTLabel(@"输入",24); self.titleLabel.frame = NSMakeRect(222,585,560,38); [root addSubview:self.titleLabel];
     self.scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(212,56,608,512)];
@@ -177,11 +226,22 @@ static RTSettings *RTLoadedSettings;
 }
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification; [self.progressTimer invalidate]; self.progressTimer = nil;
+    [self.performanceTimer invalidate];self.performanceTimer=nil;
     [self.pageTimer invalidate]; self.pageTimer = nil;
     [(RTAppDelegate *)NSApp.delegate voiceCancel];
 }
 - (void)showWindow:(id)sender {
     [super showWindow:sender]; [self startPageUpdates];
+    if(!self.performanceTimer){
+        __weak RTSettings *weakSelf=self;__block CFAbsoluteTime previous=CFAbsoluteTimeGetCurrent();
+        self.performanceTimer=[NSTimer timerWithTimeInterval:.25 repeats:YES block:^(NSTimer *timer){
+            RTSettings *self=weakSelf;if(!self){[timer invalidate];return;}
+            CFAbsoluteTime now=CFAbsoluteTimeGetCurrent();
+            if(now-previous>.40)RTSettingsLog(@"main_thread_delay",self.page,previous+.25,YES);
+            previous=now;
+        }];
+        [NSRunLoop.mainRunLoop addTimer:self.performanceTimer forMode:NSRunLoopCommonModes];
+    }
 }
 - (void)startPageUpdates {
     [self.pageTimer invalidate]; self.pageTimer = nil;
@@ -204,15 +264,28 @@ static RTSettings *RTLoadedSettings;
     NSMutableDictionary *p = providers.firstObject; self.providerID = p[@"id"]; return p;
 }
 - (id)read:(NSString *)path {
-    if ([path hasPrefix:@"secret:"]) return RTSecret([path substringFromIndex:7]) ?: @"";
+    if ([path hasPrefix:@"secret:"]) return self.secretValues[[path substringFromIndex:7]];
     if ([path isEqual:@"testModel"]) return self.testModel ?: [[self provider][@"models"] firstObject];
     if ([path hasPrefix:@"provider."]) return [[self provider] valueForKeyPath:[path substringFromIndex:9]];
     return [RTPreferences.shared.value valueForKeyPath:path];
 }
 - (void)write:(NSString *)path value:(id)value {
     if ([path hasPrefix:@"secret:"]) {
-        if (!RTSaveSecret([path substringFromIndex:7], value)) ((RTAppDelegate *)NSApp.delegate).messages[@(self.page)] = @"无法保存到钥匙串，请解锁后重试";
-        return;
+        NSString *account=[path substringFromIndex:7],*text=[value copy];
+        if([self.secretValues[account] isEqual:text])return;
+        NSUInteger version=[self.secretVersions[account] unsignedIntegerValue]+1;NSInteger page=self.page;
+        self.secretVersions[account]=@(version);self.secretValues[account]=text;
+        dispatch_async(self.secretQueue,^{
+            CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();BOOL success=RTSaveSecret(account,text);
+            RTSettingsLog(@"keychain_write",page,started,success);
+            dispatch_async(dispatch_get_main_queue(),^{
+                if(!success&&[self.secretVersions[account] unsignedIntegerValue]==version){
+                    [self.secretValues removeObjectForKey:account];
+                    ((RTAppDelegate *)NSApp.delegate).messages[@(page)]=@"无法保存到钥匙串，请解锁后重试";
+                    if(self.page==page)self.messageLabel.stringValue=@"无法保存到钥匙串，请解锁后重试";
+                }
+            });
+        });return;
     }
     if ([path isEqual:@"testModel"]) {
         self.testModel = value; NSMutableDictionary *p = [self provider];
@@ -237,6 +310,23 @@ static RTSettings *RTLoadedSettings;
 - (NSTextField *)rowLabel:(NSString *)title {
     NSTextField *label = RTLabel(title,14); label.frame = NSMakeRect(20,self.row+7,112,22); [self.card addSubview:label]; return label;
 }
+- (void)loadSecret:(NSString *)path field:(NSSecureTextField *)field {
+    NSString *account=[path substringFromIndex:7];id cached=self.secretValues[account];
+    if(cached){RTUpdateSecretFields(field,path,[cached isKindOfClass:NSString.class]?cached:nil);return;}
+    field.enabled=NO;field.placeholderString=@"正在读取钥匙串…";
+    if([self.secretLoading containsObject:account])return;
+    [self.secretLoading addObject:account];NSUInteger version=[self.secretVersions[account] unsignedIntegerValue];NSInteger page=self.page;
+    dispatch_async(self.secretQueue,^{
+        CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();NSString *value=RTSecret(account);
+        RTSettingsLog(@"keychain_read",page,started,value!=nil);
+        dispatch_async(dispatch_get_main_queue(),^{
+            [self.secretLoading removeObject:account];
+            if([self.secretVersions[account] unsignedIntegerValue]!=version)return;
+            self.secretValues[account]=value?:NSNull.null;
+            RTUpdateSecretFields(self.body,path,value);
+        });
+    });
+}
 - (NSTextField *)field:(NSString *)title path:(NSString *)path secure:(BOOL)secure {
     [self rowLabel:title];
     NSTextField *field = secure ? [[NSSecureTextField alloc] initWithFrame:NSMakeRect(140,self.row,392,34)] : [[NSTextField alloc] initWithFrame:NSMakeRect(140,self.row,392,34)];
@@ -244,7 +334,8 @@ static RTSettings *RTLoadedSettings;
     field.font = [NSFont systemFontOfSize:14]; field.identifier = path; field.delegate = self;
     field.controlSize = NSControlSizeLarge;
     field.editable=YES;field.selectable=YES;field.bezeled=YES;field.cell.usesSingleLineMode=YES;field.cell.scrollable=YES;
-    field.stringValue = [[self read:path] isKindOfClass:NSString.class] ? [self read:path] : [[self read:path] description] ?: @"";
+    if(secure)[self loadSecret:path field:(NSSecureTextField *)field];
+    else{ id value=[self read:path];field.stringValue=[value isKindOfClass:NSString.class]?value:[value description]?:@""; }
     field.bezelStyle = NSTextFieldRoundedBezel; field.drawsBackground = YES; field.backgroundColor = NSColor.whiteColor;
     [self.card addSubview:field]; self.row += 50; return field;
 }
@@ -286,6 +377,7 @@ static RTSettings *RTLoadedSettings;
 - (NSString *)cloudAccount { return RTFeature(@{@"type":@"cloudAccount",@"config":RTPreferences.shared.value[@"cloud"]})[@"value"] ?: @""; }
 - (void)refresh {
     if (!self.body) return;
+    CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();
     RTAppDelegate *app = (RTAppDelegate *)NSApp.delegate;
     for (NSView *view in self.body.subviews.copy) [view removeFromSuperview];
     self.y = 0; self.card = nil;
@@ -448,6 +540,7 @@ static RTSettings *RTLoadedSettings;
         __weak RTSettings *weakSelf = self;
         self.progressTimer = [NSTimer scheduledTimerWithTimeInterval:.25 repeats:YES block:^(NSTimer *t){(void)t;weakSelf.progress.doubleValue=rt_resources_progress(app.resources)/10.;}];
     } else if (!app.resourceBusy || self.page != 1) { [self.progressTimer invalidate];self.progressTimer=nil; }
+    RTSettingsLog(@"page_render",self.page,started,YES);
 }
 - (void)metric:(NSDictionary *)counts previous:(NSDictionary *)previous {
     for (NSUInteger i=0;i<2;i++) {
@@ -464,12 +557,18 @@ static RTSettings *RTLoadedSettings;
     self.row += previous?158:132;
 }
 - (void)navigate:(NSButton *)sender {
-    [self.window makeFirstResponder:nil]; self.page = sender.tag; [self.scroll.contentView scrollToPoint:NSZeroPoint]; [self refresh];
+    CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();
+    [self.window makeFirstResponder:nil];
+    // Re-read on explicit navigation so cloud changes and permission retries are
+    // reflected, while background refreshes reuse the current page's values.
+    [self.secretValues removeAllObjects];
+    self.page = sender.tag; [self.scroll.contentView scrollToPoint:NSZeroPoint]; [self refresh];
     [self startPageUpdates];
+    RTSettingsLog(@"page_switch",self.page,started,YES);
 }
 - (void)controlTextDidChange:(NSNotification *)notification {
     NSTextField *field=notification.object;NSString *path=field.identifier;if(!path)return;
-    if ([path hasPrefix:@"secret:"] && ![notification.name isEqual:NSControlTextDidEndEditingNotification]) return;
+    if ([path hasPrefix:@"secret:"] && (!field.enabled||![notification.name isEqual:NSControlTextDidEndEditingNotification])) return;
     id value=field.stringValue;
     if([path isEqual:@"ai.timeout_seconds"]){NSInteger seconds=field.integerValue;if(seconds<5||seconds>180)return;value=@(seconds);}
     [self write:path value:value];
@@ -484,7 +583,7 @@ static RTSettings *RTLoadedSettings;
     [RTPreferences.shared.value[@"ai"][@"providers"] addObject:p];self.providerID=p[@"id"];self.testModel=nil;[RTPreferences.shared save];[self refresh];
 }
 - (void)removeProvider:(id)sender {
-    (void)sender;NSMutableDictionary *p=[self provider];RTSaveSecret([@"ai/" stringByAppendingString:p[@"id"]],@"");
+    (void)sender;NSMutableDictionary *p=[self provider];[self write:[@"secret:ai/" stringByAppendingString:p[@"id"]] value:@""];
     [RTPreferences.shared.value[@"ai"][@"providers"] removeObject:p];self.providerID=nil;self.testModel=nil;[RTPreferences.shared save];[self refresh];
 }
 - (void)preset:(NSPopUpButton *)sender {
@@ -500,10 +599,9 @@ static RTSettings *RTLoadedSettings;
 }
 - (void)providerJob:(BOOL)test {
     [self.window makeFirstResponder:nil];RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;if([app.jobs containsObject:@"provider"])return;
-    NSDictionary *p=[[self provider] copy];NSString *id=p[@"id"];NSString *key=RTSecret([@"ai/" stringByAppendingString:id]);
-    if(!key){app.messages[@2]=@"无法读取钥匙串";[self refresh];return;}
+    NSDictionary *p=[[self provider] copy];NSString *id=p[@"id"];
     NSUInteger revision=RTPreferences.shared.revision;[app.jobs addObject:@"provider"];app.messages[@2]=test?@"测试中…":@"正在获取模型…";[self refresh];
-    [app feature:@{@"type":test?@"testProvider":@"models",@"provider":p,@"key":key,@"model":self.testModel?:[p[@"models"] firstObject]?:@""} completion:^(NSDictionary *r){
+    [app feature:@{@"type":test?@"testProvider":@"models",@"provider":p,@"model":self.testModel?:[p[@"models"] firstObject]?:@""} secretAccount:[@"ai/" stringByAppendingString:id] field:@"key" completion:^(NSDictionary *r){
         [app.jobs removeObject:@"provider"];app.messages[@2]=r[@"error"]?:@"连接成功";
         if(!test&&!r[@"error"]&&revision==RTPreferences.shared.revision){
             NSMutableDictionary *current=[self provider];
@@ -555,7 +653,7 @@ static RTSettings *RTLoadedSettings;
 - (void)loadLAN {
     if (self.lanLoading) return; self.lanLoading = YES;
     RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;
-    [app feature:@{@"type":@"lanStatus"} completion:^(NSDictionary *r){self.lanLoading=NO;if(!r[@"error"]){NSMutableDictionary *s=[app.syncStatus mutableCopy]?:NSMutableDictionary.dictionary;s[@"lan"]=r[@"value"];app.syncStatus=s;}else app.messages[@8]=r[@"error"];if(self.page==8)[RTSettings refreshIfLoaded];}];
+    [app feature:@{@"type":@"lanStatus"} completion:^(NSDictionary *r){self.lanLoading=NO;if(!r[@"error"]){if([app.syncStatus[@"lan"] isEqual:r[@"value"]])return;NSMutableDictionary *s=[app.syncStatus mutableCopy]?:NSMutableDictionary.dictionary;s[@"lan"]=r[@"value"];app.syncStatus=s;}else app.messages[@8]=r[@"error"];if(self.page==8)[RTSettings refreshIfLoaded];}];
 }
 - (void)lanCommand:(id)command{RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;[app feature:@{@"type":@"lanCommand",@"command":command} completion:^(NSDictionary *r){app.messages[@8]=r[@"error"]?:@"";dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),dispatch_get_main_queue(),^{[self loadLAN];});}];}
 - (void)lanEnable:(NSSwitch *)sender{[self lanCommand:@{@"Enable":@(sender.state==NSControlStateValueOn)}];}

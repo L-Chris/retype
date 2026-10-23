@@ -16,6 +16,8 @@ Ctrl/Alt/Shift translation combinations are registered as TSF preserved keys whi
 
 ## Text and replacement boundaries
 
+On macOS, translation prioritizes the current selection and replaces only that range. With no selection, it translates the entire input field. The source language is detected from the captured text using the same translation prompt as Windows and Android. InputMethodKit is preferred, with Accessibility as a fallback. Replacement requires the same focused client, input epoch, selection range, and original text; otherwise the translation is copied instead.
+
 The Windows adapter reads a complete TSF context range from its start to end, in bounded UTF-16 chunks. The range must expose ACP boundaries starting at zero, and the returned text length must equal the complete range length. Private/password/PIN input scopes, read-only contexts, embedded objects, invalid UTF-16, and unsupported or partial text stores are rejected. The optional NOHIDDENTEXT capability is required for automatic learning, but its absence does not deny an explicit translation request. Windows Search's composition-only fallback is not a full-text translation source.
 
 The host application defines its TSF context; compatibility must be verified for each editor. A document editor may expose an entire document, whereas a browser may expose one edit control. Unsupported contexts do not fall back to simulated Ctrl+A/C or silently translate a prefix. The local limit is 65,536 UTF-16 units, and provider model limits can be smaller. Empty, truncated, blocked, or oversized model output is never automatically written back.

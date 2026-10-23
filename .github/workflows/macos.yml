@@ -1,5 +1,10 @@
 name: macOS preview
 on:
+  workflow_call:
+    inputs:
+      source-ref:
+        type: string
+        default: ''
   push:
     branches: [main]
     paths:
@@ -32,6 +37,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source-ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin

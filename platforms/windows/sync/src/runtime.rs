@@ -96,7 +96,7 @@ pub fn launch() -> Result<()> {
                 .filter(|p| p.is_file())
         })
         .ok_or("找不到云同步后台，请安装包含云同步功能的版本")?;
-    retype_learning::client::launch_host(Some(&helper)).map_err(|_| "无法启动云同步后台".into())
+    retype_learning::client::launch_program(&helper).map_err(|_| "无法启动云同步后台".into())
 }
 pub fn command(config: &Config, command: Command) -> Result<()> {
     config::write_json(
@@ -572,7 +572,7 @@ pub fn serve() -> Result<()> {
             let path = PathBuf::from(active).join("retype-sync-host.exe");
             if path.is_file() && path.parent() != Some(directory.as_path()) {
                 drop(lock.take());
-                retype_learning::client::launch_host(Some(&path))
+                retype_learning::client::launch_program(&path)
                     .map_err(|_| "无法切换同步后台版本")?;
                 return Ok(());
             }

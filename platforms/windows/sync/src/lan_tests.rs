@@ -2,6 +2,52 @@ use super::*;
 use std::io::{BufRead, BufReader};
 type Client = BufReader<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
+// Standalone Rust tests have no AppKit host to register Keychain callbacks.
+// Keep synthetic credentials in memory; never touch the user's Keychain.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod test_secrets {
+    use std::{
+        collections::BTreeMap,
+        ffi::{c_char, CStr},
+        sync::{Mutex, OnceLock},
+    };
+    fn store() -> &'static Mutex<BTreeMap<String, String>> {
+        static STORE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+        STORE.get_or_init(Default::default)
+    }
+    unsafe extern "C" fn read(account: *const c_char, output: *mut u8, capacity: usize) -> isize {
+        let Ok(values) = store().lock() else {
+            return -1;
+        };
+        let name = CStr::from_ptr(account).to_string_lossy();
+        let value = values
+            .get(name.as_ref())
+            .map(String::as_bytes)
+            .unwrap_or_default();
+        if value.len() > capacity {
+            return -1;
+        }
+        std::ptr::copy_nonoverlapping(value.as_ptr(), output, value.len());
+        value.len() as isize
+    }
+    unsafe extern "C" fn save(account: *const c_char, value: *const c_char) -> bool {
+        let Ok(mut values) = store().lock() else {
+            return false;
+        };
+        let name = CStr::from_ptr(account).to_string_lossy().into_owned();
+        let value = CStr::from_ptr(value).to_string_lossy().into_owned();
+        if value.is_empty() {
+            values.remove(&name);
+        } else {
+            values.insert(name, value);
+        }
+        true
+    }
+    pub fn register() {
+        retype_ai::secrets::register(read, save);
+    }
+}
 struct Fixture {
     address: std::net::SocketAddr,
     state: Arc<Mutex<State>>,
@@ -14,6 +60,8 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        test_secrets::register();
         let certificate = rcgen::generate_simple_self_signed(vec!["retype.local".into()])
             .map_err(|e| e.to_string())?;
         let cert = certificate.cert.der().to_vec();

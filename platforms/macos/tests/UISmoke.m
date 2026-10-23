@@ -18,6 +18,113 @@ static void Inspect(NSView *root){
 @implementation RTCandidateTestOwner
 - (void)chooseCandidate:(NSUInteger)index generation:(uint64_t)generation{(void)index;(void)generation;}
 @end
+extern NSUInteger RTAXFocusQueries;
+extern NSString *(^RTTestSecretRead)(NSString *);
+extern BOOL (^RTTestSecretSave)(NSString *,NSString *);
+@interface RTSettings (UITest)
+- (void)navigate:(NSButton *)sender;
+- (void)write:(NSString *)path value:(id)value;
+@end
+static void PumpUntil(BOOL (^done)(void)){
+    CFAbsoluteTime deadline=CFAbsoluteTimeGetCurrent()+3;
+    while(!done()&&CFAbsoluteTimeGetCurrent()<deadline)[NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
+    Check(done(),@"Async settings operation must finish");
+}
+static void CheckAsyncSettings(RTSettings *settings){
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
+    RTTestSecretRead=^NSString *(NSString *account){
+        (void)account;Check(!NSThread.isMainThread,@"Settings must read Keychain off the main thread");
+        dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,DISPATCH_TIME_FOREVER);return @"synthetic-key";
+    };
+    [settings setValue:@2 forKey:@"page"];[settings refresh];
+    Check(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC))==0,@"Secret read starts in the background");
+    CFAbsoluteTime start=CFAbsoluteTimeGetCurrent();NSButton *target=[NSButton new];target.tag=0;[settings navigate:target];
+    Check(CFAbsoluteTimeGetCurrent()-start<.5,@"Switching tabs must finish while Keychain is blocked");
+    dispatch_semaphore_signal(release);
+    PumpUntil(^BOOL{return [[settings valueForKey:@"secretLoading"] count]==0;});RTTestSecretRead=nil;
+    __block NSUInteger writes=0;__block BOOL saved=NO,requestDone=NO,readAfterSave=NO;
+    RTTestSecretSave=^BOOL(NSString *account,NSString *value){
+        (void)account;(void)value;Check(!NSThread.isMainThread,@"Settings must save Keychain off the main thread");writes++;
+        dispatch_semaphore_signal(entered);dispatch_semaphore_wait(release,DISPATCH_TIME_FOREVER);saved=YES;return YES;
+    };
+    RTTestSecretRead=^NSString *(NSString *account){
+        (void)account;Check(!NSThread.isMainThread&&saved,@"Feature credential reads must run after queued settings writes");
+        readAfterSave=YES;return @"synthetic-key";
+    };
+    [settings write:@"secret:ui-test" value:@"synthetic-key"];[settings write:@"secret:ui-test" value:@"synthetic-key"];
+    Check(dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC))==0,@"Secret write starts in the background");
+    [(RTAppDelegate *)NSApp.delegate feature:@{@"type":@"ui-test-unknown-operation"} secretAccount:@"ui-test" field:@"key" completion:^(NSDictionary *result){
+        (void)result;Check(NSThread.isMainThread,@"Feature completion returns to AppKit");requestDone=YES;
+    }];
+    start=CFAbsoluteTimeGetCurrent();target.tag=1;[settings navigate:target];
+    Check(CFAbsoluteTimeGetCurrent()-start<.5,@"Switching tabs must finish while a Keychain save is blocked");
+    dispatch_semaphore_signal(release);
+    PumpUntil(^BOOL{return requestDone;});
+    RTTestSecretSave=nil;RTTestSecretRead=nil;
+    Check(writes==1&&readAfterSave,@"An unchanged credential must not be saved twice; actions use the completed save");
+    printf("Tab navigation stays responsive during blocked Keychain reads/writes; duplicate saves skipped.\n");
+}
+@interface RTDeletionClient : NSObject
+@property(nonatomic,copy) NSString *text;
+@property(nonatomic) NSRange selection;
+@property(nonatomic) NSUInteger reads;
+@property(nonatomic) BOOL partialRead;
+@end
+@implementation RTDeletionClient
+- (NSUInteger)length {return self.text.length;}
+- (NSRange)selectedRange {self.reads++;return self.selection;}
+- (NSString *)stringFromRange:(NSRange)range actualRange:(NSRangePointer)actual {
+    self.reads++;if(NSMaxRange(range)>self.text.length)return nil;
+    *actual=range;if(self.partialRead&&actual->length)actual->length--;return [self.text substringWithRange:range];
+}
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+    self.text=[self.text stringByReplacingCharactersInRange:range withString:text];
+}
+@end
+static void CheckDeletion(void){
+    RetypeInputController *controller=[RetypeInputController new];
+    RTDeletionClient *client=[RTDeletionClient new];client.text=@"hello";client.selection=NSMakeRange(5,0);
+    controller.activeClient=(id<IMKTextInput>)client;controller.closers=NSMutableArray.array;controller.chinese=YES;
+    NSUInteger queries=RTAXFocusQueries;
+    CFAbsoluteTime start=CFAbsoluteTimeGetCurrent();
+    for(NSUInteger i=0;i<1000;i++)Check(![controller pairSymbol:@"backspace"],@"Ordinary deletion belongs to the host");
+    Check(client.reads==0&&RTAXFocusQueries==queries,@"Repeated ordinary deletion must not query the client or Accessibility");
+    printf("1000 ordinary backspaces: %.2f ms, no client/AX queries.\n",(CFAbsoluteTimeGetCurrent()-start)*1000);
+    for(NSString *key in @[@"a",@"1",@" ",@".",@"\177"])Check(![controller pairSymbol:key],@"Non-pairing characters belong to the input engine");
+    Check(RTAXFocusQueries==queries,@"Ordinary characters must not query Accessibility");
+    client.text=@"a（）b";client.selection=NSMakeRange(2,0);[controller.closers addObject:@"）"];
+    Check([controller pairSymbol:@"backspace"]&&[client.text isEqual:@"ab"]&&!controller.closers.count,@"Backspace removes a tracked pair through the input-method client");
+    client.text=@"abc";client.selection=NSMakeRange(2,0);[controller.closers addObject:@"）"];
+    Check(![controller pairSymbol:@"backspace"]&&[client.text isEqual:@"abc"],@"A stale closer must not delete unrelated text");
+    client.text=@"（）";client.selection=NSMakeRange(0,2);
+    Check(![controller pairSymbol:@"backspace"],@"Selection deletion belongs to the host");
+    Check(RTAXFocusQueries==queries,@"Paired deletion must not query Accessibility either");
+}
+static void CheckTranslationCapture(void){
+    RetypeInputController *controller=[RetypeInputController new];controller.active=YES;
+    RTDeletionClient *client=[RTDeletionClient new];controller.activeClient=(id<IMKTextInput>)client;
+    NSUInteger queries=RTAXFocusQueries;
+    NSString *prefix=[@"x" stringByPaddingToLength:70000 withString:@"x" startingAtIndex:0];
+    client.text=[prefix stringByAppendingString:@"Hello 🌎 suffix"];
+    client.selection=[client.text rangeOfString:@"Hello 🌎"];
+    NSDictionary *capture=[controller captureText];
+    Check([capture[@"text"] isEqual:@"Hello 🌎"]&&[capture[@"selected"] boolValue],@"Only the selected UTF-16 range is captured, even in a large document");
+    Check([controller replaceCapture:capture text:@"你好 🌎"]&&[client.text isEqual:[prefix stringByAppendingString:@"你好 🌎 suffix"]],@"Translation replaces the selection and preserves surrounding text");
+    client.text=@"before Hello after Hello";client.selection=[client.text rangeOfString:@"Hello"];
+    capture=[controller captureText];client.selection=[client.text rangeOfString:@"Hello" options:NSBackwardsSearch];
+    Check(![controller replaceCapture:capture text:@"你好"],@"Moving the selection to identical text invalidates the capture");
+    client.selection=[client.text rangeOfString:@"Hello"];capture=[controller captureText];
+    client.text=@"before Hallo after Hello";
+    Check(![controller replaceCapture:capture text:@"你好"],@"Changed selected text must not be overwritten");
+    client.text=@"Hello";client.selection=NSMakeRange(5,0);capture=[controller captureText];
+    Check([capture[@"text"] isEqual:@"Hello"]&&![capture[@"selected"] boolValue],@"An empty selection preserves full-field translation");
+    client.partialRead=YES;Check(![controller replaceCapture:capture text:@"你好"],@"Partial text reads must not be replaced");client.partialRead=NO;
+    Check([controller replaceCapture:capture text:@"你好"]&&[client.text isEqual:@"你好"],@"An unchanged full field can be replaced");
+    client.text=@"Hello";client.selection=NSMakeRange(0,5);capture=[controller captureText];controller.epoch++;
+    Check(![controller replaceCapture:capture text:@"你好"],@"An input epoch change invalidates the translation");
+    Check(RTAXFocusQueries==queries,@"Supported translation clients must not need an AX fallback");
+    printf("Selection translation, Unicode, full-field fallback and stale-capture checks passed.\n");
+}
 int main(void){@autoreleasepool{
     Check(NSProcessInfo.processInfo.environment[@"RETYPE_TEST_ROOT"].length>0,@"A private test root is required");
     NSApplication *app=NSApplication.sharedApplication;
@@ -31,6 +138,15 @@ int main(void){@autoreleasepool{
     NSDictionary *count=@{@"chinese":@1066,@"english":@213,@"chineseMs":@1050000,@"englishMs":@47000,@"chineseSpeed":@61,@"englishSpeed":@270};
     delegate.statistics=@{@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
     RTSettings *settings=RTSettings.shared;[settings showWindow:nil];[settings.window makeKeyAndOrderFront:nil];
+    CheckAsyncSettings(settings);
+    CheckDeletion();
+    CheckTranslationCapture();
+    NSStackView *navigation=[settings valueForKey:@"navigation"];
+    [settings.window.contentView layoutSubtreeIfNeeded];
+    for(NSButton *button in navigation.arrangedSubviews){
+        Check(fabs(NSWidth(button.frame)-NSWidth(navigation.bounds))<1&&fabs(NSMinX(button.frame))<1,@"Navigation rows must fill the sidebar at a shared left edge");
+        Check(fabs(NSMinX([button.cell titleRectForBounds:button.bounds])-38)<1,@"Navigation titles share a left inset");
+    }
     NSString *output=[RTDataRoot() stringByAppendingPathComponent:@"screenshots"];[NSFileManager.defaultManager createDirectoryAtPath:output withIntermediateDirectories:YES attributes:nil error:NULL];
     for(NSInteger page=0;page<10;page++){
         [settings.window makeFirstResponder:nil];[settings setValue:@(page) forKey:@"page"];[settings refresh];

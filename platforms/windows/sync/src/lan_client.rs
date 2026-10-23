@@ -250,6 +250,7 @@ pub(super) fn connect(
                     s.pair_code.clear();
                     s.status.code.clear();
                     s.status.mode.clear();
+                    diagnostic(root, "pairing_succeeded", json!({"peer":remote}));
                     s.status.message = "关联成功".into();
                     paired = true;
                 }
@@ -299,8 +300,16 @@ pub(super) fn watch(
     clipboard: Mailbox,
     root: PathBuf,
 ) {
-    let Ok(mdns) = mdns_sd::ServiceDaemon::new() else {
-        return;
+    let mdns = match mdns_sd::ServiceDaemon::new() {
+        Ok(mdns) => mdns,
+        Err(_) => {
+            diagnostic(
+                &root,
+                "discovery_error",
+                json!({"message":"无法启动设备发现"}),
+            );
+            return;
+        }
     };
     let mut events = None;
     let active = Arc::new(Mutex::new(std::collections::BTreeSet::<String>::new()));
@@ -318,6 +327,11 @@ pub(super) fn watch(
         }
         if events.is_none() {
             events = mdns.browse("_retype-clip._tcp.local.").ok();
+            diagnostic(
+                &root,
+                "discovery_started",
+                json!({"success":events.is_some()}),
+            );
         }
         let Some(receiver) = events.as_ref() else {
             std::thread::sleep(Duration::from_secs(3));
@@ -327,6 +341,11 @@ pub(super) fn watch(
             Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
                 let id = info.get_property_val_str("id").unwrap_or("").to_owned();
                 if config::valid_id(&id) && (nearby.contains_key(&id) || nearby.len() < 64) {
+                    diagnostic(
+                        &root,
+                        "device_discovered",
+                        json!({"peer":id,"port":info.get_port(),"addresses":info.get_addresses_v4().into_iter().map(|ip|ip.to_string()).collect::<Vec<_>>(),"mode":info.get_property_val_str("mode").filter(|mode|matches!(*mode,"show"|"join")).unwrap_or("")}),
+                    );
                     nearby.insert(id, info);
                 }
             }
@@ -379,7 +398,17 @@ pub(super) fn watch(
             let folder = root.clone();
             let active = Arc::clone(&active);
             std::thread::spawn(move || {
+                diagnostic(
+                    &folder,
+                    "connection_started",
+                    json!({"peer":id,"address":address.to_string()}),
+                );
                 let result = connect(address, &id, &state, &quit, &clips, &folder);
+                diagnostic(
+                    &folder,
+                    "connection_ended",
+                    json!({"peer":id,"address":address.to_string(),"error":result.as_ref().err()}),
+                );
                 if let Ok(mut a) = active.lock() {
                     a.remove(&id);
                 }

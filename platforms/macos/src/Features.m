@@ -62,9 +62,27 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
 
 @implementation RTAppDelegate (Features)
 - (void)feature:(NSDictionary *)request completion:(void (^)(NSDictionary *))completion {
+    [self feature:request secretAccount:nil field:nil completion:completion];
+}
+- (void)feature:(NSDictionary *)request secretAccount:(NSString *)account field:(NSString *)field completion:(void (^)(NSDictionary *))completion {
     NSMutableDictionary *command=[request mutableCopy];command[@"root"]=RTDataRoot();
     NSData *snapshot=[NSJSONSerialization dataWithJSONObject:command options:0 error:NULL];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{NSString *json=[[NSString alloc] initWithData:snapshot encoding:NSUTF8StringEncoding];NSDictionary *result=RTJSON(rt_feature(json.UTF8String));dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(result);});});
+    void (^execute)(NSString *)=^(NSString *secret){
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+            NSMutableDictionary *work=[NSJSONSerialization JSONObjectWithData:snapshot options:NSJSONReadingMutableContainers error:NULL];
+            if(account)work[field]=secret;
+            NSDictionary *result=RTFeature(work);
+            dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(result);});
+        });
+    };
+    if(!account){execute(nil);return;}
+    // Share ordering with settings writes: clicking Test immediately after
+    // editing a key must use the newly saved value without blocking AppKit.
+    dispatch_async(RTSecretQueue(),^{
+        NSString *secret=RTSecret(account);
+        if(secret)execute(secret);
+        else dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(@{@"error":@"无法读取钥匙串"});});
+    });
 }
 - (void)reloadRuntime {
     if(!self.runtime)return;RtRuntime *runtime=self.runtime;NSUInteger mask=[RTPreferences.shared.value[@"packs"] unsignedIntegerValue];
@@ -78,12 +96,11 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
 }
 - (void)syncCloud:(BOOL)test confirm:(BOOL)confirm resolution:(NSDictionary *)resolution {
     if([self.jobs containsObject:@"cloud"])return;
-    NSDictionary *preferences=RTCopyDocument(),*config=preferences[@"cloud"];NSString *password=RTSecret([@"sync/" stringByAppendingString:RTCloudAccount(config)]);
-    if(!password){self.messages[@7]=@"无法读取钥匙串";[RTSettings refreshIfLoaded];return;}
-    NSUInteger revision=RTPreferences.shared.revision;NSMutableDictionary *command=[@{@"type":test?@"syncTest":@"cloudSync",@"preferences":preferences,@"config":config,@"password":password,@"confirm":@(confirm)} mutableCopy];
+    NSDictionary *preferences=RTCopyDocument(),*config=preferences[@"cloud"];
+    NSUInteger revision=RTPreferences.shared.revision;NSMutableDictionary *command=[@{@"type":test?@"syncTest":@"cloudSync",@"preferences":preferences,@"config":config,@"confirm":@(confirm)} mutableCopy];
     if(resolution)[command addEntriesFromDictionary:resolution];
     [self.jobs addObject:@"cloud"];self.messages[@7]=test?@"测试中…":@"同步中…";[RTSettings refreshIfLoaded];
-    [self feature:command completion:^(NSDictionary *r){
+    [self feature:command secretAccount:[@"sync/" stringByAppendingString:RTCloudAccount(config)] field:@"password" completion:^(NSDictionary *r){
         [self.jobs removeObject:@"cloud"];
         if(r[@"error"]){self.messages[@7]=r[@"error"];[RTSettings refreshIfLoaded];return;}
         if(test){self.messages[@7]=@"连接成功";[RTSettings refreshIfLoaded];return;}
@@ -111,10 +128,9 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
     if([self.jobs containsObject:@"translation"])return;
     id<RTEditor> editor=self.editor;NSDictionary *capture=[editor captureText];
     if(!capture||capture[@"error"]){[RTToast.shared show:capture[@"error"]?:@"输入框为空" busy:NO];return;}
-    NSDictionary *config=RTCopyDocument()[@"ai"];NSString *key=RTSecret([@"ai/" stringByAppendingString:config[@"provider"]]);
-    if(!key){[RTToast.shared show:@"无法读取钥匙串" busy:NO];return;}
+    NSDictionary *config=RTCopyDocument()[@"ai"];
     [self.jobs addObject:@"translation"];[RTToast.shared show:@"翻译中…" busy:YES];
-    [self feature:@{@"type":@"translate",@"config":config,@"text":capture[@"text"],@"key":key} completion:^(NSDictionary *r){
+    [self feature:@{@"type":@"translate",@"config":config,@"text":capture[@"text"]} secretAccount:[@"ai/" stringByAppendingString:config[@"provider"]] field:@"key" completion:^(NSDictionary *r){
         [self.jobs removeObject:@"translation"];if(r[@"error"]){[RTToast.shared show:r[@"error"] busy:NO];return;}
         NSString *text=r[@"value"];if(![text isKindOfClass:NSString.class]||!text.length){[RTToast.shared show:@"没有收到译文" busy:NO];return;}
         void (^apply)(void)=^{if([editor replaceCapture:capture text:text])[RTToast.shared show:@"翻译完成" busy:NO];else{[NSPasteboard.generalPasteboard clearContents];[NSPasteboard.generalPasteboard setString:text forType:NSPasteboardTypeString];[RTToast.shared show:@"译文已复制" busy:NO];}};

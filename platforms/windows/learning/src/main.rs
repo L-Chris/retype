@@ -96,7 +96,7 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
     if custom_db.is_none() {
         let sync = directory.join("retype-sync-host.exe");
         if sync.is_file() {
-            let _ = retype_learning::client::launch_host(Some(&sync));
+            let _ = retype_learning::client::launch_program(&sync);
         }
     }
     loop {

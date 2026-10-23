@@ -64,7 +64,6 @@ impl LearningStore for Client {
 }
 
 pub fn launch_host(fallback: Option<&std::path::Path>) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
     let host = transport::read_machine_registry("ActiveDir")
         .map(|dir| PathBuf::from(dir).join("retype-learning-host.exe"))
         .filter(|path| path.is_file())
@@ -74,7 +73,13 @@ pub fn launch_host(fallback: Option<&std::path::Path>) -> std::io::Result<()> {
                 .map(std::path::Path::to_path_buf)
         })
         .ok_or(std::io::ErrorKind::NotFound)?;
-    std::process::Command::new(host)
+    launch_program(&host)
+}
+
+/// Start an already-resolved helper without substituting the learning broker.
+pub fn launch_program(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new(path)
         .arg("--serve")
         .creation_flags(0x08000000)
         .spawn()?;

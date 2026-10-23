@@ -101,10 +101,16 @@ jobs:
       source-ref: ${{ needs.metadata.outputs.tag }}
     secrets: inherit
 
+  macos:
+    needs: metadata
+    uses: ./.github/workflows/macos.yml
+    with:
+      source-ref: ${{ needs.metadata.outputs.tag }}
+
   publish:
     name: Publish validated installer
-    needs: [metadata, build, android]
-    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
+    needs: [metadata, build, android, macos]
+    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && needs.macos.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -125,6 +131,10 @@ jobs:
         with:
           name: dictionary-resources
           path: dist/dictionaries
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-preview
+          path: dist/macos
       - uses: softprops/action-gh-release@v3
         # Include Android when stable signing credentials have been configured.
         with:
@@ -137,6 +147,8 @@ jobs:
             dist/dictionaries/*.gz
             dist/dictionaries/*.retype-resources
             dist/dictionaries/resources.json
+            dist/macos/*.zip
+            dist/macos/*.sha256
             ${{ needs.android.result == 'success' && 'dist/android/*.apk' || '' }}
             ${{ needs.android.result == 'success' && 'dist/android/*.sha256' || '' }}
           fail_on_unmatched_files: true

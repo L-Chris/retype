@@ -33,6 +33,8 @@ Frames are bounded newline-delimited JSON. Messages carry a protocol version, or
 
 Windows metadata/status lives under `%LOCALAPPDATA%\retype\sync\lan` with private user ACLs; certificate keys and peer tokens use Windows Credential Manager. Android uses a separate local preference file and encrypts its token with Android Keystore. Pairing metadata and credentials are excluded from settings/cloud snapshots.
 
+Desktop connection diagnostics are written to `diagnostics.jsonl` in that directory, or `~/Library/Application Support/retype/sync/lan/` on macOS. Events include listener addresses, discovery, connection attempts, pairing success and errors; they exclude clipboard text, matching codes and credentials. The log rotates at 256 KiB with one previous file. `status.json` shows only the latest state, not historical failures. On macOS, if local-network access was granted after the service started but devices remain undiscovered, restart retype before retrying association.
+
 ## Validation
 
 Rust tests cover fragmented frames, limits, duplicate/expired/reordered events, simultaneous-copy convergence, TLS pairing, bidirectional text delivery, reconnection and revocation. The opt-in `android_emulator_bidirectional_clipboard` fixture plus `LanClipboardTest` checks the actual Android TLS client, matching-code exchange, system clipboard and outgoing clipboard listener against a synthetic Windows endpoint without touching the desktop user's clipboard.

@@ -32,11 +32,9 @@
 }
 - (void)begin:(NSUInteger)generation {
     NSDictionary *config=RTPreferences.shared.value[@"ai"],*settings=config[@"voice"];
-    NSString *key=RTSecret([@"ai/" stringByAppendingString:settings[@"provider"]?:@""]);
-    if(!key){[self fail:@"无法读取钥匙串"];return;}
     self.sessionID=NSUUID.UUID.UUIDString;NSString *session=self.sessionID;
     RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;
-    [app feature:@{@"type":@"voiceStart",@"id":session,@"config":config,@"settings":settings,@"key":key} completion:^(NSDictionary *r){
+    [app feature:@{@"type":@"voiceStart",@"id":session,@"config":config,@"settings":settings} secretAccount:[@"ai/" stringByAppendingString:settings[@"provider"]?:@""] field:@"key" completion:^(NSDictionary *r){
         if(!self.running||self.generation!=generation){[app feature:@{@"type":@"voiceCancel",@"id":session} completion:nil];return;}
         if(r[@"error"]){[self fail:r[@"error"]];return;}
         @try {
