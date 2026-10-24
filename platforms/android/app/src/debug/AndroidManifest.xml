@@ -2,5 +2,6 @@
     <application>
         <activity android:name=".EditorFixtureActivity" android:exported="true" />
         <activity android:name=".StatisticsChartFixtureActivity" android:exported="false" />
+        <activity android:name=".UpdateTransitionFixtureActivity" android:exported="false" />
     </application>
 </manifest>

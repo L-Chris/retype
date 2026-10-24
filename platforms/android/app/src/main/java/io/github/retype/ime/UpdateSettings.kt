@@ -8,10 +8,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 @Composable
-internal fun UpdateCard() {
+internal fun UpdateCard(updateStatus: State<UpdateStatus> = AppUpdates.status.collectAsState()) {
   val context = LocalContext.current
   val prefs = remember { AppStore(context).prefs }
-  val status by AppUpdates.status.collectAsState()
+  // Draw/semantics callbacks can outlive this composition after a download ends.
+  // Keep their values consistent with the branch that created the indicator.
+  val status = updateStatus.value
   var auto by remember { mutableStateOf(prefs.getBoolean("updatesAutoCheck", true)) }
   var notes by remember { mutableStateOf(false) }
   SettingsCard {
@@ -24,9 +26,10 @@ internal fun UpdateCard() {
     if (status.message.isNotBlank())
         Text(status.message, style = MaterialTheme.typography.bodyMedium)
     if (status.busy) {
-      if (status.progress != null)
+      val progress = status.progress
+      if (progress != null)
           LinearProgressIndicator(
-              progress = { status.progress!! }, modifier = Modifier.fillMaxWidth())
+              progress = { progress }, modifier = Modifier.fillMaxWidth())
       else LinearProgressIndicator(Modifier.fillMaxWidth())
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
