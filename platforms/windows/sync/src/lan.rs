@@ -356,6 +356,22 @@ fn broadcast(state: &mut State, clip: &Clip) {
         }
     }
 }
+fn configure_session_socket(socket: &TcpStream) -> Result<()> {
+    // Windows and macOS accepts inherit the nonblocking listener's mode. These
+    // per-peer workers use blocking reads with a timeout; SO_RCVTIMEO alone does not
+    // make a nonblocking socket wait and would cause a core-consuming loop.
+    socket
+        .set_nonblocking(false)
+        .map_err(|_| "无法设置连接等待模式")?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .map_err(|_| "无法设置连接超时")?;
+    socket
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|_| "无法设置发送超时")?;
+    socket.set_nodelay(true).map_err(|_| "无法设置连接")?;
+    Ok(())
+}
 fn session(
     socket: TcpStream,
     tls: Arc<ServerConfig>,
@@ -365,13 +381,7 @@ fn session(
     stop: &AtomicBool,
     clipboard: &Mailbox,
 ) -> Result<()> {
-    socket
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .map_err(|_| "无法设置连接超时")?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(3)))
-        .map_err(|_| "无法设置发送超时")?;
-    socket.set_nodelay(true).map_err(|_| "无法设置连接")?;
+    configure_session_socket(&socket)?;
     let connection = ServerConnection::new(tls).map_err(|_| "TLS 初始化失败")?;
     let mut stream = StreamOwned::new(connection, socket);
     let mut decoder = Decoder::default();

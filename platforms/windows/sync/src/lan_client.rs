@@ -352,6 +352,19 @@ pub(super) fn watch(
             Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => {
                 nearby.retain(|_, info| info.get_fullname() != name);
             }
+            Err(mdns_sd::RecvTimeoutError::Disconnected) => {
+                // A closed channel returns immediately instead of waiting for
+                // recv_timeout. Recreate the browse with backoff, never spin.
+                diagnostic(
+                    &root,
+                    "discovery_error",
+                    json!({"message":"设备发现已中断，稍后重试"}),
+                );
+                events = None;
+                nearby.clear();
+                std::thread::sleep(Duration::from_secs(3));
+                continue;
+            }
             _ => {}
         }
         if scan.elapsed() < Duration::from_secs(3) {

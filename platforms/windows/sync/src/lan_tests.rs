@@ -2,6 +2,39 @@ use super::*;
 use std::io::{BufRead, BufReader};
 type Client = BufReader<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
+#[test]
+fn idle_accepted_socket_waits_for_input_instead_of_spinning() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let mut client = TcpStream::connect(listener.local_addr().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let (mut accepted, _) = listener.accept().map_err(|e| e.to_string())?;
+    // Winsock inherits the listener's nonblocking mode. Force that precondition
+    // on every platform so macOS tests cover the Windows regression too.
+    accepted.set_nonblocking(true).map_err(|e| e.to_string())?;
+    configure_session_socket(&accepted)?;
+    let start = Instant::now();
+    let error = match accepted.read(&mut [0; 1]) {
+        Err(error) => error,
+        Ok(_) => return Err("peer has sent no data".into()),
+    };
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    assert!(
+        start.elapsed() >= Duration::from_millis(100),
+        "idle read returned immediately; the session would spin"
+    );
+    // A real message still wakes the read immediately; no unconditional sleep
+    // is added to the session's clipboard delivery path.
+    client.write_all(b"x").map_err(|e| e.to_string())?;
+    let mut byte = [0; 1];
+    accepted.read_exact(&mut byte).map_err(|e| e.to_string())?;
+    assert_eq!(&byte, b"x");
+    Ok(())
+}
+
 // Standalone Rust tests have no AppKit host to register Keychain callbacks.
 // Keep synthetic credentials in memory; never touch the user's Keychain.
 #[cfg(target_os = "macos")]
