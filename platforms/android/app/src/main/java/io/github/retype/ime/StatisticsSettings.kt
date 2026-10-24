@@ -14,15 +14,26 @@ import kotlinx.coroutines.*
 fun StatisticsPage() {
     val context = LocalContext.current
     var period by remember { mutableIntStateOf(0) }
+    var version by remember { mutableStateOf<String?>(null) }
+    var versions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var versionMenu by remember { mutableStateOf(false) }
     var summary by remember { mutableStateOf<StatisticsSummary?>(null) }
     var voice by remember { mutableStateOf(Counts()) }
     var recent by remember { mutableStateOf(Counts()) }
-    LaunchedEffect(period) {
-        summary = withContext(Dispatchers.IO) { TypingStatistics.get(context).summary(period) }
-        voice = withContext(Dispatchers.IO) { TypingStatistics.get(context).voiceTotal() }
-        recent = withContext(Dispatchers.IO) { TypingStatistics.get(context).recent() }
+    LaunchedEffect(period,version) {
+        versions=withContext(Dispatchers.IO) { TypingStatistics.get(context).versions() }
+        summary = withContext(Dispatchers.IO) { TypingStatistics.get(context).summary(period,version=version) }
+        voice = withContext(Dispatchers.IO) { TypingStatistics.get(context).voiceTotal(version) }
+        recent = withContext(Dispatchers.IO) { TypingStatistics.get(context).recent(version=version) }
     }
     Text("手机端统计", style = MaterialTheme.typography.titleMedium)
+    Box {
+        TextButton(onClick={versionMenu=true}) { Text("版本：${version?.ifEmpty { "历史未标记版本" }?:"全部版本"} ▾") }
+        DropdownMenu(expanded=versionMenu,onDismissRequest={versionMenu=false}) {
+            DropdownMenuItem(text={Text("全部版本")},onClick={version=null;versionMenu=false})
+            versions.forEach { v -> DropdownMenuItem(text={Text(v.ifEmpty { "历史未标记版本" })},onClick={version=v;versionMenu=false}) }
+        }
+    }
     if (voice.chinese > 0 || voice.englishWords > 0) SettingsCard { Text("累计语音输入"); Text("中文 ${voice.chinese} 字 · 英文 ${voice.englishWords} 词") }
     Row {
         listOf("天", "周", "月", "年").forEachIndexed { i, s ->
@@ -92,7 +103,7 @@ fun StatisticsPage() {
                 s.bars
                     .maxOfOrNull { maxOf(it.second.speed(true) ?: 0, it.second.speed(false) ?: 0) }
                     ?.coerceAtLeast(1) ?: 1
-            var selected by remember { mutableStateOf<Pair<String, Counts>?>(null) }
+            var selected by remember(period,version) { mutableStateOf<Pair<String, Counts>?>(null) }
             Row(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).height(150.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

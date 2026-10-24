@@ -296,8 +296,10 @@ fn termination_barrier_flushes_only_acknowledged_learning_and_numeric_statistics
         retype_sync::statistics::capture(&path.with_extension("statistics"), &"a".repeat(32))
             .unwrap();
     assert_eq!(rows.iter().map(|r| r.counts.english_words).sum::<u64>(), 2);
-    let logs =
-        std::fs::read_to_string(path.with_extension("statistics").join("macos.log")).unwrap();
+    let logs = std::fs::read_to_string(path.with_extension("statistics").join(
+        retype_sync::statistics::versioned_stream("macos.log", env!("CARGO_PKG_VERSION")),
+    ))
+    .unwrap();
     assert!(!logs.contains("macospersistword"));
     assert_eq!(
         runtime

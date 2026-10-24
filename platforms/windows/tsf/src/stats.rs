@@ -1,5 +1,6 @@
 //! Count-only typing statistics. The TSF callback only queues small numeric deltas;
 //! a worker writes them outside the host's input/edit transaction.
+use retype_types::statistics::{Attempt, InputStats, LogRecord, Totals};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -7,7 +8,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(windows)]
 use windows::Win32::System::Registry::*;
+#[cfg(windows)]
 use windows_core::w;
 
 const IDLE_GAP: Duration = Duration::from_secs(15);
@@ -24,6 +27,9 @@ pub(crate) struct ActivityClock {
     last: Option<(Instant, Language)>,
     words: retype_types::statistics::WordCounter,
     composition_ms: u32,
+    attempt: Attempt,
+    direct_words: retype_types::statistics::WordCounter,
+    direct_attempt: Attempt,
 }
 
 impl ActivityClock {
@@ -40,16 +46,61 @@ impl ActivityClock {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.cancel_attempt();
         self.finish_word();
         self.last = None;
         self.composition_ms = 0;
     }
+    pub(crate) fn discard(&mut self) {
+        self.attempt = Attempt::default();
+        self.reset();
+    }
+    fn cancel_attempt(&mut self) {
+        if self.attempt.take().active {
+            enqueue(Delta {
+                timestamp_ms: now_ms(),
+                input: InputStats {
+                    cancelled: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+    }
+    fn finish_direct(&mut self, input: &mut InputStats) {
+        let words = self.direct_words.finish();
+        let attempt = self.direct_attempt.take();
+        if words > 0 {
+            input.record(
+                false,
+                words.into(),
+                attempt.deletions > 0,
+                attempt.deletions,
+            );
+        }
+    }
+    fn direct_input(&mut self, text: &str, input: &mut InputStats) {
+        for ch in text.chars() {
+            if self.direct_words.feed(&ch.to_string()) > 0 {
+                let attempt = self.direct_attempt.take();
+                input.record(false, 1, attempt.deletions > 0, attempt.deletions);
+            }
+            if self.direct_words.checkpoint().contains(&1) {
+                self.direct_attempt.active = true;
+            } else if self.direct_words.checkpoint().is_empty() {
+                self.direct_attempt = Attempt::default();
+            }
+        }
+    }
     fn finish_word(&mut self) {
         let words = self.words.finish();
-        if words > 0 {
+        let mut input = InputStats::default();
+        self.finish_direct(&mut input);
+        if words > 0 || input != InputStats::default() {
             enqueue(Delta {
                 timestamp_ms: now_ms(),
                 english_words: words,
+                input,
                 ..Default::default()
             });
         }
@@ -65,10 +116,12 @@ struct Delta {
     english_active_ms: u32,
     english_words: u32,
     english_word_ms: u32,
+    input: InputStats,
 }
 
 impl Delta {
     fn add(&mut self, other: Self) {
+        self.input.add(&other.input);
         self.chinese = self.chinese.saturating_add(other.chinese);
         self.english = self.english.saturating_add(other.english);
         self.chinese_active_ms = self
@@ -86,10 +139,16 @@ static SENDER: OnceLock<Option<SyncSender<Delta>>> = OnceLock::new();
 #[cfg(test)]
 thread_local! {
     static TEST_WORDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_INPUT: std::cell::RefCell<InputStats> = std::cell::RefCell::new(InputStats::default());
 }
 #[cfg(test)]
 pub(crate) fn take_test_words() -> u32 {
     TEST_WORDS.with(|words| words.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_input() -> InputStats {
+    TEST_INPUT.with(|value| std::mem::take(&mut *value.borrow_mut()))
 }
 
 fn now_ms() -> u64 {
@@ -101,25 +160,28 @@ fn now_ms() -> u64 {
 }
 
 fn directory() -> Option<PathBuf> {
-    let mut buffer = [0u16; 32768];
-    let mut bytes = (buffer.len() * 2) as u32;
-    // SAFETY: UTF-16 buffer and byte length match. A provisioned absolute path is
-    // needed because AppContainer LOCALAPPDATA points at a different profile.
-    let result = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\retype"),
-            w!("StatisticsPath"),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buffer.as_mut_ptr().cast()),
-            Some(&mut bytes),
-        )
-    };
-    if result.is_ok() {
-        let length = buffer.iter().position(|ch| *ch == 0)?;
-        let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
-        return path.is_absolute().then_some(path);
+    #[cfg(windows)]
+    {
+        let mut buffer = [0u16; 32768];
+        let mut bytes = (buffer.len() * 2) as u32;
+        // SAFETY: UTF-16 buffer and byte length match. A provisioned absolute path is
+        // needed because AppContainer LOCALAPPDATA points at a different profile.
+        let result = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\retype"),
+                w!("StatisticsPath"),
+                RRF_RT_REG_SZ,
+                None,
+                Some(buffer.as_mut_ptr().cast()),
+                Some(&mut bytes),
+            )
+        };
+        if result.is_ok() {
+            let length = buffer.iter().position(|ch| *ch == 0)?;
+            let path = PathBuf::from(String::from_utf16_lossy(&buffer[..length]));
+            return path.is_absolute().then_some(path);
+        }
     }
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -144,6 +206,8 @@ fn enqueue(delta: Delta) {
     if cfg!(test) {
         #[cfg(test)]
         TEST_WORDS.with(|words| words.set(words.get().saturating_add(delta.english_words)));
+        #[cfg(test)]
+        TEST_INPUT.with(|value| value.borrow_mut().add(&delta.input));
         // TSF integration tests exercise the real edit path without changing
         // the developer's personal statistics.
         return;
@@ -186,12 +250,39 @@ pub(crate) fn composition_activity(clock: &Mutex<ActivityClock>) {
 pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
     let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
     let delta = commit_delta(&mut clock, text, boundary);
-    if delta.chinese + delta.english + delta.english_words > 0 {
+    if delta.chinese + delta.english + delta.english_words > 0
+        || delta.input != InputStats::default()
+    {
         enqueue(delta);
     }
 }
 fn commit_delta(clock: &mut ActivityClock, text: &str, boundary: bool) -> Delta {
     let (chinese, english) = count(text);
+    let mut input = InputStats::default();
+    if clock.attempt.active && (chinese > 0 || english > 0) {
+        let attempt = clock.attempt.take();
+        if chinese > 0 {
+            input.record(
+                true,
+                chinese.into(),
+                attempt.deletions > 0,
+                attempt.deletions,
+            );
+        }
+        let mut counter = retype_types::statistics::WordCounter::default();
+        let words = counter.feed(text) + counter.finish();
+        if words > 0 {
+            input.record(
+                false,
+                words.into(),
+                attempt.deletions > 0,
+                if chinese == 0 { attempt.deletions } else { 0 },
+            );
+        }
+    } else if chinese == 0 {
+        clock.direct_input(text, &mut input);
+    }
+
     let mut english_words = clock.words.feed(text);
     if boundary {
         english_words = english_words.saturating_add(clock.words.finish());
@@ -212,6 +303,7 @@ fn commit_delta(clock: &mut ActivityClock, text: &str, boundary: bool) -> Delta 
         chinese_active_ms: chinese_ms,
         english_active_ms: english_ms,
         english_word_ms: english_ms,
+        input,
     }
 }
 pub(crate) fn boundary(clock: &Mutex<ActivityClock>) {
@@ -220,12 +312,36 @@ pub(crate) fn boundary(clock: &Mutex<ActivityClock>) {
         .unwrap_or_else(|p| p.into_inner())
         .finish_word();
 }
-pub(crate) fn backspace(clock: &Mutex<ActivityClock>) {
+/// Called only after a successful edit transaction. Partial choices retain the round.
+pub(crate) fn composition_edit(
+    clock: &Mutex<ActivityClock>,
+    before: (bool, usize),
+    after: (bool, usize),
+    backspace: bool,
+) {
+    let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
     clock
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .words
-        .backspace();
+        .attempt
+        .edit(before.0, after.0, backspace && before.1 > after.1);
+}
+pub(crate) fn backspace(clock: &Mutex<ActivityClock>) {
+    let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
+    clock.words.backspace();
+    if clock.direct_words.checkpoint().contains(&1) {
+        clock.direct_attempt.deletions = clock.direct_attempt.deletions.saturating_add(1);
+    }
+    clock.direct_words.backspace();
+    if clock.direct_words.checkpoint().is_empty() && clock.direct_attempt.active {
+        clock.direct_attempt = Attempt::default();
+        enqueue(Delta {
+            timestamp_ms: now_ms(),
+            input: InputStats {
+                cancelled: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    }
 }
 
 fn count(text: &str) -> (u32, u32) {
@@ -253,9 +369,10 @@ fn writer(receiver: Receiver<Delta>, root: PathBuf, voice: bool) {
     }
     let started = now_ms();
     let file = root.join(format!(
-        "{}{}-{started}.log",
+        "{}{}-{started}@{}.log",
         if voice { "voice-" } else { "" },
-        std::process::id()
+        std::process::id(),
+        env!("CARGO_PKG_VERSION")
     ));
     let mut pending = BTreeMap::<u64, Delta>::new();
     let mut next_flush = Instant::now() + FLUSH_INTERVAL;
@@ -299,16 +416,22 @@ fn flush(path: &PathBuf, pending: &mut BTreeMap<u64, Delta>) {
     let mut lines = String::new();
     for (second, delta) in pending.iter() {
         use std::fmt::Write as _;
-        let _ = writeln!(
-            lines,
-            "{second},{},{},{},{},{},{}",
-            delta.chinese,
-            delta.english,
-            delta.chinese_active_ms,
-            delta.english_active_ms,
-            delta.english_words,
-            delta.english_word_ms
-        );
+        let record = LogRecord {
+            second: *second,
+            version: env!("CARGO_PKG_VERSION").into(),
+            counts: Totals {
+                chinese: delta.chinese.into(),
+                english: delta.english.into(),
+                chinese_ms: delta.chinese_active_ms.into(),
+                english_ms: delta.english_active_ms.into(),
+                english_words: delta.english_words.into(),
+                english_word_ms: delta.english_word_ms.into(),
+                input: delta.input,
+            },
+        };
+        if let Ok(json) = serde_json::to_string(&record) {
+            let _ = writeln!(lines, "{json}");
+        }
     }
     let original_len = file.metadata().map_or(0, |metadata| metadata.len());
     if file.write_all(lines.as_bytes()).is_ok() {
@@ -421,6 +544,7 @@ mod tests {
                 english_active_ms: 500,
                 english_words: 1,
                 english_word_ms: 500,
+                ..Default::default()
             })
             .expect("statistics receiver");
         drop(sender);
@@ -431,10 +555,92 @@ mod tests {
             .expect("statistics file")
             .expect("statistics entry")
             .path();
+        let record: LogRecord =
+            serde_json::from_str(&std::fs::read_to_string(log).expect("statistics data"))
+                .expect("record");
+        assert_eq!(record.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(
-            std::fs::read_to_string(log).expect("statistics data"),
-            "1000,2,3,400,500,1,500\n"
+            (
+                record.second,
+                record.counts.chinese,
+                record.counts.english_words
+            ),
+            (1000, 2, 1)
         );
         std::fs::remove_dir_all(root).expect("remove test statistics");
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn repeated_spelling_deletions_count_one_round_and_partial_choice_is_not_a_deletion() {
+        let clock = Mutex::new(ActivityClock::default());
+        composition_edit(&clock, (false, 0), (true, 6), false);
+        composition_edit(&clock, (true, 6), (true, 5), true);
+        composition_edit(&clock, (true, 5), (true, 4), true);
+        // Choosing a partial candidate consumes spelling; reopening it restores spelling.
+        composition_edit(&clock, (true, 4), (true, 0), false);
+        composition_edit(&clock, (true, 0), (true, 4), true);
+        let delta = commit_delta(&mut clock.lock().unwrap(), "你好！", true);
+        let total = delta.input.total(true);
+        assert_eq!((total.inputs, total.corrected, total.units), (1, 1, 2));
+        assert_eq!(delta.input.spelling_deletions, 2);
+        assert_eq!(
+            commit_delta(&mut clock.lock().unwrap(), "。", true).input,
+            InputStats::default()
+        );
+        assert!(!clock.lock().unwrap().attempt.active);
+    }
+    #[test]
+    fn cancelled_empty_focus_and_rejected_rounds_do_not_enter_success_denominator() {
+        take_test_input();
+        let clock = Mutex::new(ActivityClock::default());
+        composition_edit(&clock, (false, 0), (true, 1), false);
+        composition_edit(&clock, (true, 1), (false, 0), true);
+        clock.lock().unwrap().reset();
+        clock.lock().unwrap().reset();
+        assert_eq!(take_test_input().cancelled, 1);
+        composition_edit(&clock, (false, 0), (true, 2), false);
+        clock.lock().unwrap().reset();
+        assert_eq!(take_test_input().cancelled, 1);
+        composition_edit(&clock, (false, 0), (true, 2), false);
+        clock.lock().unwrap().discard();
+        assert_eq!(take_test_input(), InputStats::default());
+        composition_edit(&clock, (false, 0), (true, 2), false);
+        let delta = commit_delta(&mut clock.lock().unwrap(), "你", true);
+        assert_eq!(delta.input.total(true).inputs, 1);
+        assert_eq!(delta.input.total(true).corrected, 0);
+    }
+    #[test]
+    fn direct_english_chunks_and_composed_phrases_have_distinct_units() {
+        let clock = Mutex::new(ActivityClock::default());
+        assert_eq!(
+            commit_delta(&mut clock.lock().unwrap(), "hel", false).input,
+            InputStats::default()
+        );
+        backspace(&clock);
+        let delta = commit_delta(&mut clock.lock().unwrap(), "llo ", false);
+        assert_eq!(
+            (
+                delta.input.total(false).inputs,
+                delta.input.total(false).corrected
+            ),
+            (1, 1)
+        );
+        assert_eq!(delta.input.spelling_deletions, 1);
+        composition_edit(&clock, (false, 0), (true, 5), false);
+        let delta = commit_delta(&mut clock.lock().unwrap(), "hello world ", false);
+        assert_eq!(delta.input.english[1].inputs, 1);
+        assert_eq!(delta.input.total(false).units, 2);
+        assert_eq!(
+            commit_delta(&mut clock.lock().unwrap(), "!", false).input,
+            InputStats::default()
+        );
+        take_test_input();
+        clock.lock().unwrap().reset();
+        assert_eq!(take_test_input(), InputStats::default());
     }
 }

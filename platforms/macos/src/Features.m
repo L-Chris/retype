@@ -92,7 +92,7 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
 - (void)loadStatistics:(NSInteger)period {
     NSUInteger request=++self.statisticsRequest;[self.jobs addObject:@"statistics"];
     NSString *device=RTPreferences.shared.value[@"cloud"][@"device_id"];
-    [self feature:@{@"type":@"statistics",@"device":device,@"period":@(period)} completion:^(NSDictionary *r){if(request!=self.statisticsRequest)return;[self.jobs removeObject:@"statistics"];if(r[@"error"])self.messages[@6]=r[@"error"];else self.statistics=r[@"value"];[RTSettings refreshIfLoaded];}];
+    [self feature:@{@"type":@"statistics",@"device":device,@"period":@(period),@"version":self.statisticsVersion?:NSNull.null} completion:^(NSDictionary *r){if(request!=self.statisticsRequest)return;[self.jobs removeObject:@"statistics"];if(r[@"error"])self.messages[@6]=r[@"error"];else self.statistics=r[@"value"];[RTSettings refreshIfLoaded];}];
 }
 - (void)syncCloud:(BOOL)test confirm:(BOOL)confirm resolution:(NSDictionary *)resolution {
     if([self.jobs containsObject:@"cloud"])return;

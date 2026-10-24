@@ -8,40 +8,13 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
-pub struct Counts {
-    pub chinese: u64,
-    pub english: u64,
-    pub chinese_ms: u64,
-    pub english_ms: u64,
-    pub english_words: u64,
-    pub english_word_ms: u64,
+pub use retype_sync::statistics::Counts;
+fn voice_stream(stream: &str) -> bool {
+    stream.starts_with("voice-") || retype_sync::statistics::is_stream(stream, "macos-voice.log")
 }
-impl Counts {
-    fn add(&mut self, other: Self) {
-        self.chinese = self.chinese.saturating_add(other.chinese);
-        self.english = self.english.saturating_add(other.english);
-        self.chinese_ms = self.chinese_ms.saturating_add(other.chinese_ms);
-        self.english_ms = self.english_ms.saturating_add(other.english_ms);
-        self.english_words = self.english_words.saturating_add(other.english_words);
-        self.english_word_ms = self.english_word_ms.saturating_add(other.english_word_ms);
-    }
-    #[cfg(test)]
-    pub fn total(self) -> u64 {
-        self.chinese.saturating_add(self.english)
-    }
-    pub fn chinese_speed(self) -> Option<u64> {
-        speed(self.chinese, self.chinese_ms)
-    }
-    pub fn english_speed(self) -> Option<u64> {
-        (self.english_words >= 5 && self.english_word_ms >= 10_000).then(|| {
-            (self.english_words as f64 * 60_000.0 / self.english_word_ms as f64).round() as u64
-        })
-    }
-}
+#[cfg(test)]
 pub fn speed(count: u64, active_ms: u64) -> Option<u64> {
-    (count >= 10 && active_ms >= 10_000)
-        .then(|| (count as f64 * 60_000.0 / active_ms as f64).round() as u64)
+    retype_types::statistics::speed(count, active_ms, 10)
 }
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Period {
@@ -51,6 +24,7 @@ pub enum Period {
     Year,
 }
 impl Period {
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn label(self) -> &'static str {
         match self {
             Self::Day => "天",
@@ -91,6 +65,7 @@ pub struct Snapshot {
     pub chinese_speed: Option<u64>,
     pub english_speed: Option<u64>,
     pub days: BTreeMap<NaiveDate, Counts>,
+    pub by_version: BTreeMap<String, Snapshot>,
 }
 impl Snapshot {
     pub fn history(&self, today: NaiveDate, period: Period) -> Vec<(NaiveDate, Counts)> {
@@ -107,7 +82,7 @@ impl Snapshot {
                 let mut counts = Counts::default();
                 for (day, value) in &self.days {
                     if period.start(*day) == start {
-                        counts.add(*value);
+                        counts.add(value);
                     }
                 }
                 (start, counts)
@@ -119,8 +94,8 @@ struct Cache {
     size: u64,
     modified: Option<SystemTime>,
     offset: u64,
-    days: BTreeMap<NaiveDate, Counts>,
-    recent: Vec<(i64, Counts)>,
+    days: BTreeMap<(String, NaiveDate), Counts>,
+    recent: Vec<(i64, String, Counts)>,
 }
 pub struct Store {
     root: PathBuf,
@@ -173,7 +148,7 @@ impl Store {
                     days: BTreeMap::new(),
                     recent: Vec::new(),
                 });
-            cache.recent.retain(|(time, _)| *time >= now - 300_000);
+            cache.recent.retain(|(time, _, _)| *time >= now - 300_000);
             if metadata.len() != cache.size
                 || modified != cache.modified
                 || cache.offset < metadata.len()
@@ -193,12 +168,21 @@ impl Store {
                             continue;
                         }
                         let text = String::from_utf8_lossy(&line);
-                        let values: Option<Vec<u64>> =
-                            text.trim().split(',').map(|v| v.parse().ok()).collect();
-                        let Some(values) = values.filter(|v| v.len() == 5 || v.len() == 7) else {
+                        let Some(mut row) = retype_sync::statistics::parse_record(text.trim())
+                        else {
                             continue;
                         };
-                        let Some(time) = values[0]
+                        if row.version.is_empty() {
+                            row.version = retype_sync::statistics::stream_version(
+                                &path.file_name().unwrap_or_default().to_string_lossy(),
+                            )
+                            .to_owned();
+                        }
+                        if !retype_sync::statistics::valid_version(&row.version) {
+                            continue;
+                        }
+                        let Some(time) = row
+                            .second
                             .checked_mul(1000)
                             .and_then(|v| i64::try_from(v).ok())
                         else {
@@ -214,17 +198,14 @@ impl Store {
                         else {
                             continue;
                         };
-                        let counts = Counts {
-                            chinese: values[1],
-                            english: values[2],
-                            chinese_ms: values[3],
-                            english_ms: values[4],
-                            english_words: values.get(5).copied().unwrap_or(0),
-                            english_word_ms: values.get(6).copied().unwrap_or(0),
-                        };
-                        cache.days.entry(date).or_default().add(counts);
+                        let counts = row.counts;
+                        cache
+                            .days
+                            .entry((row.version.clone(), date))
+                            .or_default()
+                            .add(&counts);
                         if time >= now - 300_000 {
-                            cache.recent.push((time, counts));
+                            cache.recent.push((time, row.version, counts));
                         }
                     }
                 }
@@ -235,36 +216,41 @@ impl Store {
         }
         self.files.retain(|path, _| seen.contains(path));
         let mut result = Snapshot::default();
-        let mut recent = Counts::default();
-        let mut last_chinese = 0;
-        let mut last_english = 0;
+        let mut recent = BTreeMap::<String, (Counts, i64, i64)>::new();
         for (path, cache) in &self.files {
-            if path
+            let voice = path
                 .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with("voice-"))
-            {
-                for counts in cache.days.values() {
-                    result.voice.add(*counts);
+                .is_some_and(|name| voice_stream(&name.to_string_lossy()));
+            for ((version, day), counts) in &cache.days {
+                let target = result.by_version.entry(version.clone()).or_default();
+                if voice {
+                    target.voice.add(counts);
+                } else {
+                    target.days.entry(*day).or_default().add(counts);
                 }
+            }
+            if voice {
                 continue;
             }
-            for (day, counts) in &cache.days {
-                result.days.entry(*day).or_default().add(*counts);
-            }
-            for (time, counts) in &cache.recent {
-                recent.add(*counts);
+            for (time, version, counts) in &cache.recent {
+                let entry = recent.entry(version.clone()).or_default();
+                entry.0.add(counts);
                 if counts.chinese > 0 {
-                    last_chinese = last_chinese.max(*time);
+                    entry.1 = entry.1.max(*time);
                 }
                 if counts.english_words > 0 {
-                    last_english = last_english.max(*time);
+                    entry.2 = entry.2.max(*time);
                 }
             }
         }
         if let Ok(bytes) = fs::read(self.root.join("cloud-history.json")) {
             if let Ok(rows) = serde_json::from_slice::<Vec<retype_sync::statistics::Bucket>>(&bytes)
             {
-                for row in rows {
+                for mut row in rows {
+                    if row.version.is_empty() {
+                        row.version =
+                            retype_sync::statistics::stream_version(&row.stream).to_owned();
+                    }
                     // Preserve Android rows in sync storage, excluding them from desktop totals.
                     if row.stream.starts_with("android") {
                         continue;
@@ -279,12 +265,9 @@ impl Store {
                     if seconds.saturating_mul(1000) < reset || seconds.saturating_mul(1000) > now {
                         continue;
                     }
-                    if row.stream.starts_with("voice-") {
-                        result.voice.add(Counts {
-                            chinese: row.counts.chinese,
-                            english_words: row.counts.english_words,
-                            ..Default::default()
-                        });
+                    let target = result.by_version.entry(row.version).or_default();
+                    if voice_stream(&row.stream) {
+                        target.voice.add(&row.counts);
                         continue;
                     }
                     if let Some(date) = Local
@@ -292,33 +275,46 @@ impl Store {
                         .single()
                         .map(|v| v.date_naive())
                     {
-                        result.days.entry(date).or_default().add(Counts {
-                            chinese: row.counts.chinese,
-                            english: row.counts.english,
-                            chinese_ms: row.counts.chinese_ms,
-                            english_ms: row.counts.english_ms,
-                            english_words: row.counts.english_words,
-                            english_word_ms: row.counts.english_word_ms,
-                        });
+                        target.days.entry(date).or_default().add(&row.counts);
                     }
                 }
             }
         }
-        for counts in result.days.values() {
-            result.total.add(*counts);
-        }
-        if let Some(today) = Local
+        let today = Local
             .timestamp_millis_opt(now)
             .single()
-            .map(|v| v.date_naive())
-        {
-            result.today = result.days.get(&today).copied().unwrap_or_default();
+            .map(|v| v.date_naive());
+        let mut all_recent = (Counts::default(), 0, 0);
+        for (version, target) in &mut result.by_version {
+            for (day, counts) in &target.days {
+                target.total.add(counts);
+                result.days.entry(*day).or_default().add(counts);
+            }
+            target.today = today
+                .and_then(|d| target.days.get(&d).copied())
+                .unwrap_or_default();
+            result.total.add(&target.total);
+            result.voice.add(&target.voice);
+            if let Some((counts, zh, en)) = recent.get(version) {
+                if now - *zh <= 30_000 {
+                    target.chinese_speed = counts.chinese_speed();
+                }
+                if now - *en <= 30_000 {
+                    target.english_speed = counts.english_speed();
+                }
+                all_recent.0.add(counts);
+                all_recent.1 = all_recent.1.max(*zh);
+                all_recent.2 = all_recent.2.max(*en);
+            }
         }
-        if now - last_chinese <= 30_000 {
-            result.chinese_speed = recent.chinese_speed();
+        result.today = today
+            .and_then(|d| result.days.get(&d).copied())
+            .unwrap_or_default();
+        if now - all_recent.1 <= 30_000 {
+            result.chinese_speed = all_recent.0.chinese_speed();
         }
-        if now - last_english <= 30_000 {
-            result.english_speed = recent.english_speed();
+        if now - all_recent.2 <= 30_000 {
+            result.english_speed = all_recent.0.english_speed();
         }
         Ok(result)
     }
@@ -415,6 +411,7 @@ mod tests {
         let rows = [("android.log", 1000, 2000), ("remote-desktop.log", 30, 40)].map(
             |(stream, chinese, english)| retype_sync::statistics::Bucket {
                 device: "a".repeat(32),
+                version: String::new(),
                 stream: stream.into(),
                 minute: (now / 60000) as u64,
                 counts: retype_sync::statistics::Counts {
@@ -511,6 +508,70 @@ mod tests {
         fs::remove_file(root.join("keyboard.log"))?;
         fs::remove_file(root.join("voice-synthetic.log"))?;
         fs::remove_dir(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn all_versions_and_filtered_history_weight_raw_counts_and_keep_legacy_unknown(
+    ) -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("retype-version-statistics-{}", std::process::id()));
+        fs::create_dir_all(&root)?;
+        let now = Local::now().timestamp_millis();
+        let mut lines = String::new();
+        for (version, words) in [("0.8.0", 5), ("0.9.0", 20)] {
+            let mut counts = Counts {
+                english_words: words,
+                english_word_ms: 10_000,
+                ..Default::default()
+            };
+            counts.input.record(true, 2, version == "0.8.0", 1);
+            lines.push_str(&serde_json::to_string(
+                &retype_sync::statistics::LogRecord {
+                    second: (now / 1000) as u64,
+                    version: version.into(),
+                    counts,
+                },
+            )?);
+            lines.push('\n');
+        }
+        lines.push_str(&format!("{},0,5000,0,600000\n", now / 1000));
+        fs::write(root.join("typing.log"), lines)?;
+        let mut store = Store::new(root.clone());
+        let all = store.load(now)?;
+        assert_eq!(all.by_version.len(), 3);
+        assert_eq!(all.total.english_speed(), Some(75));
+        assert_eq!(all.total.input.total(true).inputs, 2);
+        assert_eq!(all.total.input.total(true).corrected, 1);
+        assert_eq!(all.by_version["0.8.0"].total.english_speed(), Some(30));
+        assert_eq!(all.by_version["0.9.0"].english_speed, Some(120));
+        assert_eq!(all.by_version[""].total.english, 5000);
+        assert_eq!(all.by_version[""].total.input, Default::default());
+        let today = Local::now().date_naive();
+        for period in [Period::Day, Period::Week, Period::Month, Period::Year] {
+            assert_eq!(
+                all.history(today, period).last().unwrap().1.english_speed(),
+                Some(75)
+            );
+            assert_eq!(
+                all.by_version["0.8.0"]
+                    .history(today, period)
+                    .last()
+                    .unwrap()
+                    .1
+                    .input
+                    .total(true)
+                    .corrected,
+                1
+            );
+        }
+        assert_eq!(store.load(now)?.total, all.total);
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 }

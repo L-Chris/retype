@@ -717,9 +717,13 @@ fn run_host() -> Result<()> {
             retype_types::PinyinScheme::Full,
         ));
         *lock(&state.session) = Some(session);
+        let _ = stats::take_test_input();
         for ch in "nihao".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
+        request(&state, &context, Work::Key(Key::Backspace, Modifiers::NONE))?;
+        request(&state, &context, Work::Key(Key::Char('o'), Modifiers::NONE))?;
+        assert_eq!(stats::take_test_input().total(true).inputs, 0);
         assert!(lock(&seen_candidates).iter().any(|word| word == "你好"));
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "nihao");
         assert!(lock(&state.composition).is_some());
@@ -733,6 +737,15 @@ fn run_host() -> Result<()> {
         candidate_list.Finalize()?;
         assert_eq!(String::from_utf16_lossy(&lock(&data).text), "你好");
         assert!(lock(&state.composition).is_none());
+        let measured = stats::take_test_input();
+        assert_eq!(
+            (
+                measured.total(true).inputs,
+                measured.total(true).corrected,
+                measured.total(true).units
+            ),
+            (1, 1, 2)
+        );
         // Deferred writes must not touch the engine/document before the host grants its lock.
         lock(&data).defer = true;
         request(&state, &context, Work::Key(Key::Char('n'), Modifiers::NONE))?;

@@ -13,7 +13,7 @@ name = "retype_ime"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-retype-types = { workspace = true }
+retype-types = { workspace = true, features = ["serde"] }
 retype-resources = { path = "../../../core/resources" }
 retype-pinyin = { workspace = true }
 retype-dict = { workspace = true }

@@ -136,7 +136,7 @@ int main(void){@autoreleasepool{
     p[@"ai"][@"provider"]=@"validation-provider";p[@"ai"][@"model"]=@"test-model";
     p[@"ai"][@"voice"][@"provider"]=@"validation-provider";p[@"ai"][@"voice"][@"model"]=@"test-model";
     NSDictionary *count=@{@"chinese":@1066,@"english":@213,@"chineseMs":@1050000,@"englishMs":@47000,@"chineseSpeed":@61,@"englishSpeed":@270};
-    delegate.statistics=@{@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
+    delegate.statistics=@{@"versions":@[@"",@"0.8.0",@"0.9.0"],@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
     RTSettings *settings=RTSettings.shared;[settings showWindow:nil];[settings.window makeKeyAndOrderFront:nil];
     CheckAsyncSettings(settings);
     CheckDeletion();
@@ -151,6 +151,7 @@ int main(void){@autoreleasepool{
     for(NSInteger page=0;page<10;page++){
         [settings.window makeFirstResponder:nil];[settings setValue:@(page) forKey:@"page"];[settings refresh];
         NSView *body=[settings valueForKey:@"body"];NSTextField *header=[settings valueForKey:@"titleLabel"];NSRect titleFrame=header.frame;
+        if(page==6){NSPopUpButton *versions=(NSPopUpButton *)Find(body,@"statistics-version");Check(versions.numberOfItems==4&&[versions.titleOfSelectedItem isEqual:@"全部版本"],@"Statistics defaults to all versions and includes unmarked history");}
         Inspect(body);for(NSView *card in body.subviews)Check(NSMaxX(card.frame)<=NSWidth(body.bounds)-12,@"Content must reserve its scrollbar gutter");
         NSScrollView *scroll=[settings valueForKey:@"scroll"];[scroll.contentView scrollToPoint:NSMakePoint(0,MAX(0,NSHeight(body.bounds)-100))];Check(NSEqualRects(header.frame,titleFrame),@"Page title must remain fixed while content scrolls");[scroll.contentView scrollToPoint:NSZeroPoint];
         [settings.window.contentView layoutSubtreeIfNeeded];[settings.window.contentView displayIfNeeded];

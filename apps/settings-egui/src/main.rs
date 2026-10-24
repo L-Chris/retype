@@ -15,7 +15,7 @@ mod lan;
 #[cfg(windows)]
 #[path = "../../../platforms/windows/common/settings_log.rs"]
 mod settings_log;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod statistics;
 #[cfg(windows)]
 mod voice;

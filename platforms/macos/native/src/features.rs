@@ -284,7 +284,7 @@ pub fn perform(v: Value) -> Result<Value> {
         "packCatalog"=>Ok(Value::Array(packs()?.into_iter().map(|p|json!({"id":p.id,"title":p.title,"description":p.description,"bytes":p.bytes})).collect())),
         "installPack"=>install_pack(Path::new(field(&v,"root")?),field(&v,"id")?),
         "validateShortcuts"=>{validate_shortcuts(&v["shortcuts"])?;Ok(json!(true))},
-        "statistics"=>{let rows=super::statistics::export(Path::new(field(&v,"root")?),field(&v,"device")?)?;super::statistics::summary(&rows,v["period"].as_u64().unwrap_or(0).min(3) as u32)},
+        "statistics"=>{let rows=super::statistics::export(Path::new(field(&v,"root")?),field(&v,"device")?)?;super::statistics::summary(&rows,v["period"].as_u64().unwrap_or(0).min(3) as u32,v["version"].as_str())},
         "syncValues"=>sync_values(&v["preferences"]),
         "applyValues"=>apply_values(&v["preferences"],&v["values"]),
         "cloudSync"=>{

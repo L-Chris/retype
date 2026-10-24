@@ -231,6 +231,7 @@ static RTSettings *RTLoadedSettings;
     [(RTAppDelegate *)NSApp.delegate voiceCancel];
 }
 - (void)showWindow:(id)sender {
+    if (!self.window.visible) ((RTAppDelegate *)NSApp.delegate).statisticsVersion=nil;
     [super showWindow:sender]; [self startPageUpdates];
     if(!self.performanceTimer){
         __weak RTSettings *weakSelf=self;__block CFAbsoluteTime previous=CFAbsoluteTimeGetCurrent();
@@ -476,6 +477,14 @@ static RTSettings *RTLoadedSettings;
         } [self finishCard];
     } else if (self.page == 6) {
         NSDictionary *s = app.statistics;
+        [self newCard]; [self rowLabel:@"版本"];
+        NSPopUpButton *versions=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(140,self.row,392,30) pullsDown:NO];
+        [versions addItemWithTitle:@"全部版本"]; versions.lastItem.representedObject=NSNull.null;
+        for (NSString *version in s[@"versions"]) {
+            [versions addItemWithTitle:version.length?version:@"历史未标记版本"];versions.lastItem.representedObject=version;
+            if (app.statisticsVersion && [app.statisticsVersion isEqualToString:version]) [versions selectItem:versions.lastItem];
+        }
+        versions.identifier=@"statistics-version";versions.target=self;versions.action=@selector(statisticsVersion:);[self.card addSubview:versions];self.row+=44;[self finishCard];
         [self newCard]; [self label:@"最近 5 分钟" size:16];
         [self metric:s[@"recent"] previous:nil]; [self finishCard];
         [self newCard]; [self label:@"平均速度" size:16];
@@ -620,6 +629,7 @@ static RTSettings *RTLoadedSettings;
 }
 - (void)testVoice:(id)sender{(void)sender;if(RTVoice.shared.running)[(RTAppDelegate *)NSApp.delegate voiceStop];else [(RTAppDelegate *)NSApp.delegate voiceStartForTest:YES];}
 - (void)cancelVoice:(id)sender{(void)sender;[(RTAppDelegate *)NSApp.delegate voiceCancel];}
+- (void)statisticsVersion:(NSPopUpButton *)sender { RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;id version=sender.selectedItem.representedObject;app.statisticsVersion=version==NSNull.null?nil:version;[app loadStatistics:self.period]; }
 - (void)period:(NSSegmentedControl *)sender{self.period=sender.selectedSegment;[(RTAppDelegate *)NSApp.delegate loadStatistics:self.period];}
 - (void)pack:(NSSwitch *)sender {
     RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;NSUInteger index=sender.tag,mask=[RTPreferences.shared.value[@"packs"] unsignedIntegerValue];BOOL enabled=sender.state==NSControlStateValueOn;

@@ -42,6 +42,7 @@ void RTRegisterHooks(void);
 @property(nonatomic, strong) NSMutableSet *jobs;
 @property(nonatomic, strong) NSDictionary *update;
 @property(nonatomic, strong) NSDictionary *statistics;
+@property(nonatomic, copy) NSString *statisticsVersion;
 @property(nonatomic, strong) NSDictionary *syncStatus;
 @property(nonatomic, strong) NSTimer *maintenance;
 @property(nonatomic) NSUInteger statisticsRequest;

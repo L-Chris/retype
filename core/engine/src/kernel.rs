@@ -217,6 +217,11 @@ impl Kernel {
     pub fn has_composition(&self) -> bool {
         !self.buffer.is_empty() || !self.parts.is_empty()
     }
+    /// Numeric spelling state for platform-side input measurements.
+    pub fn spelling_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     pub fn has_candidates(&self) -> bool {
         !self.candidates.is_empty()
     }

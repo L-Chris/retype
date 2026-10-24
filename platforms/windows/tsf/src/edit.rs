@@ -198,7 +198,7 @@ impl ITfEditSession_Impl for Edit_Impl {
                 }
                 self.state.reset_kernel();
                 self.state.hide();
-                lock(&self.state.stats_clock).reset();
+                lock(&self.state.stats_clock).discard();
             }
             result
         });
@@ -262,6 +262,7 @@ impl Edit_Impl {
                         }
                     }
                 }
+                lock(&state.stats_clock).reset();
             }
             return Ok(());
         }
@@ -345,6 +346,9 @@ impl Edit_Impl {
             }
         };
         let input_chinese = session.backend.with_kernel(|k| k.is_chinese());
+        let spelling_before = session
+            .backend
+            .with_kernel(|k| (k.has_composition(), k.spelling_len()));
         let symbol_key = match self.work {
             Work::Key(Key::Char(c), m) if m.is_plain() => Some(c),
             _ => None,
@@ -430,6 +434,17 @@ impl Edit_Impl {
                 session.backend.record_learning(event);
             }
         }
+        if countable(&self.context) {
+            let spelling_after = session
+                .backend
+                .with_kernel(|k| (k.has_composition(), k.spelling_len()));
+            stats::composition_edit(
+                &state.stats_clock,
+                spelling_before,
+                spelling_after,
+                matches!(self.work, Work::Key(Key::Backspace, _)),
+            );
+        }
         self.refresh(ec, timing)?;
         let discarded = (committed.is_empty()
             || input_chinese && matches!(self.work, Work::Key(Key::Enter, _)))
@@ -462,7 +477,13 @@ impl Edit_Impl {
             }
         }
         if discarded {
-            lock(&state.stats_clock).reset();
+            if input_chinese && matches!(self.work, Work::Key(Key::Enter, _)) {
+                // The explicit raw-letter escape follows the existing statistics
+                // exclusion, but it is a successful write, not a cancelled round.
+                lock(&state.stats_clock).discard();
+            } else {
+                lock(&state.stats_clock).reset();
+            }
         }
         if matches!(self.work, Work::Translate | Work::Voice(_)) {
             return if let Work::Voice(held) = self.work {

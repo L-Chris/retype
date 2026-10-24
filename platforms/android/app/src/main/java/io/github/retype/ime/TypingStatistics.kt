@@ -41,7 +41,7 @@ data class StatisticsSummary(
 )
 
 class TypingStatistics internal constructor(private val context: Context, name: String = "statistics.db") :
-    SQLiteOpenHelper(context, name, null, 2) {
+    SQLiteOpenHelper(context, name, null, 3) {
     companion object {
         @Volatile private var instance: TypingStatistics? = null
 
@@ -63,7 +63,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
-            "CREATE TABLE buckets(device TEXT,stream TEXT,minute INTEGER,chinese INTEGER,english INTEGER,chinese_ms INTEGER,english_ms INTEGER,english_words INTEGER NOT NULL DEFAULT 0,english_word_ms INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(device,stream,minute))"
+            "CREATE TABLE buckets(device TEXT,stream TEXT,minute INTEGER,chinese INTEGER,english INTEGER,chinese_ms INTEGER,english_ms INTEGER,english_words INTEGER NOT NULL DEFAULT 0,english_word_ms INTEGER NOT NULL DEFAULT 0,version TEXT NOT NULL DEFAULT '',input TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(device,stream,minute,version))"
         )
     }
 
@@ -72,23 +72,31 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             db.execSQL("ALTER TABLE buckets ADD COLUMN english_words INTEGER NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE buckets ADD COLUMN english_word_ms INTEGER NOT NULL DEFAULT 0")
         }
+        if (old < 3) {
+            db.execSQL("ALTER TABLE buckets RENAME TO buckets_legacy")
+            onCreate(db)
+            db.execSQL("INSERT INTO buckets(device,stream,minute,chinese,english,chinese_ms,english_ms,english_words,english_word_ms) SELECT device,stream,minute,chinese,english,chinese_ms,english_ms,english_words,english_word_ms FROM buckets_legacy")
+            db.execSQL("DROP TABLE buckets_legacy")
+        }
     }
 
     fun record(c: Counts, stream: String = "android.log") {
         if (c == Counts()) return
         val minute = System.currentTimeMillis() / 60000
+        val version=BuildConfig.VERSION_NAME
+        val source=stream.removeSuffix(".log")+"@"+version+".log"
         val device = AppStore(context).deviceId()
         writes.launch {
             val db = writableDatabase
             db.beginTransaction()
             try {
                 db.execSQL(
-                    "INSERT OR IGNORE INTO buckets VALUES(?, ?, ?,0,0,0,0,0,0)",
-                    arrayOf<Any>(device, stream, minute),
+                    "INSERT OR IGNORE INTO buckets(device,stream,minute,version,chinese,english,chinese_ms,english_ms) VALUES(?,?,?,?,0,0,0,0)",
+                    arrayOf<Any>(device, source, minute, version),
                 )
                 db.execSQL(
-                    "UPDATE buckets SET chinese=chinese+?,english=english+?,chinese_ms=chinese_ms+?,english_ms=english_ms+?,english_words=english_words+?,english_word_ms=english_word_ms+? WHERE device=? AND stream=? AND minute=?",
-                    arrayOf<Any>(c.chinese, c.english, c.chineseMs, c.englishMs, c.englishWords, c.englishWordMs, device, stream, minute),
+                    "UPDATE buckets SET chinese=chinese+?,english=english+?,chinese_ms=chinese_ms+?,english_ms=english_ms+?,english_words=english_words+?,english_word_ms=english_word_ms+? WHERE device=? AND stream=? AND minute=? AND version=?",
+                    arrayOf<Any>(c.chinese, c.english, c.chineseMs, c.englishMs, c.englishWords, c.englishWordMs, device, source, minute, version),
                 )
                 db.setTransactionSuccessful()
             } finally {
@@ -100,7 +108,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
     fun export(): JSONArray {
         val result = JSONArray()
         readableDatabase
-            .rawQuery("SELECT * FROM buckets ORDER BY device,stream,minute", null)
+            .rawQuery("SELECT * FROM buckets ORDER BY device,stream,minute,version", null)
             .use { cursor ->
                 while (cursor.moveToNext()) {
                     result.put(
@@ -108,6 +116,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                             .put("device", cursor.getString(0))
                             .put("stream", cursor.getString(1))
                             .put("minute", cursor.getLong(2))
+                            .put("version",cursor.getString(9))
                             .put(
                                 "counts",
                                 JSONObject()
@@ -116,7 +125,8 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                                     .put("chinese_ms", cursor.getLong(5))
                                     .put("english_ms", cursor.getLong(6))
                                     .put("english_words", cursor.getLong(7))
-                                    .put("english_word_ms", cursor.getLong(8)),
+                                    .put("english_word_ms", cursor.getLong(8))
+                                    .put("input",JSONObject(cursor.getString(10))),
                             )
                     )
                 }
@@ -132,14 +142,18 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             for (i in 0 until buckets.length()) {
                 val b = buckets.getJSONObject(i)
                 val c = b.getJSONObject("counts")
+                val stream=b.getString("stream")
+                val version=b.optString("version", "").ifEmpty { if ('@' in stream) stream.removeSuffix(".log").substringAfterLast('@') else "" }
+                require(version.length<=64 && version.matches(Regex("[a-zA-Z0-9.+-]*")) && stream.length<=128)
+                val keys=arrayOf(b.getString("device"),stream,b.getLong("minute").toString(),version)
                 require(
                     b.getString("device").matches(Regex("[a-f0-9]{32}")) &&
                         b.getString("stream").endsWith(".log") &&
                         b.getLong("minute") in 0..50000000
                 )
                 db.execSQL(
-                    "INSERT OR IGNORE INTO buckets VALUES(?,?,?,0,0,0,0,0,0)",
-                    arrayOf(b.getString("device"), b.getString("stream"), b.getLong("minute")),
+                    "INSERT OR IGNORE INTO buckets(device,stream,minute,version,chinese,english,chinese_ms,english_ms) VALUES(?,?,?,?,0,0,0,0)",
+                    keys,
                 )
                 require(
                     listOf("chinese", "english", "chinese_ms", "english_ms").all {
@@ -148,7 +162,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                 )
                 require(listOf("english_words", "english_word_ms").all { c.optLong(it, 0) in 0..1000000000000000L })
                 db.execSQL(
-                    "UPDATE buckets SET chinese=MAX(chinese,?),english=MAX(english,?),chinese_ms=MAX(chinese_ms,?),english_ms=MAX(english_ms,?),english_words=MAX(english_words,?),english_word_ms=MAX(english_word_ms,?) WHERE device=? AND stream=? AND minute=?",
+                    "UPDATE buckets SET chinese=MAX(chinese,?),english=MAX(english,?),chinese_ms=MAX(chinese_ms,?),english_ms=MAX(english_ms,?),english_words=MAX(english_words,?),english_word_ms=MAX(english_word_ms,?) WHERE device=? AND stream=? AND minute=? AND version=?",
                     arrayOf(
                         c.getLong("chinese"),
                         c.getLong("english"),
@@ -159,8 +173,14 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                         b.getString("device"),
                         b.getString("stream"),
                         b.getLong("minute"),
+                        version,
                     ),
                 )
+                db.rawQuery("SELECT input FROM buckets WHERE device=? AND stream=? AND minute=? AND version=?",keys).use { cursor ->
+                    cursor.moveToFirst()
+                    val input=mergeInput(JSONObject(cursor.getString(0)),c.optJSONObject("input")?:JSONObject())
+                    db.execSQL("UPDATE buckets SET input=? WHERE device=? AND stream=? AND minute=? AND version=?",arrayOf(input.toString(),*keys))
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -168,12 +188,14 @@ class TypingStatistics internal constructor(private val context: Context, name: 
         }
     }
 
-    fun recent(now: ZonedDateTime = ZonedDateTime.now()): Counts {
+    fun versions(): List<String> = readableDatabase.rawQuery("SELECT DISTINCT version FROM buckets WHERE stream='android.log' OR stream LIKE 'android@%.log' OR stream='android-voice.log' OR stream LIKE 'android-voice@%.log' ORDER BY version DESC",null).use { c -> buildList { while(c.moveToNext()) add(c.getString(0)) } }
+
+    fun recent(now: ZonedDateTime = ZonedDateTime.now(), version:String?=null): Counts {
         val minute = now.toEpochSecond() / 60
         readableDatabase
             .rawQuery(
-                "SELECT COALESCE(SUM(chinese),0),COALESCE(SUM(english),0),COALESCE(SUM(chinese_ms),0),COALESCE(SUM(english_ms),0),COALESCE(SUM(english_words),0),COALESCE(SUM(english_word_ms),0) FROM buckets WHERE stream='android.log' AND minute BETWEEN ? AND ?",
-                arrayOf((minute - 4).toString(), minute.toString()),
+                "SELECT COALESCE(SUM(chinese),0),COALESCE(SUM(english),0),COALESCE(SUM(chinese_ms),0),COALESCE(SUM(english_ms),0),COALESCE(SUM(english_words),0),COALESCE(SUM(english_word_ms),0) FROM buckets WHERE (stream='android.log' OR stream LIKE 'android@%.log') AND minute BETWEEN ? AND ?${if(version==null) "" else " AND version=?"}",
+                (listOf((minute - 4).toString(), minute.toString())+listOfNotNull(version)).toTypedArray(),
             )
             .use { c ->
                 c.moveToFirst()
@@ -181,7 +203,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             }
     }
 
-    fun summary(period: Int, now: ZonedDateTime = ZonedDateTime.now()): StatisticsSummary {
+    fun summary(period: Int, now: ZonedDateTime = ZonedDateTime.now(), version:String?=null): StatisticsSummary {
         val date = now.toLocalDate()
         val zone = now.zone
         val start =
@@ -214,13 +236,13 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             }
         }
         val params =
-            arrayOf(
+            (listOf(
                 (prev.atStartOfDay(zone).toEpochSecond() / 60).toString(),
                 (now.toEpochSecond() / 60).toString(),
-            )
+            )+listOfNotNull(version)).toTypedArray()
         readableDatabase
             .rawQuery(
-                "SELECT minute,SUM(chinese),SUM(english),SUM(chinese_ms),SUM(english_ms),SUM(english_words),SUM(english_word_ms) FROM buckets WHERE stream='android.log' AND minute>=? AND minute<=? GROUP BY minute",
+                "SELECT minute,SUM(chinese),SUM(english),SUM(chinese_ms),SUM(english_ms),SUM(english_words),SUM(english_word_ms) FROM buckets WHERE (stream='android.log' OR stream LIKE 'android@%.log') AND minute>=? AND minute<=?${if(version==null) "" else " AND version=?"} GROUP BY minute",
                 params,
             )
             .use { cursor ->
@@ -314,6 +336,29 @@ fun TypingStatistics.recordVoice(text: String) {
     val result = JSONObject(NativeBridge.feature(JSONObject().put("type","voiceCounts").put("text",text).toString()))
     record(Counts(chinese=result.getLong("chinese"),englishWords=result.getLong("english")), "android-voice.log")
 }
-fun TypingStatistics.voiceTotal(): Counts {
-    readableDatabase.rawQuery("SELECT COALESCE(SUM(chinese),0),COALESCE(SUM(english_words),0) FROM buckets WHERE stream='android-voice.log'",null).use { c->c.moveToFirst();return Counts(chinese=c.getLong(0),englishWords=c.getLong(1)) }
+fun TypingStatistics.voiceTotal(version:String?=null): Counts {
+    readableDatabase.rawQuery("SELECT COALESCE(SUM(chinese),0),COALESCE(SUM(english_words),0) FROM buckets WHERE (stream='android-voice.log' OR stream LIKE 'android-voice@%.log')${if(version==null) "" else " AND version=?"}",version?.let { arrayOf(it) }).use { c->c.moveToFirst();return Counts(chinese=c.getLong(0),englishWords=c.getLong(1)) }
+}
+
+// Preserve Windows measurements when Android forwards cloud snapshots. Only
+// bounded numeric counters are accepted; unknown fields are not retained.
+private fun mergeInput(old:JSONObject,incoming:JSONObject):JSONObject {
+    fun value(o:JSONObject,key:String):Long = o.optLong(key,0).also { require(it in 0..1000000000000000L) }
+    val result=JSONObject()
+    for (language in listOf("chinese","english")) {
+        val a=old.optJSONArray(language)
+        val b=incoming.optJSONArray(language)
+        require(a==null || a.length()==8);require(b==null || b.length()==8)
+        val rows=JSONArray()
+        for(i in 0..7) {
+            val left=a?.getJSONObject(i)?:JSONObject()
+            val right=b?.getJSONObject(i)?:JSONObject()
+            val row=JSONObject()
+            for(key in listOf("inputs","corrected","units")) row.put(key,maxOf(value(left,key),value(right,key)))
+            rows.put(row)
+        }
+        result.put(language,rows)
+    }
+    for(key in listOf("cancelled","spelling_deletions")) result.put(key,maxOf(value(old,key),value(incoming,key)))
+    return result
 }

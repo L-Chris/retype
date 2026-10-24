@@ -42,6 +42,7 @@ impl Activity {
             english_ms,
             english_words,
             english_word_ms: english_ms,
+            ..Default::default()
         }
     }
     pub fn boundary(&mut self) -> Counts {
@@ -53,6 +54,8 @@ impl Activity {
         }
     }
 }
+// Keep numeric deltas inline in the bounded channel; avoid allocating in input callbacks.
+#[allow(clippy::large_enum_variant)]
 enum Message {
     Delta(Counts, bool),
     Flush(mpsc::Sender<()>),
@@ -65,17 +68,24 @@ impl Writer {
         std::thread::Builder::new()
             .name("retype-mac-statistics".into())
             .spawn(move || {
-                let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(root.join("macos.log"))
+                let Ok(mut file) =
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(root.join(retype_sync::statistics::versioned_stream(
+                            "macos.log",
+                            env!("CARGO_PKG_VERSION"),
+                        )))
                 else {
                     return;
                 };
                 let Ok(mut voice_file) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(root.join("macos-voice.log"))
+                    .open(root.join(retype_sync::statistics::versioned_stream(
+                        "macos-voice.log",
+                        env!("CARGO_PKG_VERSION"),
+                    )))
                 else {
                     return;
                 };
@@ -94,16 +104,14 @@ impl Writer {
                         .unwrap_or_default()
                         .as_secs();
                     let target = if voice { &mut voice_file } else { &mut file };
-                    let _ = writeln!(
-                        target,
-                        "{seconds},{},{},{},{},{},{}",
-                        c.chinese,
-                        c.english,
-                        c.chinese_ms,
-                        c.english_ms,
-                        c.english_words,
-                        c.english_word_ms
-                    );
+                    let record = retype_sync::statistics::LogRecord {
+                        second: seconds,
+                        version: env!("CARGO_PKG_VERSION").into(),
+                        counts: c,
+                    };
+                    if let Ok(json) = serde_json::to_string(&record) {
+                        let _ = writeln!(target, "{json}");
+                    }
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -148,7 +156,21 @@ pub fn export(root: &Path, device: &str) -> Result<Vec<Bucket>, String> {
 fn date(year: i32, month: u32, day: u32) -> Result<NaiveDate, String> {
     NaiveDate::from_ymd_opt(year, month, day).ok_or("统计日期无效".into())
 }
-pub fn summary(rows: &[Bucket], period: u32) -> Result<Value, String> {
+pub fn summary(rows: &[Bucket], period: u32, version: Option<&str>) -> Result<Value, String> {
+    let versions: std::collections::BTreeSet<_> = rows
+        .iter()
+        .filter(|r| {
+            retype_sync::statistics::is_stream(&r.stream, "macos.log")
+                || retype_sync::statistics::is_stream(&r.stream, "macos-voice.log")
+        })
+        .map(|r| r.version.clone())
+        .collect();
+    let selected: Vec<_> = rows
+        .iter()
+        .filter(|r| version.is_none_or(|v| v == r.version))
+        .cloned()
+        .collect();
+    let rows = &selected;
     let now = Local::now();
     let today = now.date_naive();
     let start = match period {
@@ -173,7 +195,10 @@ pub fn summary(rows: &[Bucket], period: u32) -> Result<Value, String> {
     let mut old = Counts::default();
     let mut recent = Counts::default();
     let mut voice = Counts::default();
-    for row in rows.iter().filter(|r| r.stream == "macos-voice.log") {
+    for row in rows
+        .iter()
+        .filter(|r| retype_sync::statistics::is_stream(&r.stream, "macos-voice.log"))
+    {
         if let Some(when) = Local.timestamp_opt((row.minute * 60) as i64, 0).single() {
             if when.date_naive() >= start && when <= now {
                 voice.add(&row.counts);
@@ -195,7 +220,10 @@ pub fn summary(rows: &[Bucket], period: u32) -> Result<Value, String> {
     for i in 0..slots {
         bars.insert(i, Counts::default());
     }
-    for row in rows.iter().filter(|r| r.stream == "macos.log") {
+    for row in rows
+        .iter()
+        .filter(|r| retype_sync::statistics::is_stream(&r.stream, "macos.log"))
+    {
         let Some(when) = Local.timestamp_opt((row.minute * 60) as i64, 0).single() else {
             continue;
         };
@@ -224,7 +252,7 @@ pub fn summary(rows: &[Bucket], period: u32) -> Result<Value, String> {
         "chineseSpeed":speed(c.chinese,c.chinese_ms,10),"englishSpeed":speed(c.english_words,c.english_word_ms,5)})
     };
     Ok(
-        json!({"current":view(&current),"previous":view(&old),"recent":view(&recent),"voice":view(&voice),"bars":bars.iter().map(|(i,c)|json!({"label":match period{0=>format!("{i}"),3=>format!("{}月",i+1),_=>{let d=start+chrono::Duration::days(*i as i64);format!("{}/{}",d.month(),d.day())}},"counts":view(c)})).collect::<Vec<_>>()}),
+        json!({"versions":versions,"current":view(&current),"previous":view(&old),"recent":view(&recent),"voice":view(&voice),"bars":bars.iter().map(|(i,c)|json!({"label":match period{0=>format!("{i}"),3=>format!("{}月",i+1),_=>{let d=start+chrono::Duration::days(*i as i64);format!("{}/{}",d.month(),d.day())}},"counts":view(c)})).collect::<Vec<_>>()}),
     )
 }
 fn speed(n: u64, ms: u64, min: u64) -> Option<u64> {
@@ -237,6 +265,7 @@ mod tests {
     fn mac_keyboard_voice_and_mobile_history_stay_separate() {
         let make = |stream: &str, n: u64| Bucket {
             device: "a".repeat(32),
+            version: String::new(),
             stream: stream.into(),
             minute: Local::now().timestamp() as u64 / 60,
             counts: Counts {
@@ -254,7 +283,7 @@ mod tests {
             make("desktop-other.log", 777),
         ];
         for period in 0..4 {
-            let result = summary(&rows, period).unwrap_or_default();
+            let result = summary(&rows, period, None).unwrap_or_default();
             assert_eq!(result["current"]["chinese"], 20);
             assert_eq!(result["current"]["english"], 10);
             assert_eq!(result["current"]["englishSpeed"], 20);
@@ -273,5 +302,58 @@ mod tests {
         assert_eq!(a.commit("123 ，").english_words, 0);
         assert_eq!(a.commit("你好").chinese, 2);
         assert_eq!(speed(1, 100000, 5), None);
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn version_filter_applies_to_speed_bars_and_voice_and_defaults_to_all() {
+        let mut rows = Vec::new();
+        for (version, n) in [("", 10), ("0.8.0", 20), ("0.9.0", 60)] {
+            for base in ["macos.log", "macos-voice.log"] {
+                rows.push(Bucket {
+                    device: "a".repeat(32),
+                    stream: if version.is_empty() {
+                        base.into()
+                    } else {
+                        retype_sync::statistics::versioned_stream(base, version)
+                    },
+                    version: version.into(),
+                    minute: Local::now().timestamp() as u64 / 60,
+                    counts: Counts {
+                        chinese: n,
+                        chinese_ms: 10_000,
+                        ..Default::default()
+                    },
+                });
+            }
+        }
+        for period in 0..4 {
+            let all = summary(&rows, period, None).unwrap();
+            assert_eq!(all["current"]["chinese"], 90);
+            assert_eq!(all["current"]["chineseSpeed"], 180);
+            assert_eq!(all["voice"]["chinese"], 90);
+            assert_eq!(all["versions"].as_array().unwrap().len(), 3);
+            let old = summary(&rows, period, Some("0.8.0")).unwrap();
+            assert_eq!(old["current"]["chinese"], 20);
+            assert_eq!(old["recent"]["chineseSpeed"], 120);
+            assert_eq!(old["voice"]["chinese"], 20);
+            assert_eq!(
+                old["bars"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["counts"]["chinese"].as_u64().unwrap())
+                    .sum::<u64>(),
+                20
+            );
+            assert_eq!(
+                summary(&rows, period, Some("")).unwrap()["current"]["chinese"],
+                10
+            );
+        }
     }
 }

@@ -86,4 +86,59 @@ class WordStatisticsTest {
       context.deleteDatabase(name)
     }
   }
+  @Test fun versionMigrationFiltersEveryMetricAndKeepsUnknownHistory() {
+    val context=InstrumentationRegistry.getInstrumentation().targetContext
+    val name="version-statistics-${UUID.randomUUID()}.db"
+    val minute=ZonedDateTime.now().toEpochSecond()/60
+    val device="a".repeat(32)
+    context.openOrCreateDatabase(name,0,null).use { db ->
+      db.execSQL("CREATE TABLE buckets(device TEXT,stream TEXT,minute INTEGER,chinese INTEGER,english INTEGER,chinese_ms INTEGER,english_ms INTEGER,english_words INTEGER NOT NULL DEFAULT 0,english_word_ms INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(device,stream,minute))")
+      db.execSQL("INSERT INTO buckets VALUES(?,'android.log',?,0,100,0,10000,5,10000)",arrayOf<Any>(device,minute))
+      db.version=2
+    }
+    val statistics=TypingStatistics(context,name)
+    fun row(version:String,words:Int,stream:String="android@$version.log")=JSONObject()
+      .put("device",device).put("stream",stream).put("version",version).put("minute",minute)
+      .put("counts",JSONObject().put("chinese",0).put("english",100).put("chinese_ms",0).put("english_ms",10000).put("english_words",words).put("english_word_ms",10000))
+    try {
+      assertEquals("",statistics.export().getJSONObject(0).getString("version"))
+      val rows=JSONArray().put(row("0.8.0",5)).put(row("0.9.0",20))
+      statistics.merge(rows);statistics.merge(rows)
+      assertEquals(setOf("","0.8.0","0.9.0"),statistics.versions().toSet())
+      assertEquals(30L,statistics.recent().englishWords)
+      assertEquals(60L,statistics.recent().speed(false))
+      assertEquals(5L,statistics.recent(version="0.8.0").englishWords)
+      assertEquals(5L,statistics.recent(version="").englishWords)
+      for(period in 0..3) {
+        assertEquals(30L,statistics.summary(period).current.englishWords)
+        assertEquals(20L,statistics.summary(period,version="0.9.0").current.englishWords)
+      }
+      statistics.merge(JSONArray().put(row("0.9.0",2,"android-voice@0.9.0.log")))
+      assertEquals(2L,statistics.voiceTotal().englishWords)
+      assertEquals(0L,statistics.voiceTotal("0.8.0").englishWords)
+      assertEquals(30L,statistics.summary(0).current.englishWords)
+    } finally { statistics.close();context.deleteDatabase(name) }
+  }
+
+  @Test fun forwardingWindowsMeasurementsRetainsVersionAndCorrectionCounters() {
+    val context=InstrumentationRegistry.getInstrumentation().targetContext
+    val name="forward-statistics-${UUID.randomUUID()}.db"
+    val statistics=TypingStatistics(context,name)
+    try {
+      val lengths=JSONArray()
+      for(i in 0..7) lengths.put(JSONObject().put("inputs",if(i==1) 1 else 0).put("corrected",if(i==1) 1 else 0).put("units",if(i==1) 2 else 0))
+      val input=JSONObject().put("chinese",lengths).put("cancelled",2).put("spelling_deletions",3)
+      val counts=JSONObject().put("chinese",2).put("english",0).put("chinese_ms",10000).put("english_ms",0).put("input",input)
+      val row=JSONObject().put("device","a".repeat(32)).put("stream","desktop@0.8.0.log").put("version","0.8.0").put("minute",ZonedDateTime.now().toEpochSecond()/60).put("counts",counts)
+      statistics.merge(JSONArray().put(row))
+      val old=JSONObject(row.toString());old.remove("version");old.getJSONObject("counts").remove("input")
+      statistics.merge(JSONArray().put(old));statistics.merge(JSONArray().put(row))
+      val result=statistics.export()
+      assertEquals(1,result.length())
+      assertEquals("0.8.0",result.getJSONObject(0).getString("version"))
+      assertEquals(1L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input").getJSONArray("chinese").getJSONObject(1).getLong("corrected"))
+      assertEquals(2L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input").getLong("cancelled"))
+    } finally { statistics.close();context.deleteDatabase(name) }
+  }
+
 }

@@ -593,7 +593,7 @@ pub enum Event {
     Packs(Vec<bool>),
     PackProgress(f32),
     PackDone(std::result::Result<(), String>),
-    Statistics(statistics::Snapshot),
+    Statistics(Box<statistics::Snapshot>),
     Checked(std::result::Result<Offer, String>),
     UpdateStage(String),
     Installed(std::result::Result<String, String>),
@@ -653,7 +653,7 @@ pub fn worker(
                 Task::Statistics => {
                     let now = chrono::Local::now().timestamp_millis();
                     match statistics.load(now) {
-                        Ok(data) => emit(Event::Statistics(data)),
+                        Ok(data) => emit(Event::Statistics(Box::new(data))),
                         Err(e) => emit(Event::Error(e.to_string())),
                     }
                 }
