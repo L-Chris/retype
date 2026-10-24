@@ -189,6 +189,7 @@ struct SettingsApp {
     cancel_download: Arc<AtomicBool>,
     statistics: Option<statistics::Snapshot>,
     statistics_version: Option<String>,
+    input_selection: [Option<usize>; 2],
     period: Period,
     statistics_pending: bool,
     statistics_refresh: Instant,
@@ -318,6 +319,7 @@ impl SettingsApp {
             );
             if self.hidden_since.is_some() {
                 self.statistics_version = None;
+                self.input_selection = [None; 2];
             }
             self.hidden_since = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -623,6 +625,7 @@ impl SettingsApp {
 
     fn statistics_page(&mut self, ui: &mut egui::Ui) {
         use chrono::Datelike;
+        let filter_before = (self.period, self.statistics_version.clone());
         let Some(snapshot) = self.statistics.clone() else {
             ui.spinner();
             ui.label("正在读取统计…");
@@ -784,72 +787,39 @@ impl SettingsApp {
             chart(ui, &data, false);
         });
         ui.add_space(14.0);
-        card(ui, |ui| {
-            ui.label(RichText::new("拼写回改与上屏长度").strong());
-            ui.label(
-                RichText::new(
-                    "上屏前修改过拼写的输入占比；不代表输错率。按当前天／周／月／年统计。",
-                )
-                .size(12.0)
-                .color(MUTED),
-            );
-            let history = snapshot.history(chrono::Local::now().date_naive(), self.period);
-            let counts = history.last().map(|(_, c)| *c).unwrap_or_default();
-            for (chinese, name, unit, rows) in [
-                (true, "中文", "字", &counts.input.chinese),
-                (false, "英文", "词", &counts.input.english),
-            ] {
-                let total = counts.input.total(chinese);
-                ui.separator();
-                ui.label(RichText::new(name).strong());
-                if total.inputs == 0 {
-                    ui.label("— · 暂无已采集的成功输入样本");
-                    continue;
-                }
-                ui.label(format!(
-                    "拼写回改率 {:.1}% · 回改 {} / 输入 {} 次 · 平均 {:.1} {unit}/次",
-                    total.corrected as f64 * 100.0 / total.inputs as f64,
-                    total.corrected,
-                    total.inputs,
-                    total.units as f64 / total.inputs as f64
-                ));
-                egui::Grid::new(("input-length", chinese))
-                    .num_columns(4)
-                    .spacing([24.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label("上屏长度");
-                        ui.label("次数 / 占比");
-                        ui.label("分布");
-                        ui.label("回改率");
-                        ui.end_row();
-                        for (label, row) in retype_types::statistics::LENGTH_LABELS.iter().zip(rows)
-                        {
-                            ui.label(format!("{label} {unit}"));
-                            let share = row.inputs as f32 / total.inputs as f32;
-                            ui.label(format!("{} / {:.1}%", row.inputs, share * 100.0));
-                            ui.add(egui::ProgressBar::new(share).desired_width(100.0));
-                            ui.label(if row.inputs == 0 {
-                                "—".into()
-                            } else {
-                                format!("{:.1}%", row.corrected as f64 * 100.0 / row.inputs as f64)
-                            });
-                            ui.end_row();
-                        }
-                    });
-            }
-            let samples = counts
-                .input
-                .total(true)
-                .inputs
-                .saturating_add(counts.input.total(false).inputs)
-                .saturating_add(counts.input.cancelled);
-            ui.label(if samples == 0 {
-                "取消输入：—".into()
-            } else {
-                format!("取消输入：{} 次", counts.input.cancelled)
-            });
-            ui.label(RichText::new("旧数据不补算新指标；这里只统计上屏单元，不推断完整句子。中文按字数，英文按词数。").size(12.0).color(MUTED));
+        if filter_before != (self.period, self.statistics_version.clone()) {
+            self.input_selection = [None; 2];
+        }
+        let history = snapshot.history(chrono::Local::now().date_naive(), self.period);
+        let input = history.last().map(|(_, c)| c.input).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("回改与上屏长度").strong());
+            ui.label("ⓘ").on_hover_text(format!("当前时间与版本范围内取消输入 {} 次。取消没有最终长度，不分配到图中。\n仅包含新口径启用后采集的样本。",input.cancelled));
         });
+        for (i, chinese, title) in [
+            (0, true, "中文输入 · 字/次"),
+            (1, false, "英文输入 · 词/次"),
+        ] {
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).strong());
+                    ui.label("ⓘ").on_hover_text(crate::input_chart::summary(
+                        &input,
+                        chinese,
+                        &format!(
+                            "本{} · {}",
+                            self.period.label(),
+                            self.statistics_version
+                                .as_deref()
+                                .map(version_label)
+                                .unwrap_or("全部版本")
+                        ),
+                    ));
+                });
+                crate::input_chart::draw(ui, &input, chinese, &mut self.input_selection[i]);
+            });
+            ui.add_space(10.0);
+        }
         ui.add_space(14.0);
         card(ui, |ui| {
             ui.label(RichText::new("最近 7 天输入量").strong());
@@ -1096,6 +1066,7 @@ impl SettingsApp {
             cancel_download: Arc::new(AtomicBool::new(false)),
             statistics: None,
             statistics_version: None,
+            input_selection: [None; 2],
             period: Period::Day,
             statistics_pending: page == Page::Statistics,
             statistics_refresh: Instant::now(),

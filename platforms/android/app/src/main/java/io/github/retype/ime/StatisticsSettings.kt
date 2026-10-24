@@ -65,6 +65,7 @@ fun StatisticsPage() {
                 }
             }
         }
+        key(period,version) { InputStatisticsSection(s.current.input,"本${listOf("天","周","月","年")[period]} · ${version?.ifEmpty { "历史未标记版本" }?:"全部版本"}") }
         SettingsCard {
             var help by remember { mutableStateOf(false) }
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -4,7 +4,7 @@ Settings > Statistics shows input committed through retype. English quantities a
 
 ## Word boundaries
 
-Both adapters use the shared `retype-types::statistics::WordCounter`. Its English-specific word-boundary tailoring groups Latin letters, combining accents, and digits, keeps internal straight/curly apostrophes, and splits on hyphens and other punctuation. A token must contain a Latin letter: `Hello world` is two words, `don't` and `GPT4` are one each, `hello-world` is two, and numbers, emoji, and Chinese text do not count as English words. Dictionary membership and spelling correctness are irrelevant.
+All three adapters use the shared `retype-types::statistics::WordCounter`. Its English-specific word-boundary tailoring groups Latin letters, combining accents, and digits, keeps internal straight/curly apostrophes, and splits on hyphens and other punctuation. A token must contain a Latin letter: `Hello world` is two words, `don't` and `GPT4` are one each, `hello-world` is two, and numbers, emoji, and Chinese text do not count as English words. Dictionary membership and spelling correctness are irrelevant.
 
 Only successful commits reach the counter. It carries an unfinished token across fragmented commits, finishes at word/editor boundaries, and can undo unfinalized direct characters on backspace. Candidate selection, including the automatic trailing space, counts once; cancelled composition and rejected writes contribute nothing. Finished words measure cumulative input activity, not the document's current contents: deleting a previously finished word does not subtract it. Editing existing words cannot reconstruct their complete document context from the input stream alone.
 
@@ -27,7 +27,7 @@ Cloud buckets keep the legacy `english`/`english_ms` fields and add `english_wor
 All statistics pages default to **All versions** on opening. The version selector
 also offers each version with recorded activity and **Historical / unmarked**
 for older records. The selector applies to quantities, voice totals, recent and
-period speeds, charts, and (on Windows) input measurements. It combines with the
+period speeds, charts, and input measurements. It combines with the
 existing calendar period; versions do not change the calendar boundaries.
 
 Each producer stamps records with its compiled application version, including
@@ -50,45 +50,57 @@ subtracts already available counters with the same identity. All-version rates
 are calculated from summed numerators and denominators, not averages of version
 rates. Upgrade clients to display the new record format and filters.
 
-## Windows spelling revisions and input lengths
+## Spelling revisions and input lengths
 
-These measurements start with the new collector; old quantities and time cannot
-be used to estimate them. They are collected on Windows first. Other platforms
-retain their existing quantities and speeds with version filtering.
+Windows, macOS, and Android use the shared `InputTracker`. It retains numeric
+round state and bounded character classes, never raw sentences or key history.
+Partial candidate choices remain in one round. An actual spelling-buffer reduction
+on Backspace marks the round as revised; reopening a chosen part, paging, and
+candidate refresh do not. Multiple deletions count as one revised round, with
+separate numeric deletion-action counts.
 
-A composition round starts when the input method begins composing and ends on a
-successful host commit or cancellation. Partial candidate choices remain within
-the round. An actual Backspace reduction of the spelling buffer marks that round
-as revised. Reopening a chosen segment, candidate navigation, and automatic
-candidate refresh do not mark it. Multiple deletions in one round contribute one
-revised round, with deletion actions kept as a separate numeric counter.
+Only confirmed successful commits enter the success denominator. Windows counts
+after its host edit succeeds; macOS holds numeric measurements with its commit
+token until acknowledgement; Android updates the collector through opaque JNI
+handles and persists after the editor transaction succeeds. Stale/replayed
+acknowledgements do not duplicate activity. Failed controlled writes are excluded.
+Cancellation, deleting an entire composition, and losing an unfinished round are
+counted separately. Cancellation has no final length and is not assigned to a
+language histogram. Direct English fragments accumulate to a word boundary;
+passthrough editing is an observed sequence and cannot establish the host's final
+document state. Edits to already completed text are not reconstructed.
 
-The spelling revision rate is `revised successful rounds / successful rounds`.
-It describes editing behavior, not whether the user's text was incorrect. Esc,
-deleting the whole composition, and losing an unfinished composition contribute
-cancellations, outside the success denominator. Failed/rejected host writes are
-excluded. The Chinese-mode raw-letter Enter escape retains its existing exclusion
-and is not counted as a cancellation. Deleting text that is already committed is
-outside this metric.
+Collection stores **20 buckets per language**: exact lengths 1 through 19 and a
+final **20+** bucket for lengths >=20. Each contains successful input count,
+revised input count, and actual output-unit sum. The tail retains its true unit
+sum, so means never use a bucket midpoint or treat long inputs as exactly 20.
+Chinese uses Han characters; English uses shared English word boundaries.
+Punctuation and whitespace do not add length. A mixed-language unit contributes
+to each applicable language's own distribution.
 
-Length is measured from the successfully committed unit: Han characters for
-Chinese and the shared English word counter for English, excluding punctuation
-and whitespace. A mixed-language unit contributes to each applicable language's
-own distribution; language totals are never combined as a single unit count.
-Direct English fragments accumulate to a word boundary rather than counting each
-character write as an input. Backspace within that unfinished direct word marks
-its observed revision; passthrough host editing cannot verify the document's final
-state. Previously completed words are not reconstructed after cursor movement.
+The wire field is `counts.input_detail`. The earlier grouped `counts.input`
+measurements are not read or migrated. Android database version 4 clears only the
+old length-measurement column; quantities, time, versions, and other history remain.
+New detailed counters participate in absolute max merges and local restoration
+just like the existing statistics. Input callbacks do not wait for disk or inspect
+the host document to collect these measurements.
 
-Buckets are `1`, `2`, `3`, `4`, `5–8`, `9–16`, `17–32`, and `33+`. Each language and
-bucket holds successful input count, revised input count, and total output units.
-The UI shows count share, revision rate, and mean length for the selected version
-and current day/week/month/year. No successful samples means an unavailable rate
-(`—`), not zero percent. These are commit-length distributions, not linguistic
-word frequencies or reconstructed complete sentences.
+## Distribution charts
 
-Only bounded in-memory numeric/class state is added to the input path. Final
-numeric deltas are queued without waiting for disk, a document scan, UI Automation,
-or another process. No persistent field ID, raw sentence, or keystroke history is
-required. The existing hidden/protected context policy and exclusions for voice,
-paste, and AI replacement remain in force.
+Each platform shows one Chinese and one English combination chart. Display
+buckets `1`, `2`, `3`, `4`, `5–10`, and `11+` are aggregated at query time from exact
+collection buckets. Future display boundaries below 20 can be changed without
+recapturing input; the 20+ tail cannot be split retrospectively.
+
+Bars show input share on the left axis. An orange line shows revision rate on the
+right axis. Both axes are fixed at 0–100%; input counts appear in tooltips. No successful samples means no rate point, and lines break
+across empty groups. A tooltip combines count, share, revised count, rate, and true
+mean length; samples below five are marked as small. Desktop supports hover and
+click-to-pin, and Android supports touch and drag between groups. Escape dismisses
+pinned desktop details. Summary/help tooltips contain totals, weighted rate, mean,
+and cancellations rather than additional tables or permanent text blocks.
+
+Version (default all) and calendar-period filters apply to both charts. Rates are
+computed after summing their raw numerator/denominator; no averaging percentages.
+Changing filters clears old point selections. These are commit-length
+distributions, not linguistic word frequency or reconstructed sentence statistics.

@@ -1,6 +1,6 @@
 //! Count-only typing statistics. The TSF callback only queues small numeric deltas;
 //! a worker writes them outside the host's input/edit transaction.
-use retype_types::statistics::{Attempt, InputStats, LogRecord, Totals};
+use retype_types::statistics::{InputStats, InputTracker, LogRecord, Totals};
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -27,9 +27,7 @@ pub(crate) struct ActivityClock {
     last: Option<(Instant, Language)>,
     words: retype_types::statistics::WordCounter,
     composition_ms: u32,
-    attempt: Attempt,
-    direct_words: retype_types::statistics::WordCounter,
-    direct_attempt: Attempt,
+    input: InputTracker,
 }
 
 impl ActivityClock {
@@ -46,57 +44,27 @@ impl ActivityClock {
     }
 
     pub(crate) fn reset(&mut self) {
-        self.cancel_attempt();
-        self.finish_word();
+        let input = self.input.boundary(true);
+        let words = self.words.finish();
+        if words > 0 || !input.is_empty() {
+            enqueue(Delta {
+                timestamp_ms: now_ms(),
+                english_words: words,
+                input,
+                ..Default::default()
+            });
+        }
         self.last = None;
         self.composition_ms = 0;
     }
     pub(crate) fn discard(&mut self) {
-        self.attempt = Attempt::default();
+        self.input.discard();
         self.reset();
-    }
-    fn cancel_attempt(&mut self) {
-        if self.attempt.take().active {
-            enqueue(Delta {
-                timestamp_ms: now_ms(),
-                input: InputStats {
-                    cancelled: 1,
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-        }
-    }
-    fn finish_direct(&mut self, input: &mut InputStats) {
-        let words = self.direct_words.finish();
-        let attempt = self.direct_attempt.take();
-        if words > 0 {
-            input.record(
-                false,
-                words.into(),
-                attempt.deletions > 0,
-                attempt.deletions,
-            );
-        }
-    }
-    fn direct_input(&mut self, text: &str, input: &mut InputStats) {
-        for ch in text.chars() {
-            if self.direct_words.feed(&ch.to_string()) > 0 {
-                let attempt = self.direct_attempt.take();
-                input.record(false, 1, attempt.deletions > 0, attempt.deletions);
-            }
-            if self.direct_words.checkpoint().contains(&1) {
-                self.direct_attempt.active = true;
-            } else if self.direct_words.checkpoint().is_empty() {
-                self.direct_attempt = Attempt::default();
-            }
-        }
     }
     fn finish_word(&mut self) {
         let words = self.words.finish();
-        let mut input = InputStats::default();
-        self.finish_direct(&mut input);
-        if words > 0 || input != InputStats::default() {
+        let input = self.input.boundary(false);
+        if words > 0 || !input.is_empty() {
             enqueue(Delta {
                 timestamp_ms: now_ms(),
                 english_words: words,
@@ -258,31 +226,7 @@ pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
 }
 fn commit_delta(clock: &mut ActivityClock, text: &str, boundary: bool) -> Delta {
     let (chinese, english) = count(text);
-    let mut input = InputStats::default();
-    if clock.attempt.active && (chinese > 0 || english > 0) {
-        let attempt = clock.attempt.take();
-        if chinese > 0 {
-            input.record(
-                true,
-                chinese.into(),
-                attempt.deletions > 0,
-                attempt.deletions,
-            );
-        }
-        let mut counter = retype_types::statistics::WordCounter::default();
-        let words = counter.feed(text) + counter.finish();
-        if words > 0 {
-            input.record(
-                false,
-                words.into(),
-                attempt.deletions > 0,
-                if chinese == 0 { attempt.deletions } else { 0 },
-            );
-        }
-    } else if chinese == 0 {
-        clock.direct_input(text, &mut input);
-    }
-
+    let input = clock.input.commit(text);
     let mut english_words = clock.words.feed(text);
     if boundary {
         english_words = english_words.saturating_add(clock.words.finish());
@@ -320,25 +264,16 @@ pub(crate) fn composition_edit(
     backspace: bool,
 ) {
     let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
-    clock
-        .attempt
-        .edit(before.0, after.0, backspace && before.1 > after.1);
+    clock.input.edit(before, after, backspace);
 }
 pub(crate) fn backspace(clock: &Mutex<ActivityClock>) {
     let mut clock = clock.lock().unwrap_or_else(|p| p.into_inner());
     clock.words.backspace();
-    if clock.direct_words.checkpoint().contains(&1) {
-        clock.direct_attempt.deletions = clock.direct_attempt.deletions.saturating_add(1);
-    }
-    clock.direct_words.backspace();
-    if clock.direct_words.checkpoint().is_empty() && clock.direct_attempt.active {
-        clock.direct_attempt = Attempt::default();
+    let input = clock.input.backspace();
+    if !input.is_empty() {
         enqueue(Delta {
             timestamp_ms: now_ms(),
-            input: InputStats {
-                cancelled: 1,
-                ..Default::default()
-            },
+            input,
             ..Default::default()
         });
     }
@@ -592,7 +527,7 @@ mod input_tests {
             commit_delta(&mut clock.lock().unwrap(), "。", true).input,
             InputStats::default()
         );
-        assert!(!clock.lock().unwrap().attempt.active);
+        assert!(clock.lock().unwrap().input.boundary(true).is_empty());
     }
     #[test]
     fn cancelled_empty_focus_and_rejected_rounds_do_not_enter_success_denominator() {

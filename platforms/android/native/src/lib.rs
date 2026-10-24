@@ -62,6 +62,7 @@ pub struct Update {
     pub chinese: bool,
     pub commits: Vec<String>,
     pub pass_through: bool,
+    pub spelling_length: usize,
 }
 /// The normal key path returns only the visible window. An unchanged window
 /// uses None so Kotlin can retain its strings instead of allocating them again.
@@ -76,6 +77,7 @@ pub struct CompactUpdate {
     pub chinese: bool,
     pub commits: Vec<String>,
     pub pass_through: bool,
+    pub spelling_length: usize,
 }
 impl Command {
     pub fn from_input(
@@ -295,6 +297,7 @@ impl Session {
             chinese: self.kernel.is_chinese(),
             commits,
             pass_through,
+            spelling_length: self.kernel.spelling_len(),
         }
     }
     pub fn candidate_page(
@@ -447,6 +450,7 @@ impl Session {
             chinese: self.kernel.is_chinese(),
             commits,
             pass_through,
+            spelling_length: self.kernel.spelling_len(),
         }
     }
 }

@@ -22,6 +22,7 @@ class NativeCompactInputTest {
       try {
         NativeBridge.send(handle, NativeCommand.key("n"))
         val first = NativeBridge.send(handle, NativeCommand.key("i"))
+        assertEquals(2,first.spellingLength)
         assertTrue(first.candidateTotal > 8)
         assertEquals(8, first.candidates!!.size)
         val all = mutableListOf<String>()

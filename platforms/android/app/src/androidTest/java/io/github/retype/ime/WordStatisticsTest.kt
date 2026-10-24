@@ -126,19 +126,56 @@ class WordStatisticsTest {
     val statistics=TypingStatistics(context,name)
     try {
       val lengths=JSONArray()
-      for(i in 0..7) lengths.put(JSONObject().put("inputs",if(i==1) 1 else 0).put("corrected",if(i==1) 1 else 0).put("units",if(i==1) 2 else 0))
+      for(i in 0..19) lengths.put(JSONObject().put("inputs",if(i==1) 1 else 0).put("corrected",if(i==1) 1 else 0).put("units",if(i==1) 2 else 0))
       val input=JSONObject().put("chinese",lengths).put("cancelled",2).put("spelling_deletions",3)
-      val counts=JSONObject().put("chinese",2).put("english",0).put("chinese_ms",10000).put("english_ms",0).put("input",input)
+      val counts=JSONObject().put("chinese",2).put("english",0).put("chinese_ms",10000).put("english_ms",0).put("input_detail",input)
       val row=JSONObject().put("device","a".repeat(32)).put("stream","desktop@0.8.0.log").put("version","0.8.0").put("minute",ZonedDateTime.now().toEpochSecond()/60).put("counts",counts)
       statistics.merge(JSONArray().put(row))
-      val old=JSONObject(row.toString());old.remove("version");old.getJSONObject("counts").remove("input")
+      val old=JSONObject(row.toString());old.remove("version");old.getJSONObject("counts").remove("input_detail")
       statistics.merge(JSONArray().put(old));statistics.merge(JSONArray().put(row))
       val result=statistics.export()
       assertEquals(1,result.length())
       assertEquals("0.8.0",result.getJSONObject(0).getString("version"))
-      assertEquals(1L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input").getJSONArray("chinese").getJSONObject(1).getLong("corrected"))
-      assertEquals(2L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input").getLong("cancelled"))
+      assertEquals(1L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input_detail").getJSONArray("chinese").getJSONObject(1).getLong("corrected"))
+      assertEquals(2L,result.getJSONObject(0).getJSONObject("counts").getJSONObject("input_detail").getLong("cancelled"))
     } finally { statistics.close();context.deleteDatabase(name) }
+  }
+
+  @Test fun sharedCollectorCountsRevisionsExactLengthsAndEditorBoundaries() {
+    ActivityClock().use { clock ->
+      clock.compositionEdit(false,0,true,6,false)
+      clock.compositionEdit(true,6,true,5,true)
+      val committed=clock.commit("你好",true)
+      assertEquals(1L,committed.input!!.chinese[1].inputs)
+      assertEquals(1L,committed.input!!.chinese[1].corrected)
+      assertNull(clock.boundary().input)
+      clock.compositionEdit(false,0,true,6,false)
+      val long=clock.commit("字".repeat(27),true)
+      assertEquals(1L,long.input!!.chinese[19].inputs)
+      assertEquals(27L,long.input!!.chinese[19].units)
+      assertEquals(1L,long.input!!.grouped(true)[5].inputs)
+      clock.compositionEdit(false,0,true,1,false)
+      assertEquals(1L,clock.endEditor().input!!.cancelled)
+      assertNull(clock.endEditor().input)
+      clock.compositionEdit(false,0,true,1,false)
+      clock.reset()
+      assertNull(clock.endEditor().input)
+      clock.commit("hel",false);clock.backspace()
+      assertEquals(1L,clock.commit("lo ",false).input!!.english[0].corrected)
+    }
+  }
+
+  @Test fun oldGroupedMeasurementsAreDiscardedWithoutErasingTypingTotals() {
+    val context=InstrumentationRegistry.getInstrumentation().targetContext
+    val name="old-groups-${UUID.randomUUID()}.db"
+    val old=TypingStatistics(context,name)
+    old.writableDatabase.execSQL("INSERT INTO buckets VALUES(?,?,?,2,0,10000,0,0,0,?,?)",arrayOf<Any>("a".repeat(32),"android@0.8.1.log",ZonedDateTime.now().toEpochSecond()/60,"0.8.1","{\"chinese\":[]}"))
+    old.writableDatabase.version=3;old.close()
+    TypingStatistics(context,name).use { current ->
+      assertEquals(2L,current.summary(0).current.chinese)
+      assertNull(current.summary(0).current.input)
+    }
+    context.deleteDatabase(name)
   }
 
 }

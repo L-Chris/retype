@@ -138,7 +138,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     } @catch (NSException *exception) {
         (void)exception;
         RTSend(self.session, @{@"type":@"ack", @"token":result[@"token"], @"accepted":@NO});
-        RTSend(self.session, @{@"type":@"reset"});
+        RTSend(self.session, @{@"type":@"discard"});
         [[RTCandidatePanel shared] hideFor:self];
         NSLog(@"retype: client rejected marked text or commit");
         return @{ @"error": @"client rejected text" };

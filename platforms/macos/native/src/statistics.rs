@@ -13,6 +13,7 @@ pub struct Activity {
     last: Option<Instant>,
     elapsed: u64,
     words: retype_types::statistics::WordCounter,
+    pub input: retype_types::statistics::InputTracker,
 }
 impl Activity {
     pub fn tick(&mut self) {
@@ -25,10 +26,19 @@ impl Activity {
         }
         self.last = Some(now);
     }
-    pub fn backspace(&mut self) {
+    pub fn backspace(&mut self) -> Counts {
         self.words.backspace();
+        Counts {
+            input: self.input.backspace(),
+            ..Default::default()
+        }
     }
     pub fn commit(&mut self, text: &str) -> Counts {
+        let mut counts = self.commit_counts(text);
+        counts.input = self.input.commit(text);
+        counts
+    }
+    pub fn commit_counts(&mut self, text: &str) -> Counts {
         let chinese = text.chars().filter(|c| matches!(*c as u32,0x3400..=0x4dbf|0x4e00..=0x9fff|0xf900..=0xfaff|0x20000..=0x323af)).count() as u64;
         let english = text.chars().filter(|c| c.is_ascii_alphanumeric()).count() as u64;
         let english_words = self.words.feed(text) as u64;
@@ -50,6 +60,7 @@ impl Activity {
         self.elapsed = 0;
         Counts {
             english_words: self.words.finish() as u64,
+            input: self.input.boundary(true),
             ..Default::default()
         }
     }
@@ -252,7 +263,7 @@ pub fn summary(rows: &[Bucket], period: u32, version: Option<&str>) -> Result<Va
         "chineseSpeed":speed(c.chinese,c.chinese_ms,10),"englishSpeed":speed(c.english_words,c.english_word_ms,5)})
     };
     Ok(
-        json!({"versions":versions,"current":view(&current),"previous":view(&old),"recent":view(&recent),"voice":view(&voice),"bars":bars.iter().map(|(i,c)|json!({"label":match period{0=>format!("{i}"),3=>format!("{}月",i+1),_=>{let d=start+chrono::Duration::days(*i as i64);format!("{}/{}",d.month(),d.day())}},"counts":view(c)})).collect::<Vec<_>>()}),
+        json!({"input":{"chinese":current.input.grouped(true),"english":current.input.grouped(false),"cancelled":current.input.cancelled},"versions":versions,"current":view(&current),"previous":view(&old),"recent":view(&recent),"voice":view(&voice),"bars":bars.iter().map(|(i,c)|json!({"label":match period{0=>format!("{i}"),3=>format!("{}月",i+1),_=>{let d=start+chrono::Duration::days(*i as i64);format!("{}/{}",d.month(),d.day())}},"counts":view(c)})).collect::<Vec<_>>()}),
     )
 }
 fn speed(n: u64, ms: u64, min: u64) -> Option<u64> {

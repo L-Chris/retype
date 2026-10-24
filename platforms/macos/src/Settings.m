@@ -143,6 +143,8 @@ static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
 @interface RTSettings () <NSWindowDelegate,NSTextFieldDelegate,NSComboBoxDelegate>
 @property(nonatomic) NSInteger page;
 @property(nonatomic) NSInteger period;
+@property(nonatomic) NSInteger chineseInputSelection;
+@property(nonatomic) NSInteger englishInputSelection;
 @property(nonatomic, strong) RTFlipped *body;
 @property(nonatomic, strong) NSScrollView *scroll;
 @property(nonatomic, strong) NSTextField *titleLabel;
@@ -189,6 +191,7 @@ static RTSettings *RTLoadedSettings;
     }); return controller;
 }
 - (void)setup {
+    self.chineseInputSelection=-1;self.englishInputSelection=-1;
     self.secretValues=NSMutableDictionary.dictionary;self.secretVersions=NSMutableDictionary.dictionary;self.secretLoading=NSMutableSet.set;
     self.secretQueue=RTSecretQueue();
     NSView *root = self.window.contentView; root.wantsLayer = YES;
@@ -231,7 +234,7 @@ static RTSettings *RTLoadedSettings;
     [(RTAppDelegate *)NSApp.delegate voiceCancel];
 }
 - (void)showWindow:(id)sender {
-    if (!self.window.visible) ((RTAppDelegate *)NSApp.delegate).statisticsVersion=nil;
+    if (!self.window.visible) {((RTAppDelegate *)NSApp.delegate).statisticsVersion=nil;self.chineseInputSelection=-1;self.englishInputSelection=-1;}
     [super showWindow:sender]; [self startPageUpdates];
     if(!self.performanceTimer){
         __weak RTSettings *weakSelf=self;__block CFAbsoluteTime previous=CFAbsoluteTimeGetCurrent();
@@ -496,6 +499,15 @@ static RTSettings *RTLoadedSettings;
         [self metric:s[@"current"] previous:s[@"previous"]];
         RTChart *chart = [[RTChart alloc] initWithFrame:NSMakeRect(20,self.row,512,168)]; chart.bars = s[@"bars"] ?: @[]; [self.card addSubview:chart]; self.row += 180;
         [self finishCard];
+        [self newCard]; [self label:@"回改与上屏长度" size:16];
+        NSButton *inputHelp=[NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"questionmark.circle" accessibilityDescription:@"输入分布说明"] target:nil action:NULL];inputHelp.bordered=NO;inputHelp.frame=NSMakeRect(160,20,22,22);inputHelp.toolTip=[NSString stringWithFormat:@"当前时间与版本范围内取消输入 %@ 次。取消没有最终长度，不分配到图中。\n仅包含新口径启用后采集的样本。",s[@"input"][@"cancelled"]?:@0];[self.card addSubview:inputHelp];
+        [self finishCard];
+        for(NSUInteger i=0;i<2;i++){
+            [self newCard];[self label:i==0?@"中文输入 · 字/次":@"英文输入 · 词/次" size:16];
+            RTInputChart *inputChart=[[RTInputChart alloc] initWithFrame:NSMakeRect(20,self.row,512,220)];inputChart.unit=i==0?@"字":@"词";inputChart.rows=s[@"input"][i==0?@"chinese":@"english"]?:@[];inputChart.selectedIndex=i==0?self.chineseInputSelection:self.englishInputSelection;inputChart.identifier=i==0?@"input-chart-chinese":@"input-chart-english";
+            __weak RTSettings *weakSelf=self;inputChart.selectionChanged=^(NSInteger index){if(i==0)weakSelf.chineseInputSelection=index;else weakSelf.englishInputSelection=index;};
+            NSButton *summary=[NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"questionmark.circle" accessibilityDescription:@"输入统计详情"] target:nil action:NULL];summary.bordered=NO;summary.frame=NSMakeRect(174,20,22,22);summary.toolTip=[NSString stringWithFormat:@"本%@ · %@\n%@",@[@"天",@"周",@"月",@"年"][self.period],app.statisticsVersion?(app.statisticsVersion.length?app.statisticsVersion:@"历史未标记版本"):@"全部版本",inputChart.summary];[self.card addSubview:summary];[self.card addSubview:inputChart];self.row+=232;[self finishCard];
+        }
         [self newCard]; [self label:@"语音输入" size:16];
         [self label:[NSString stringWithFormat:@"中文 %@ 字 · 英文 %@ 词",s[@"voice"][@"chinese"] ?: @0,s[@"voice"][@"english"] ?: @0] size:14];
         [self finishCard];
@@ -629,8 +641,8 @@ static RTSettings *RTLoadedSettings;
 }
 - (void)testVoice:(id)sender{(void)sender;if(RTVoice.shared.running)[(RTAppDelegate *)NSApp.delegate voiceStop];else [(RTAppDelegate *)NSApp.delegate voiceStartForTest:YES];}
 - (void)cancelVoice:(id)sender{(void)sender;[(RTAppDelegate *)NSApp.delegate voiceCancel];}
-- (void)statisticsVersion:(NSPopUpButton *)sender { RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;id version=sender.selectedItem.representedObject;app.statisticsVersion=version==NSNull.null?nil:version;[app loadStatistics:self.period]; }
-- (void)period:(NSSegmentedControl *)sender{self.period=sender.selectedSegment;[(RTAppDelegate *)NSApp.delegate loadStatistics:self.period];}
+- (void)statisticsVersion:(NSPopUpButton *)sender {self.chineseInputSelection=-1;self.englishInputSelection=-1; RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;id version=sender.selectedItem.representedObject;app.statisticsVersion=version==NSNull.null?nil:version;[app loadStatistics:self.period]; }
+- (void)period:(NSSegmentedControl *)sender{self.chineseInputSelection=-1;self.englishInputSelection=-1;self.period=sender.selectedSegment;[(RTAppDelegate *)NSApp.delegate loadStatistics:self.period];}
 - (void)pack:(NSSwitch *)sender {
     RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;NSUInteger index=sender.tag,mask=[RTPreferences.shared.value[@"packs"] unsignedIntegerValue];BOOL enabled=sender.state==NSControlStateValueOn;
     if(!enabled){RTPreferences.shared.value[@"packs"]=@(mask&~(1<<index));[RTPreferences.shared save];[app reloadRuntime];return;}

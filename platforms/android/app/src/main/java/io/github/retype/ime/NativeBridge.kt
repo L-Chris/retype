@@ -28,5 +28,10 @@ object NativeBridge {
 
     @JvmStatic external fun acknowledge(handle: Long, generation: Long, accepted: Boolean)
 
+    @JvmStatic external fun statisticsCreate(): Long
+    @JvmStatic external fun statisticsEdit(handle: Long, before: Int, after: Int, flags: Int)
+    @JvmStatic external fun statisticsUpdate(handle: Long, operation: Int, text: String): LongArray?
+    @JvmStatic external fun statisticsDestroy(handle: Long)
+
     @JvmStatic external fun destroy(handle: Long)
 }

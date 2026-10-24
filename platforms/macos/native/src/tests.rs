@@ -311,3 +311,51 @@ fn termination_barrier_flushes_only_acknowledged_learning_and_numeric_statistics
         Some(2)
     );
 }
+
+#[test]
+fn input_measurements_wait_for_ack_ignore_replays_and_cancel_without_success() {
+    let path = db_path();
+    let runtime = runtime(&path);
+    let mut session = Session::new(Arc::clone(&runtime), false, true);
+    let totals = |runtime: &Runtime| {
+        runtime.statistics.flush().unwrap();
+        let mut total = retype_types::statistics::InputStats::default();
+        for row in
+            retype_sync::statistics::capture(&path.with_extension("statistics"), &"a".repeat(32))
+                .unwrap()
+        {
+            total.add(&row.counts.input);
+        }
+        total
+    };
+    for accepted in [false, true] {
+        type_text(&mut session, "nihao");
+        key(&mut session, "backspace");
+        key(&mut session, "o");
+        let result = key(&mut session, "space");
+        let token = result["token"].as_u64().unwrap();
+        assert_eq!(totals(&runtime).total(true).inputs, 0);
+        session.dispatch(Command::Ack { token, accepted }).unwrap();
+        session
+            .dispatch(Command::Ack {
+                token,
+                accepted: true,
+            })
+            .unwrap();
+    }
+    let input = totals(&runtime);
+    assert_eq!(
+        (
+            input.total(true).inputs,
+            input.total(true).corrected,
+            input.total(true).units
+        ),
+        (1, 1, 2)
+    );
+    type_text(&mut session, "ni");
+    key(&mut session, "escape");
+    assert_eq!(totals(&runtime).cancelled, 1);
+    type_text(&mut session, "ni");
+    session.dispatch(Command::Discard).unwrap();
+    assert_eq!(totals(&runtime).cancelled, 1);
+}

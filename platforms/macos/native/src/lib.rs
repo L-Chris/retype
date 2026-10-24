@@ -160,6 +160,7 @@ enum Command {
     },
     Toggle,
     Reset,
+    Discard,
     Poll,
     Ack {
         token: u64,
@@ -167,11 +168,17 @@ enum Command {
     },
     Boundary,
 }
+struct PendingCommit {
+    token: u64,
+    events: Vec<Event>,
+    text: Vec<String>,
+    input: retype_types::statistics::InputStats,
+}
 struct Session {
     runtime: Arc<Runtime>,
     backend: Arc<LocalBackend>,
     pending: Vec<Event>,
-    awaiting: Option<(u64, Vec<Event>, Vec<String>)>,
+    awaiting: Option<PendingCommit>,
     commit_token: u64,
     activity: statistics::Activity,
 }
@@ -208,6 +215,17 @@ impl Session {
     }
     fn dispatch(&mut self, command: Command) -> Result<Value, String> {
         let mut actions = Vec::new();
+        let before = self
+            .backend
+            .with_kernel(|k| (k.has_composition(), k.spelling_len()));
+        let observes = !matches!(
+            &command,
+            Command::Ack { .. }
+                | Command::Poll
+                | Command::Boundary
+                | Command::Layout { .. }
+                | Command::Discard
+        );
         let backspace =
             matches!(&command,Command::Key{value,mods} if value=="backspace"&&mods & !1==0);
         let literal = match &command {
@@ -264,6 +282,12 @@ impl Session {
                 delta: delta.clamp(-1, 1),
             }),
             Command::Toggle => Some(InputEvent::ToggleChinese),
+            Command::Discard => {
+                self.activity.input.discard();
+                self.pending.clear();
+                self.awaiting = None;
+                Some(InputEvent::ResetComposition)
+            }
             Command::Reset => {
                 self.pending.clear();
                 self.awaiting = None;
@@ -308,11 +332,15 @@ impl Session {
                 None
             }
             Command::Ack { token, accepted } => {
-                if self.awaiting.as_ref().is_some_and(|(t, _, _)| *t == token) {
-                    if let Some((_, events, text)) = self.awaiting.take() {
+                if self.awaiting.as_ref().is_some_and(|p| p.token == token) {
+                    if let Some(pending) = self.awaiting.take() {
                         if accepted {
-                            let _ = self.runtime.writer.send(LearningJob::Events(events));
-                            let counts = self.activity.commit(&text.concat());
+                            let _ = self
+                                .runtime
+                                .writer
+                                .send(LearningJob::Events(pending.events));
+                            let mut counts = self.activity.commit_counts(&pending.text.concat());
+                            counts.input = pending.input;
                             self.runtime.statistics.record(counts);
                         }
                     }
@@ -343,15 +371,26 @@ impl Session {
                 _ => {}
             }
         }
+        let after = self
+            .backend
+            .with_kernel(|k| (k.has_composition(), k.spelling_len()));
+        if observes {
+            self.activity.input.edit(before, after, backspace);
+        }
         if !commits.is_empty() {
             self.commit_token += 1;
-            self.awaiting = Some((
-                self.commit_token,
-                std::mem::take(&mut self.pending),
-                commits.clone(),
-            ));
+            self.awaiting = Some(PendingCommit {
+                token: self.commit_token,
+                events: std::mem::take(&mut self.pending),
+                input: self.activity.input.commit(&commits.concat()),
+                text: commits.clone(),
+            });
+        } else if observes && before.0 && !after.0 {
+            let counts = self.activity.boundary();
+            self.runtime.statistics.record(counts);
         } else if pass && backspace {
-            self.activity.backspace();
+            let counts = self.activity.backspace();
+            self.runtime.statistics.record(counts);
         } else if pass && !literal.is_empty() {
             self.runtime
                 .statistics

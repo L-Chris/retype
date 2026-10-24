@@ -3,7 +3,7 @@
 use super::*;
 use jni::{
     objects::{JClass, JObject, JObjectArray, JString, JValue},
-    sys::{jboolean, jint, jlong, jobject, jobjectArray, jstring},
+    sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jstring},
     JNIEnv,
 };
 use std::{
@@ -66,7 +66,7 @@ pub extern "system" fn Java_io_github_retype_ime_NativeBridge_dispatchInput(
         Ok(env
             .new_object(
                 "io/github/retype/ime/NativeUpdate",
-                "(JLjava/lang/String;[Ljava/lang/String;IIIZ[Ljava/lang/String;Z)V",
+                "(JLjava/lang/String;[Ljava/lang/String;IIIZ[Ljava/lang/String;ZI)V",
                 &[
                     JValue::Long(update.generation as i64),
                     JValue::Object(&composition),
@@ -77,6 +77,7 @@ pub extern "system" fn Java_io_github_retype_ime_NativeBridge_dispatchInput(
                     JValue::Bool(u8::from(update.chinese)),
                     JValue::Object(&commits),
                     JValue::Bool(u8::from(update.pass_through)),
+                    JValue::Int(update.spelling_length as i32),
                 ],
             )
             .map_err(|e| e.to_string())?
@@ -218,6 +219,97 @@ pub extern "system" fn Java_io_github_retype_ime_NativeBridge_destroy(
     guard(&mut env, |_| {
         let session = sessions().lock().map_err(|e| e.to_string())?.remove(&id);
         drop(session);
+        Ok(())
+    });
+}
+
+// Count-only state has its own opaque handle and never holds an editor or text.
+static STATISTICS: OnceLock<Mutex<HashMap<i64, retype_types::statistics::InputTracker>>> =
+    OnceLock::new();
+fn statistics() -> &'static Mutex<HashMap<i64, retype_types::statistics::InputTracker>> {
+    STATISTICS.get_or_init(Default::default)
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsCreate(
+    mut env: JNIEnv,
+    _: JClass,
+) -> jlong {
+    guard(&mut env, |_| {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        statistics()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(id, Default::default());
+        Ok(id)
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsEdit(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+    before: jint,
+    after: jint,
+    flags: jint,
+) {
+    guard(&mut env, |_| {
+        statistics()
+            .lock()
+            .map_err(|e| e.to_string())?
+            .get_mut(&id)
+            .ok_or("closed statistics")?
+            .edit(
+                (flags & 1 != 0, before.max(0) as usize),
+                (flags & 2 != 0, after.max(0) as usize),
+                flags & 4 != 0,
+            );
+        Ok(())
+    });
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsUpdate(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+    operation: jint,
+    text: JString,
+) -> jlongArray {
+    guard(&mut env, |env| {
+        let text: String = env.get_string(&text).map_err(|e| e.to_string())?.into();
+        let input = {
+            let mut all = statistics().lock().map_err(|e| e.to_string())?;
+            let tracker = all.get_mut(&id).ok_or("closed statistics")?;
+            match operation {
+                0 => tracker.commit(&text),
+                1 => tracker.boundary(false),
+                2 => tracker.boundary(true),
+                3 => tracker.backspace(),
+                _ => return Err("invalid statistics operation".into()),
+            }
+        };
+        if input.is_empty() {
+            return Ok(std::ptr::null_mut());
+        }
+        let values: Vec<i64> = input
+            .values()
+            .map(|n| n.min(i64::MAX as u64) as i64)
+            .collect();
+        let array = env
+            .new_long_array(values.len() as i32)
+            .map_err(|e| e.to_string())?;
+        env.set_long_array_region(&array, 0, &values)
+            .map_err(|e| e.to_string())?;
+        Ok(array.into_raw())
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsDestroy(
+    mut env: JNIEnv,
+    _: JClass,
+    id: jlong,
+) {
+    guard(&mut env, |_| {
+        statistics().lock().map_err(|e| e.to_string())?.remove(&id);
         Ok(())
     });
 }

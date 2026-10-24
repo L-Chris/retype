@@ -23,6 +23,7 @@ import org.json.JSONObject
 data class KeyboardState(
     val generation: Long = 0,
     val composition: String = "",
+    val spellingLength: Int = 0,
     val candidates: List<String> = emptyList(),
     val candidateTotal: Int = 0,
     val candidatePages: Map<Int, List<String>> = emptyMap(),
@@ -82,7 +83,7 @@ class RetypeImeService :
         !state.chinese && !policy.password && !policy.literal) {
       TypingStatistics.get(applicationContext).record(activityClock.commit(state.composition, false))
     }
-    finishStatistics()
+    TypingStatistics.get(applicationContext).record(activityClock.endEditor())
     composing = false
   }
 
@@ -278,7 +279,7 @@ class RetypeImeService :
         val paired = withContext(Dispatchers.Main) {
           epoch == current && connection === ic && !composing && symbolCompletionEnabled() && symbols.backspace(ic)
         }
-        if (paired) { withContext(Dispatchers.Main) { activityClock.backspace() }; return@trySend }
+        if (paired) { withContext(Dispatchers.Main) { TypingStatistics.get(applicationContext).record(activityClock.backspace()) }; return@trySend }
       }
       val nativeStarted = System.nanoTime()
       android.os.Trace.beginSection("retype.native_input")
@@ -300,6 +301,10 @@ class RetypeImeService :
         if (epoch != current || connection !== ic) return@withContext
         val commits = update.commits
         val committedLanguage = state.chinese
+        val wasComposing=state.composition.isNotEmpty()
+        val measured=!policy.password && !policy.literal
+        if(measured) activityClock.compositionEdit(wasComposing,state.spellingLength,update.composition.isNotEmpty(),update.spellingLength,command.operation==1 && command.text=="backspace" && command.flags and 14==0)
+        var transactionCounts=Counts()
         accepted = true
         ic.beginBatchEdit()
         editorStarted = System.nanoTime()
@@ -315,8 +320,7 @@ class RetypeImeService :
             val committed = symbols.commit(ic, text, raw, committedLanguage, symbolCompletionEnabled())
             accepted = committed && accepted
             if (committed && !policy.password && !policy.literal) {
-              TypingStatistics.get(applicationContext)
-                  .record(activityClock.commit(text, committedLanguage))
+              transactionCounts += activityClock.commit(text, committedLanguage)
             }
           }
           val composition = update.composition
@@ -337,6 +341,12 @@ class RetypeImeService :
               (switching || command.operation == 3 ||
                key in setOf("space", "enter", "tab", "left", "right", "up", "down"))) {
             finishStatistics()
+          }
+          if(measured) {
+            if(accepted) {
+              if(wasComposing && update.composition.isEmpty() && commits.isEmpty()) transactionCounts += activityClock.cancelComposition()
+              TypingStatistics.get(applicationContext).record(transactionCounts)
+            } else activityClock.reset()
           }
           state = state.withNativeUpdate(update)
           if (switching)
@@ -410,7 +420,7 @@ class RetypeImeService :
       else -> commit(value)
     }
     if (accepted && !policy.password && !policy.literal) {
-      if (value == "backspace") activityClock.backspace()
+      if (value == "backspace") TypingStatistics.get(applicationContext).record(activityClock.backspace())
       else if (value in setOf("enter", "tab", "left", "right", "up", "down", "escape")) finishStatistics()
     }
     return accepted
@@ -711,6 +721,7 @@ class RetypeImeService :
   override fun onDestroy() {
     cancelVoice()
     finishEditorStatistics()
+    activityClock.close()
     ++epoch
     view?.disposeComposition()
     registry.currentState = Lifecycle.State.DESTROYED

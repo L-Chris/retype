@@ -11,11 +11,13 @@ class NativeUpdate(
     val chinese: Boolean,
     val commits: Array<String>,
     val passThrough: Boolean,
+    val spellingLength: Int = 0,
 )
 
 internal fun KeyboardState.withNativeUpdate(update: NativeUpdate): KeyboardState = copy(
     generation = update.generation,
     composition = update.composition,
+    spellingLength = update.spellingLength,
     candidates = update.candidates?.asList() ?: candidates,
     candidateTotal = update.candidateTotal,
     candidatePages = if (update.generation == generation) candidatePages else emptyMap(),

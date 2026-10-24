@@ -16,6 +16,7 @@ data class Counts(
     val englishMs: Long = 0,
     val englishWords: Long = 0,
     val englishWordMs: Long = 0,
+    val input: InputMeasurements? = null,
 ) {
     operator fun plus(o: Counts) =
         Counts(
@@ -25,6 +26,7 @@ data class Counts(
             englishMs + o.englishMs,
             englishWords + o.englishWords,
             englishWordMs + o.englishWordMs,
+            if(input==null) o.input else if(o.input==null) input else input+o.input,
         )
 
     fun speed(chinese: Boolean): Long? {
@@ -41,7 +43,7 @@ data class StatisticsSummary(
 )
 
 class TypingStatistics internal constructor(private val context: Context, name: String = "statistics.db") :
-    SQLiteOpenHelper(context, name, null, 3) {
+    SQLiteOpenHelper(context, name, null, 4) {
     companion object {
         @Volatile private var instance: TypingStatistics? = null
 
@@ -78,6 +80,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             db.execSQL("INSERT INTO buckets(device,stream,minute,chinese,english,chinese_ms,english_ms,english_words,english_word_ms) SELECT device,stream,minute,chinese,english,chinese_ms,english_ms,english_words,english_word_ms FROM buckets_legacy")
             db.execSQL("DROP TABLE buckets_legacy")
         }
+        if(old<4) db.execSQL("UPDATE buckets SET input='{}'")
     }
 
     fun record(c: Counts, stream: String = "android.log") {
@@ -98,6 +101,14 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                     "UPDATE buckets SET chinese=chinese+?,english=english+?,chinese_ms=chinese_ms+?,english_ms=english_ms+?,english_words=english_words+?,english_word_ms=english_word_ms+? WHERE device=? AND stream=? AND minute=? AND version=?",
                     arrayOf<Any>(c.chinese, c.english, c.chineseMs, c.englishMs, c.englishWords, c.englishWordMs, device, source, minute, version),
                 )
+                c.input?.let { delta ->
+                    val keys=arrayOf(device,source,minute.toString(),version)
+                    db.rawQuery("SELECT input FROM buckets WHERE device=? AND stream=? AND minute=? AND version=?",keys).use { cursor ->
+                        cursor.moveToFirst()
+                        val old=InputMeasurements.fromJson(JSONObject(cursor.getString(0)))
+                        db.execSQL("UPDATE buckets SET input=? WHERE device=? AND stream=? AND minute=? AND version=?",arrayOf((old?.plus(delta)?:delta).toJson().toString(),*keys))
+                    }
+                }
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()
@@ -126,7 +137,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                                     .put("english_ms", cursor.getLong(6))
                                     .put("english_words", cursor.getLong(7))
                                     .put("english_word_ms", cursor.getLong(8))
-                                    .put("input",JSONObject(cursor.getString(10))),
+                                    .put("input_detail",JSONObject(cursor.getString(10))),
                             )
                     )
                 }
@@ -178,7 +189,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                 )
                 db.rawQuery("SELECT input FROM buckets WHERE device=? AND stream=? AND minute=? AND version=?",keys).use { cursor ->
                     cursor.moveToFirst()
-                    val input=mergeInput(JSONObject(cursor.getString(0)),c.optJSONObject("input")?:JSONObject())
+                    val input=mergeInput(JSONObject(cursor.getString(0)),c.optJSONObject("input_detail")?:JSONObject())
                     db.execSQL("UPDATE buckets SET input=? WHERE device=? AND stream=? AND minute=? AND version=?",arrayOf(input.toString(),*keys))
                 }
             }
@@ -242,7 +253,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
             )+listOfNotNull(version)).toTypedArray()
         readableDatabase
             .rawQuery(
-                "SELECT minute,SUM(chinese),SUM(english),SUM(chinese_ms),SUM(english_ms),SUM(english_words),SUM(english_word_ms) FROM buckets WHERE (stream='android.log' OR stream LIKE 'android@%.log') AND minute>=? AND minute<=?${if(version==null) "" else " AND version=?"} GROUP BY minute",
+                "SELECT minute,chinese,english,chinese_ms,english_ms,english_words,english_word_ms,input FROM buckets WHERE (stream='android.log' OR stream LIKE 'android@%.log') AND minute>=? AND minute<=?${if(version==null) "" else " AND version=?"} ORDER BY minute",
                 params,
             )
             .use { cursor ->
@@ -256,6 +267,7 @@ class TypingStatistics internal constructor(private val context: Context, name: 
                             cursor.getLong(4),
                             cursor.getLong(5),
                             cursor.getLong(6),
+                            InputMeasurements.fromJson(JSONObject(cursor.getString(7))),
                         )
                     if (minute < startMinute) old += c
                     else {
@@ -275,7 +287,29 @@ class TypingStatistics internal constructor(private val context: Context, name: 
     }
 }
 
-class ActivityClock {
+class ActivityClock : AutoCloseable {
+    private var measurements=0L
+    private var measurementsAvailable=true
+    private fun handle():Long {
+        if(measurements==0L) measurements=NativeBridge.statisticsCreate()
+        return measurements
+    }
+    private fun measure(operation:Int,text:String=""):InputMeasurements? {
+        if(!measurementsAvailable)return null
+        return try { InputMeasurements.fromNative(NativeBridge.statisticsUpdate(handle(),operation,text)) }
+        catch(error:LinkageError){measurementsAvailable=false;null}
+        catch(error:Exception){measurementsAvailable=false;android.util.Log.w("retype","Input measurement unavailable",error);null}
+    }
+    fun compositionEdit(before:Boolean,beforeLength:Int,after:Boolean,afterLength:Int,backspace:Boolean) {
+        if(!measurementsAvailable)return
+        try { NativeBridge.statisticsEdit(handle(),beforeLength,afterLength,(if(before)1 else 0) or (if(after)2 else 0) or (if(backspace)4 else 0)) }
+        catch(error:LinkageError){measurementsAvailable=false}
+        catch(error:Exception){measurementsAvailable=false;android.util.Log.w("retype","Input measurement unavailable",error)}
+    }
+    fun cancelComposition()=Counts(input=measure(2))
+    fun endEditor()=Counts(englishWords=words(boundary=true),input=measure(2))
+    override fun close() { if(measurements!=0L) { NativeBridge.statisticsDestroy(measurements);measurements=0L } }
+
     private var last = 0L
     private var language = true
     private var pending = 0L
@@ -308,9 +342,9 @@ class ActivityClock {
         }
     }
 
-    fun boundary(): Counts = Counts(englishWords = words(boundary = true))
+    fun boundary(): Counts = Counts(englishWords = words(boundary = true),input=measure(1))
 
-    fun backspace() { words(backspace = true) }
+    fun backspace():Counts { words(backspace = true);return Counts(input=measure(3)) }
 
     fun commit(text: String, chinese: Boolean): Counts {
         val chineseCount = text.codePoints().filter { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }.count()
@@ -321,10 +355,11 @@ class ActivityClock {
         val englishMs = if (englishCount > 0) ms - chineseMs else 0
         return Counts(chinese = chineseCount, english = englishCount,
             chineseMs = chineseMs, englishMs = englishMs,
-            englishWords = words(text, boundary = chinese), englishWordMs = englishMs)
+            englishWords = words(text, boundary = chinese), englishWordMs = englishMs,input=measure(0,text))
     }
 
     fun reset() {
+        close()
         last = 0
         pending = 0
         wordState = JSONArray()
@@ -343,22 +378,7 @@ fun TypingStatistics.voiceTotal(version:String?=null): Counts {
 // Preserve Windows measurements when Android forwards cloud snapshots. Only
 // bounded numeric counters are accepted; unknown fields are not retained.
 private fun mergeInput(old:JSONObject,incoming:JSONObject):JSONObject {
-    fun value(o:JSONObject,key:String):Long = o.optLong(key,0).also { require(it in 0..1000000000000000L) }
-    val result=JSONObject()
-    for (language in listOf("chinese","english")) {
-        val a=old.optJSONArray(language)
-        val b=incoming.optJSONArray(language)
-        require(a==null || a.length()==8);require(b==null || b.length()==8)
-        val rows=JSONArray()
-        for(i in 0..7) {
-            val left=a?.getJSONObject(i)?:JSONObject()
-            val right=b?.getJSONObject(i)?:JSONObject()
-            val row=JSONObject()
-            for(key in listOf("inputs","corrected","units")) row.put(key,maxOf(value(left,key),value(right,key)))
-            rows.put(row)
-        }
-        result.put(language,rows)
-    }
-    for(key in listOf("cancelled","spelling_deletions")) result.put(key,maxOf(value(old,key),value(incoming,key)))
-    return result
+    val left=InputMeasurements.fromJson(old)
+    val right=InputMeasurements.fromJson(incoming)
+    return (if(left==null) right else if(right==null) left else left.mergeMax(right))?.toJson()?:JSONObject()
 }

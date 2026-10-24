@@ -111,3 +111,12 @@ void RTRegisterHooks(void);
 - (void)stop;
 - (void)cancel;
 @end
+
+@interface RTInputChart : NSView
+@property(nonatomic,copy) NSArray<NSDictionary *> *rows;
+@property(nonatomic,copy) NSString *unit;
+@property(nonatomic) NSInteger selectedIndex;
+@property(nonatomic,copy) void (^selectionChanged)(NSInteger);
+@property(nonatomic,readonly) NSString *summary;
+- (NSString *)tooltipForIndex:(NSUInteger)index;
+@end

@@ -17,31 +17,33 @@ impl WordCounter {
         &self.tail
     }
     pub fn feed(&mut self, text: &str) -> u32 {
-        let mut words = 0u32;
-        for ch in text.chars() {
-            let class = if is_latin_letter(ch) {
-                Some(1)
-            } else if ch.is_ascii_digit() {
-                Some(0)
-            } else if matches!(ch, '\'' | '\u{2019}') && self.tail.last().is_some_and(|v| *v != 2) {
-                Some(2)
-            } else if matches!(ch as u32, 0x0300..=0x036F) && !self.tail.is_empty() {
-                Some(3)
-            } else {
-                None
-            };
-            if let Some(class) = class {
-                // Bound even a very long uninterrupted token without creating extra words.
-                if self.tail.len() < 4096 {
-                    self.tail.push(class);
-                } else if class == 1 && !self.tail.contains(&1) {
-                    self.tail[0] = 1;
-                }
-            } else {
-                words = words.saturating_add(self.finish());
+        text.chars()
+            .map(|ch| self.feed_char(ch))
+            .fold(0, u32::saturating_add)
+    }
+    pub fn feed_char(&mut self, ch: char) -> u32 {
+        let class = if is_latin_letter(ch) {
+            Some(1)
+        } else if ch.is_ascii_digit() {
+            Some(0)
+        } else if matches!(ch, '\'' | '\u{2019}') && self.tail.last().is_some_and(|v| *v != 2) {
+            Some(2)
+        } else if matches!(ch as u32, 0x0300..=0x036F) && !self.tail.is_empty() {
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(class) = class {
+            // Bound even a very long uninterrupted token without creating extra words.
+            if self.tail.len() < 4096 {
+                self.tail.push(class);
+            } else if class == 1 && !self.tail.contains(&1) {
+                self.tail[0] = 1;
             }
+        } else {
+            return self.finish();
         }
-        words
+        0
     }
     pub fn backspace(&mut self) {
         self.tail.pop();
@@ -96,17 +98,21 @@ pub struct LengthCounts {
     pub corrected: u64,
     pub units: u64,
 }
-pub const LENGTH_LABELS: [&str; 8] = ["1", "2", "3", "4", "5–8", "9–16", "17–32", "33+"];
+/// Collection buckets: exact lengths 1–19, followed by >=20.
+pub const LENGTH_BUCKETS: usize = 20;
+/// Presentation only; no grouped counts are persisted.
+pub const LENGTH_LABELS: [&str; 6] = ["1", "2", "3", "4", "5–10", "11+"];
 pub fn length_index(n: u64) -> usize {
+    n.clamp(1, 20) as usize - 1
+}
+pub fn display_index(n: u64) -> usize {
     match n {
         0..=1 => 0,
         2 => 1,
         3 => 2,
         4 => 3,
-        5..=8 => 4,
-        9..=16 => 5,
-        17..=32 => 6,
-        _ => 7,
+        5..=10 => 4,
+        _ => 5,
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,17 +120,35 @@ pub fn length_index(n: u64) -> usize {
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct InputStats {
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "empty_lengths"))]
-    pub chinese: [LengthCounts; 8],
+    pub chinese: [LengthCounts; LENGTH_BUCKETS],
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "empty_lengths"))]
-    pub english: [LengthCounts; 8],
+    pub english: [LengthCounts; LENGTH_BUCKETS],
     pub cancelled: u64,
     pub spelling_deletions: u64,
 }
 #[cfg(feature = "serde")]
-fn empty_lengths(rows: &[LengthCounts; 8]) -> bool {
+fn empty_lengths(rows: &[LengthCounts; LENGTH_BUCKETS]) -> bool {
     rows.iter().all(|v| *v == LengthCounts::default())
 }
 impl InputStats {
+    pub fn grouped(&self, chinese: bool) -> [LengthCounts; 6] {
+        let mut grouped = [LengthCounts::default(); 6];
+        for (i, row) in (if chinese {
+            &self.chinese
+        } else {
+            &self.english
+        })
+        .iter()
+        .enumerate()
+        {
+            let target = &mut grouped[display_index(i as u64 + 1)];
+            target.inputs = target.inputs.saturating_add(row.inputs);
+            target.corrected = target.corrected.saturating_add(row.corrected);
+            target.units = target.units.saturating_add(row.units);
+        }
+        grouped
+    }
+
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
@@ -190,7 +214,10 @@ pub struct Totals {
     pub english_ms: u64,
     pub english_words: u64,
     pub english_word_ms: u64,
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "InputStats::is_empty"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(rename = "input_detail", skip_serializing_if = "InputStats::is_empty")
+    )]
     pub input: InputStats,
 }
 impl Totals {
@@ -276,5 +303,123 @@ impl LogRecord {
                 ..Default::default()
             },
         })
+    }
+}
+
+/// Shared count-only collector; platforms acknowledge successful editor writes
+/// before persisting returned deltas. No UI, document reads, or I/O occurs here.
+#[derive(Clone, Debug, Default)]
+pub struct InputTracker {
+    attempt: Attempt,
+    direct_words: WordCounter,
+    direct_attempt: Attempt,
+}
+impl InputTracker {
+    pub fn edit(&mut self, before: (bool, usize), after: (bool, usize), backspace: bool) {
+        self.attempt
+            .edit(before.0, after.0, backspace && before.1 > after.1);
+    }
+    pub fn commit(&mut self, text: &str) -> InputStats {
+        let mut result = InputStats::default();
+        let chinese = text.chars().filter(|c| is_han(*c)).count() as u64;
+        if self.attempt.active && text.chars().any(|c| is_han(c) || is_latin_letter(c)) {
+            let attempt = self.attempt.take();
+            result.record(true, chinese, attempt.deletions > 0, attempt.deletions);
+            let mut counter = WordCounter::default();
+            let words = counter.feed(text) + counter.finish();
+            result.record(
+                false,
+                words.into(),
+                attempt.deletions > 0,
+                if chinese == 0 { attempt.deletions } else { 0 },
+            );
+        } else if chinese == 0 {
+            for ch in text.chars() {
+                if self.direct_words.feed_char(ch) > 0 {
+                    let a = self.direct_attempt.take();
+                    result.record(false, 1, a.deletions > 0, a.deletions);
+                }
+                if self.direct_words.checkpoint().contains(&1) {
+                    self.direct_attempt.active = true;
+                } else if self.direct_words.checkpoint().is_empty() {
+                    self.direct_attempt = Attempt::default();
+                }
+            }
+        }
+        result
+    }
+    pub fn boundary(&mut self, cancel: bool) -> InputStats {
+        let mut result = InputStats::default();
+        if cancel && self.attempt.take().active {
+            result.cancelled = 1;
+        }
+        let words = self.direct_words.finish();
+        let a = self.direct_attempt.take();
+        result.record(false, words.into(), a.deletions > 0, a.deletions);
+        result
+    }
+    pub fn backspace(&mut self) -> InputStats {
+        let mut result = InputStats::default();
+        if self.direct_words.checkpoint().contains(&1) {
+            self.direct_attempt.deletions = self.direct_attempt.deletions.saturating_add(1);
+        }
+        self.direct_words.backspace();
+        if self.direct_words.checkpoint().is_empty() && self.direct_attempt.take().active {
+            result.cancelled = 1;
+        }
+        result
+    }
+    pub fn discard(&mut self) {
+        self.attempt = Attempt::default();
+    }
+}
+pub fn is_han(ch: char) -> bool {
+    matches!(ch as u32,0x3400..=0x4DBF|0x4E00..=0x9FFF|0xF900..=0xFAFF|0x20000..=0x2A6DF|0x2A700..=0x2B73F|0x2B740..=0x2B81F|0x2B820..=0x2CEAF|0x2CEB0..=0x2EBEF|0x30000..=0x323AF)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    #[test]
+    fn exact_buckets_reaggregate_at_four_five_ten_eleven_and_keep_tail_mean() {
+        let mut input = InputStats::default();
+        for n in [1, 2, 3, 4, 5, 9, 10, 11, 19, 20, 27] {
+            input.record(true, n, n % 2 == 0, 0);
+        }
+        assert_eq!(input.chinese[9].inputs, 1);
+        assert_eq!(input.chinese[10].inputs, 1);
+        assert_eq!(input.chinese[19].inputs, 2);
+        assert_eq!(input.chinese[19].units, 47);
+        let grouped = input.grouped(true);
+        assert_eq!(grouped.map(|r| r.inputs), [1, 1, 1, 1, 3, 4]);
+        assert_eq!(grouped[4].units, 24);
+        assert_eq!(grouped[5].units, 77);
+        assert_eq!(input.total(true).inputs, 11);
+        assert_eq!(input.values().count(), 122);
+    }
+    #[test]
+    fn words_and_partial_selections_and_failures_share_one_round() {
+        let mut tracker = InputTracker::default();
+        tracker.edit((false, 0), (true, 6), false);
+        tracker.edit((true, 6), (true, 4), false);
+        tracker.edit((true, 0), (true, 4), true);
+        assert_eq!(tracker.commit("你好").total(true).corrected, 0);
+        tracker.edit((false, 0), (true, 6), false);
+        tracker.edit((true, 6), (true, 5), true);
+        assert_eq!(tracker.commit("hello world").english[1].corrected, 1);
+        assert!(tracker.boundary(false).is_empty());
+        tracker.edit((false, 0), (true, 1), false);
+        assert_eq!(tracker.boundary(true).cancelled, 1);
+        assert!(tracker.boundary(true).is_empty());
+        tracker.edit((false, 0), (true, 6), false);
+        tracker.discard();
+        assert!(tracker.boundary(true).is_empty());
+        assert!(tracker.commit("hel").is_empty());
+        assert!(tracker.backspace().is_empty());
+        let word = tracker.commit("lo ");
+        assert_eq!(
+            (word.total(false).inputs, word.total(false).corrected),
+            (1, 1)
+        );
     }
 }

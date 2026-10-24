@@ -136,7 +136,8 @@ int main(void){@autoreleasepool{
     p[@"ai"][@"provider"]=@"validation-provider";p[@"ai"][@"model"]=@"test-model";
     p[@"ai"][@"voice"][@"provider"]=@"validation-provider";p[@"ai"][@"voice"][@"model"]=@"test-model";
     NSDictionary *count=@{@"chinese":@1066,@"english":@213,@"chineseMs":@1050000,@"englishMs":@47000,@"chineseSpeed":@61,@"englishSpeed":@270};
-    delegate.statistics=@{@"versions":@[@"",@"0.8.0",@"0.9.0"],@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
+    NSArray *inputRows=@[@{@"inputs":@20,@"corrected":@2,@"units":@20},@{@"inputs":@30,@"corrected":@3,@"units":@60},@{@"inputs":@0,@"corrected":@0,@"units":@0},@{@"inputs":@10,@"corrected":@2,@"units":@40},@{@"inputs":@25,@"corrected":@5,@"units":@180},@{@"inputs":@15,@"corrected":@3,@"units":@240}];
+    delegate.statistics=@{@"input":@{@"chinese":inputRows,@"english":inputRows,@"cancelled":@7},@"versions":@[@"",@"0.8.0",@"0.9.0"],@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
     RTSettings *settings=RTSettings.shared;[settings showWindow:nil];[settings.window makeKeyAndOrderFront:nil];
     CheckAsyncSettings(settings);
     CheckDeletion();
@@ -152,6 +153,8 @@ int main(void){@autoreleasepool{
         [settings.window makeFirstResponder:nil];[settings setValue:@(page) forKey:@"page"];[settings refresh];
         NSView *body=[settings valueForKey:@"body"];NSTextField *header=[settings valueForKey:@"titleLabel"];NSRect titleFrame=header.frame;
         if(page==6){NSPopUpButton *versions=(NSPopUpButton *)Find(body,@"statistics-version");Check(versions.numberOfItems==4&&[versions.titleOfSelectedItem isEqual:@"全部版本"],@"Statistics defaults to all versions and includes unmarked history");}
+        if(page==6){RTInputChart *ch=(RTInputChart *)Find(body,@"input-chart-chinese"),*en=(RTInputChart *)Find(body,@"input-chart-english");Check(ch.rows.count==6&&en.rows.count==6,@"Both language charts use six display groups");Check([[ch tooltipForIndex:4] containsString:@"7.2"],@"Tooltip means use actual units, not bucket midpoints");Check([[ch tooltipForIndex:2] containsString:@"回改率 —"],@"Empty buckets have unavailable rates");}
+        if(page==6){for(NSString *identifier in @[@"input-chart-chinese",@"input-chart-english"]){RTInputChart *chart=(RTInputChart *)Find(body,identifier);for(NSUInteger mode=0;mode<2;mode++){chart.selectedIndex=mode==1?4:-1;NSBitmapImageRep *rep=[chart bitmapImageRepForCachingDisplayInRect:chart.bounds];[chart cacheDisplayInRect:chart.bounds toBitmapImageRep:rep];Check([[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[output stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%lu.png",identifier,(unsigned long)mode]] atomically:YES],@"Combo chart screenshot must be saved");}chart.selectedIndex=-1;}}
         Inspect(body);for(NSView *card in body.subviews)Check(NSMaxX(card.frame)<=NSWidth(body.bounds)-12,@"Content must reserve its scrollbar gutter");
         NSScrollView *scroll=[settings valueForKey:@"scroll"];[scroll.contentView scrollToPoint:NSMakePoint(0,MAX(0,NSHeight(body.bounds)-100))];Check(NSEqualRects(header.frame,titleFrame),@"Page title must remain fixed while content scrolls");[scroll.contentView scrollToPoint:NSZeroPoint];
         [settings.window.contentView layoutSubtreeIfNeeded];[settings.window.contentView displayIfNeeded];
