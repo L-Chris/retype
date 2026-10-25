@@ -158,13 +158,13 @@ class ResourceWorker(context: Context, params: WorkerParameters) : CoroutineWork
       Result.success()
     } catch (e: CancellationException) { BaseResources.log(context, "cancelled", componentId); throw e }
     catch (e: Exception) {
-      val reason = when (e) {
+      val reason = (when (e) {
         is java.net.UnknownHostException -> "词库下载失败：无法解析服务器地址，请检查网络或 DNS"
         is java.net.SocketTimeoutException -> "词库下载超时，可重试继续下载"
         is javax.net.ssl.SSLException -> "词库下载失败：TLS 连接失败（${e.javaClass.simpleName}）"
         is java.io.IOException -> "词库下载连接中断（${e.javaClass.simpleName}），可重试继续下载"
         else -> e.message ?: "基础词库安装失败"
-      }
+      }).take(400)
       BaseResources.log(context, "failed", componentId, reason)
       Result.failure(workDataOf("error" to reason))
     }
