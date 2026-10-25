@@ -39,6 +39,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --features retype-learning/broker,retype-ai/service -- -D warnings
       - run: cargo test --locked --workspace --features retype-learning/broker,retype-ai/service
+      - name: Preserve existing firewall choices across sync host upgrades
+        shell: powershell
+        run: ./platforms/windows/installer/test-firewall-migrate.ps1
 
   tip:
     name: TIP and payload (${{ matrix.arch }})

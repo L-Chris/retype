@@ -1,5 +1,8 @@
 #import "App.h"
 #import <Carbon/Carbon.h>
+#ifdef RT_UI_SMOKE
+NSDictionary *(^RTTestRuntimeFlush)(void);
+#endif
 
 NSDictionary *RTJSON(char *owned) {
     if (!owned) return @{ @"error": @"输入内核没有响应" };
@@ -47,11 +50,28 @@ NSString *RTDataRoot(void) {
     // them on exit after the acknowledged learning/statistics barrier below.
 }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender;
     [self voiceCancel];[self.maintenance invalidate];
     if(!self.runtime)return NSTerminateNow;
+    RTUpdateLog(@"saving_before_exit",YES);
     RtRuntime *runtime=self.runtime;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{RTJSON(rt_runtime_flush(runtime));dispatch_async(dispatch_get_main_queue(),^{[sender replyToApplicationShouldTerminate:YES];});});
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        NSDictionary *result;
+        #ifdef RT_UI_SMOKE
+        result=RTTestRuntimeFlush?RTTestRuntimeFlush():RTJSON(rt_runtime_flush(runtime));
+        #else
+        result=RTJSON(rt_runtime_flush(runtime));
+        #endif
+        // terminate: can run a nested AppKit loop inside a main-queue block.
+        // A second main-queue block cannot run until that first block returns.
+        [self performSelectorOnMainThread:@selector(finishTermination:) withObject:result waitUntilDone:NO];
+    });
     return NSTerminateLater;
+}
+- (void)finishTermination:(NSDictionary *)result {
+    BOOL saved=!result[@"error"];RTUpdateLog(saved?@"saved_before_exit":@"save_failed",saved);
+    if(!saved){if(self.updateInstaller.running)[self.updateInstaller terminate];self.updateInstaller=nil;[self.jobs removeObject:@"updates"];self.messages[@9]=@"保存输入记录失败，已取消退出，请重试";[RTSettings refreshIfLoaded];}
+    [NSApp replyToApplicationShouldTerminate:saved];
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
     (void)sender; (void)visible;

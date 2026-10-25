@@ -41,6 +41,7 @@ void RTRegisterHooks(void);
 @property(nonatomic, strong) NSMutableDictionary *messages;
 @property(nonatomic, strong) NSMutableSet *jobs;
 @property(nonatomic, strong) NSDictionary *update;
+@property(nonatomic, strong) NSTask *updateInstaller;
 @property(nonatomic, strong) NSDictionary *statistics;
 @property(nonatomic, copy) NSString *statisticsVersion;
 @property(nonatomic, strong) NSDictionary *syncStatus;
@@ -74,6 +75,7 @@ void RTRegisterHooks(void);
 @end
 
 void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible);
+void RTUpdateLog(NSString *stage, BOOL success);
 
 @interface RTSettings : NSWindowController
 + (instancetype)shared;
