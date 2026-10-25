@@ -107,7 +107,7 @@ object DictionaryPacks {
             }
             NativeBridge.feature(
                 JSONObject()
-                    .put("type", "compilePack")
+                    .put("type", "compileVerifiedPack")
                     .put("id", id)
                     .put("source", raw.absolutePath)
                     .put("destination", binary.absolutePath)

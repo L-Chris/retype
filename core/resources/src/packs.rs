@@ -48,6 +48,23 @@ pub fn catalog() -> Result<Vec<Pack>> {
 }
 pub fn compile_bytes(pack: &Pack, bytes: &[u8], destination: &Path) -> Result<usize> {
     pack.verify(bytes)?;
+    compile_rime(bytes, destination)
+}
+/// Local/imported sources do not have a catalog identity. Network packs must use
+/// `compile_source` so their pinned hash is checked before compilation.
+pub fn compile_local(source: &Path, destination: &Path) -> Result<usize> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(source)
+        .map_err(|e| e.to_string())?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    compile_rime(&bytes, destination)
+}
+fn compile_rime(bytes: &[u8], destination: &Path) -> Result<usize> {
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err("词库超过大小限制".into());
+    }
     let tsv = retype_dict::rime::tsv(BufReader::new(bytes))?;
     let result = (|| {
         let file = std::fs::File::create(destination).map_err(|e| e.to_string())?;

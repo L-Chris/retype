@@ -121,17 +121,41 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::create_dir_all(parent).map_err(|_| "无法创建同步目录")?;
     let temp = parent.join(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
     use std::io::Write;
-    let mut file = std::fs::File::create(&temp).map_err(|_| "无法写入同步文件")?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|_| "无法写入同步文件")?;
-    drop(file);
-    let result = std::fs::rename(&temp, path);
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
         return Err("无法替换同步文件".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn repeated_atomic_publications_replace_existing_files_without_temporary_leftovers(
+    ) -> Result<()> {
+        let root = std::env::temp_dir().join(format!("retype-sync-write-{}", uuid::Uuid::new_v4()));
+        let path = root.join("state.json");
+        let result = (|| {
+            write_bytes(&path, b"first")?;
+            write_bytes(&path, b"second")?;
+            assert_eq!(std::fs::read(&path).map_err(|e| e.to_string())?, b"second");
+            assert_eq!(
+                std::fs::read_dir(&root).map_err(|e| e.to_string())?.count(),
+                1
+            );
+            Ok(())
+        })();
+        let _ = std::fs::remove_dir_all(root);
+        result
+    }
 }
 pub fn trim_cache(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else {

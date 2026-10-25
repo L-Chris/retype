@@ -244,12 +244,14 @@ pub fn perform(v: Value) -> Result<Value> {
                 .collect::<Vec<_>>();
             Ok(json!({"packs":rows}))
         }
-        "compilePack" => {
-            let count = retype_resources::packs::compile_source(
-                field(&v, "id")?,
-                Path::new(field(&v, "source")?),
-                Path::new(field(&v, "destination")?),
-            )?;
+        "compilePack" | "compileVerifiedPack" => {
+            let source = Path::new(field(&v, "source")?);
+            let destination = Path::new(field(&v, "destination")?);
+            let count = if field(&v, "type")? == "compileVerifiedPack" {
+                retype_resources::packs::compile_source(field(&v, "id")?, source, destination)?
+            } else {
+                retype_resources::packs::compile_local(source, destination)?
+            };
             Ok(json!({"words":count}))
         }
         "syncTest" => {
