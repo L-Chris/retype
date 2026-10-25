@@ -77,15 +77,52 @@ fn hash_name(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 impl Component {
+    pub fn release_tag(&self) -> String {
+        self.release
+            .clone()
+            .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")))
+    }
+    pub fn release_url(&self) -> String {
+        format!(
+            "https://api.github.com/repos/L-Chris/retype/releases/tags/{}",
+            self.release_tag()
+        )
+    }
+    /// Select only the pinned resource from the official release API response.
+    pub fn download_url(&self, release: &serde_json::Value) -> Result<String> {
+        if release["tag_name"] != self.release_tag()
+            || release["draft"].as_bool().unwrap_or(false)
+            || release["prerelease"].as_bool().unwrap_or(false)
+        {
+            return Err("词库发布信息无效".into());
+        }
+        let asset = release["assets"]
+            .as_array()
+            .and_then(|assets| assets.iter().find(|a| a["name"] == self.asset()))
+            .ok_or("当前版本缺少词库附件")?;
+        let id = asset["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or("词库附件无效")?;
+        let url = format!("https://api.github.com/repos/L-Chris/retype/releases/assets/{id}");
+        if asset["url"] != url
+            || asset["size"].as_u64() != Some(self.compressed_bytes)
+            || asset["state"] != "uploaded"
+            || asset["digest"]
+                .as_str()
+                .is_some_and(|digest| digest != format!("sha256:{}", self.compressed_sha256))
+        {
+            return Err("词库附件信息与校验清单不一致".into());
+        }
+        Ok(url)
+    }
     pub fn asset(&self) -> String {
         format!("retype-{}-{}.bin.gz", self.id, self.sha256)
     }
     pub fn url(&self) -> String {
         format!(
             "https://github.com/L-Chris/retype/releases/download/{}/{}",
-            self.release
-                .clone()
-                .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION"))),
+            self.release_tag(),
             self.asset()
         )
     }

@@ -41,6 +41,7 @@ data class LanState(
     val text: String? = null,
     val addresses: String = "",
     val connection: String = "",
+    val target: String = "",
 )
 
 /** One process-wide connection. The default IME owns clipboard access; no accessibility service. */
@@ -76,6 +77,7 @@ class LanClipboard private constructor(private val context: Context) {
               enabled = prefs.getBoolean("enabled", false),
               name = prefs.getString("name", "") ?: "",
               addresses = prefs.getString("manualAddresses", "") ?: "",
+              target = prefs.getString("address", "") ?: "",
           )
       )
   val state = mutable.asStateFlow()
@@ -143,7 +145,7 @@ class LanClipboard private constructor(private val context: Context) {
     vault.save("lan-token", "")
     prefs.edit().remove("address").remove("addresses").remove("manualAddresses").remove("pin").remove("peer").remove("name").commit()
     synchronized(discoveredAddresses) {discoveredAddresses.clear()}
-    update { it.copy(name = "", addresses = "", connection = "") }
+    update { it.copy(name = "", addresses = "", connection = "", target = "") }
   }
 
   fun showCode() {
@@ -193,6 +195,7 @@ class LanClipboard private constructor(private val context: Context) {
           enabled = true,
           code = if (mode == "show") code else null,
           expires = pairingExpires,
+          target = target,
           message = if (mode == "show") "请在另一台设备输入此匹配码" else "正在查找并关联设备…",
       )
     }
@@ -245,7 +248,7 @@ class LanClipboard private constructor(private val context: Context) {
     job?.cancel()
     socket?.close()
     job = null
-    update { it.copy(code = null, expires = 0, message = "关联已取消") }
+    update { it.copy(code = null, expires = 0, connection = "", message = "关联已取消") }
     if (resumeConnection) resume()
   }
 
@@ -327,7 +330,10 @@ class LanClipboard private constructor(private val context: Context) {
           var completed=false
           for(endpoint in endpoints) {
             currentCoroutineContext().ensureActive()
-            try { session(endpoint,initialPair);completed=true;break }
+            try {
+              update { it.copy(target = endpoint, connection = "") }
+              session(endpoint,initialPair);completed=true;break
+            }
             catch(e: CancellationException){throw e}
             catch(e: Exception){failure=e;android.util.Log.i("retype-lan","Endpoint failed: $endpoint (${e.javaClass.simpleName})")}
           }
@@ -347,6 +353,7 @@ class LanClipboard private constructor(private val context: Context) {
           update {
             it.copy(
                 message = if (initialPair) "尚未找到匹配设备，请检查匹配码及两端连接" else "设备离线，正在重连…",
+                connection = "",
             )
           }
           if (initialPair && (pairingMode.isEmpty() || System.currentTimeMillis()>=pairingExpires)) break

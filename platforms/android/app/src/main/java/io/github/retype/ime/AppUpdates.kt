@@ -50,7 +50,6 @@ internal data class UpdateStatus(
 
 internal object AppUpdates {
   private const val API = "https://api.github.com/repos/L-Chris/retype/releases?per_page=30"
-  private const val API_VERSION = "2026-03-10"
   private const val MAX_APK = 256L * 1024 * 1024
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
   private val mutex = Mutex()
@@ -89,75 +88,10 @@ internal object AppUpdates {
       url: String,
       asset: Boolean = false,
       open: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection }
-  ): HttpURLConnection {
-    require(!asset || isAssetUrl(url)) { "更新附件地址无效，请重新检查更新" }
-    var current = url
-    repeat(6) {
-      val u = URL(current)
-      require(
-          u.protocol == "https" &&
-              u.userInfo == null && u.port in setOf(-1, 443) && u.ref == null &&
-              u.host in
-                  setOf(
-                      "api.github.com",
-                      "github.com",
-                      "release-assets.githubusercontent.com",
-                      "objects.githubusercontent.com")) {
-            "更新地址无效"
-          }
-      val c = open(u)
-      c.connectTimeout = 15000
-      c.readTimeout = 30000
-      c.instanceFollowRedirects = false
-      c.useCaches = false
-      c.setRequestProperty("User-Agent", "retype-android/${BuildConfig.VERSION_NAME}")
-      c.setRequestProperty("Accept", if (asset) "application/octet-stream" else "application/vnd.github+json")
-      c.setRequestProperty("Accept-Encoding", "identity")
-      if (u.host == "api.github.com") c.setRequestProperty("X-GitHub-Api-Version", API_VERSION)
-      val response =
-          try {
-            c.responseCode
-          } catch (e: Exception) {
-            c.disconnect()
-            throw e
-          }
-      if (response in listOf(301, 302, 303, 307, 308)) {
-        val next = c.getHeaderField("Location")
-        c.disconnect()
-        require(!next.isNullOrBlank()) { "更新下载重定向失败" }
-        current = URL(u, next).toString()
-      } else {
-        if (response != 200) {
-          c.disconnect()
-          error(
-              if (response == 403 || response == 429) "检查更新暂时受限，请稍后重试"
-              else "更新请求失败（HTTP $response）")
-        }
-        return c
-      }
-    }
-    error("更新下载重定向过多")
-  }
+  ): HttpURLConnection = GitHubDownloads.connection(url, asset, open = open)
 
-  internal suspend fun read(url: String, limit: Int, asset: Boolean = false): String {
-    val c = connection(url, asset)
-    try {
-      return c.inputStream.use { input ->
-        val output = java.io.ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-          currentCoroutineContext().ensureActive()
-          val count = input.read(buffer)
-          if (count < 0) break
-          check(output.size() + count <= limit) { "更新响应过大" }
-          output.write(buffer, 0, count)
-        }
-        output.toString("UTF-8")
-      }
-    } finally {
-      c.disconnect()
-    }
-  }
+  internal suspend fun read(url: String, limit: Int, asset: Boolean = false): String =
+      GitHubDownloads.read(url, limit, asset)
 
   suspend fun check(context: Context, automatic: Boolean = false) =
       withContext(Dispatchers.IO) {
