@@ -81,6 +81,18 @@ object BaseResources {
     prefs.edit().remove("base").remove("english").apply()
     mutable.value = mutable.value.copy(busy = false, message = "")
   }
+  @Synchronized internal fun log(context: Context, stage: String, component: String = "", error: String? = null) {
+    android.util.Log.i("retype-resources", "$stage $component ${error.orEmpty()}")
+    runCatching {
+      val directory = File(context.filesDir, "logs").apply { mkdirs() }
+      val file = File(directory, "resource-downloads.jsonl")
+      if (file.length() >= 262144) { val previous = File(directory, "resource-downloads.previous.jsonl"); previous.delete(); file.renameTo(previous) }
+      val entry = JSONObject().put("time", System.currentTimeMillis()).put("version", BuildConfig.VERSION_NAME).put("stage", stage).put("component", component)
+      if (error != null) entry.put("error", error.take(400))
+      file.appendText("$entry\n")
+    }
+  }
+
   suspend fun install(context: Context, type: String, file: File, id: String? = null) {
     withContext(Dispatchers.IO) {
       val request = operation(context, type).put("source", file.absolutePath)
@@ -95,6 +107,7 @@ class ResourceWorker(context: Context, params: WorkerParameters) : CoroutineWork
   override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
     val context = applicationContext
     val temporary = File(context.cacheDir, "resource-$id.tmp")
+    var componentId = ""
     try {
       val source = inputData.getString("source")
       if (source != null) {
@@ -110,66 +123,51 @@ class ResourceWorker(context: Context, params: WorkerParameters) : CoroutineWork
         setProgress(workDataOf("message" to "校验并安装词库…"))
         BaseResources.install(context, "resourceImport", temporary)
       } else {
+        // Retire any DownloadManager tasks left by a previous app version.
         val manager = context.getSystemService(DownloadManager::class.java)
         val prefs = context.getSharedPreferences("base-downloads", 0)
+        for (key in listOf("base", "english")) {
+          val old = prefs.getLong(key, -1)
+          if (old >= 0) runCatching { manager.remove(old) }
+          prefs.edit().remove(key).commit()
+        }
         val components = BaseResources.catalog()
+        val releases = mutableMapOf<String, JSONObject>()
         for (index in 0 until components.length()) {
-          val component = components.getJSONObject(index); val key = component.getString("id")
+          val component = components.getJSONObject(index)
+          val key = component.getString("id")
+          componentId = key
           val current = JSONObject(NativeBridge.feature(JSONObject().put("type", "resourceStatus").put("root", BaseResources.root(context).absolutePath).toString()))
           if (!(0 until current.getJSONArray("missing").length()).any { current.getJSONArray("missing").getString(it) == key }) continue
-          var download = prefs.getLong(key, -1)
-          if (download < 0) {
-            download = manager.enqueue(DownloadManager.Request(Uri.parse(component.getString("url")))
-                .setTitle("retype 基础词库").setDescription(if (key == "base") "中文词库" else "英文词库")
-                .setAllowedOverMetered(!inputData.getBoolean("automatic", false))
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE))
-            prefs.edit().putLong(key, download).commit()
-          }
-          while (true) {
-            currentCoroutineContext().ensureActive()
-            val finished = manager.query(DownloadManager.Query().setFilterById(download)).use { cursor ->
-              if (!cursor.moveToFirst()) { prefs.edit().remove(key).commit(); error("下载任务不存在，请重试") }
-              val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-              if (status == DownloadManager.STATUS_FAILED) { manager.remove(download); prefs.edit().remove(key).commit(); error("词库下载失败，请检查网络后重试") }
-              val received = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-              setProgress(workDataOf("progress" to ((index + received.toFloat() / component.getLong("compressedBytes")) / components.length()).coerceIn(0f, 1f), "message" to "下载${if (key == "base") "中文" else "英文"}词库…"))
-              status == DownloadManager.STATUS_SUCCESSFUL
-            }
-            if (finished) break
-            delay(350)
-          }
-          try {
-            manager.openDownloadedFile(download).use { descriptor ->
-              android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
-                temporary.outputStream().use { output ->
-                  val bytes = component.getLong("compressedBytes")
-                  var total = 0L
-                  val buffer = ByteArray(65536)
-                  while (true) {
-                    currentCoroutineContext().ensureActive()
-                    val n = input.read(buffer)
-                    if (n < 0) break
-                    total += n
-                    check(total <= bytes) { "词库下载超出大小限制" }
-                    output.write(buffer, 0, n)
-                  }
-                  check(total == bytes) { "词库下载不完整" }
-                  output.fd.sync()
-                }
-              }
-            }
-            setProgress(workDataOf("message" to "校验并安装词库…"))
-            BaseResources.install(context, "resourceInstall", temporary, key)
-          } finally {
-            manager.remove(download)
-            prefs.edit().remove(key).commit()
-          }
+          setProgress(workDataOf("message" to "获取词库下载地址…"))
+          val releaseUrl = component.getString("releaseUrl")
+          val release = releases[releaseUrl] ?: JSONObject(GitHubDownloads.read(releaseUrl, 2 * 1024 * 1024, description = "词库")).also { releases[releaseUrl] = it }
+          val url = JSONObject(NativeBridge.feature(JSONObject().put("type", "resourceDownloadUrl").put("id", key).put("release", release).toString())).getString("url")
+          val part = File(BaseResources.root(context), "downloads/$key-${component.getString("compressedSha256")}.part")
+          BaseResources.log(context, "download_started", key)
+          ResourceDownloads.fetch(url, part, component.getLong("compressedBytes"), component.getString("compressedSha256"), progress = { received ->
+            setProgress(workDataOf("progress" to ((index + received.toFloat() / component.getLong("compressedBytes")) / components.length()).coerceIn(0f, 1f), "message" to "下载${if (key == "base") "中文" else "英文"}词库…"))
+          })
+          setProgress(workDataOf("message" to "校验并安装词库…"))
+          BaseResources.install(context, "resourceInstall", part, key)
+          part.delete()
+          BaseResources.log(context, "installed", key)
         }
       }
       BaseResources.refresh(context)
       Result.success()
-    } catch (e: CancellationException) { throw e }
-    catch (e: Exception) { Result.failure(workDataOf("error" to (e.message ?: "基础词库安装失败"))) }
+    } catch (e: CancellationException) { BaseResources.log(context, "cancelled", componentId); throw e }
+    catch (e: Exception) {
+      val reason = (when (e) {
+        is java.net.UnknownHostException -> "词库下载失败：无法解析服务器地址，请检查网络或 DNS"
+        is java.net.SocketTimeoutException -> "词库下载超时，可重试继续下载"
+        is javax.net.ssl.SSLException -> "词库下载失败：TLS 连接失败（${e.javaClass.simpleName}）"
+        is java.io.IOException -> "词库下载连接中断（${e.javaClass.simpleName}），可重试继续下载"
+        else -> e.message ?: "基础词库安装失败"
+      }).take(400)
+      BaseResources.log(context, "failed", componentId, reason)
+      Result.failure(workDataOf("error" to reason))
+    }
     finally { temporary.delete() }
   }
 }

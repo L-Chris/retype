@@ -26,8 +26,18 @@ pub fn perform(v: Value) -> Result<Value> {
         "resourceCatalog" => {
             let catalog = retype_resources::Catalog::builtin()?;
             Ok(
-                json!({"components":catalog.components.iter().map(|c|json!({"id":c.id,"url":c.url(),"bytes":c.bytes,"sha256":c.sha256,"compressedBytes":c.compressed_bytes,"compressedSha256":c.compressed_sha256})).collect::<Vec<_>>()}),
+                json!({"components":catalog.components.iter().map(|c|json!({"id":c.id,"url":c.url(),"releaseUrl":c.release_url(),"bytes":c.bytes,"sha256":c.sha256,"compressedBytes":c.compressed_bytes,"compressedSha256":c.compressed_sha256})).collect::<Vec<_>>()}),
             )
+        }
+        "resourceDownloadUrl" => {
+            let catalog = retype_resources::Catalog::builtin()?;
+            let id = field(&v, "id")?;
+            let component = catalog
+                .components
+                .iter()
+                .find(|c| c.id == id)
+                .ok_or("词库组件无效")?;
+            Ok(json!({"url":component.download_url(&v["release"])?}))
         }
         "resourceStatus" | "resourcePrepare" | "resourceInstall" | "resourceImport" => {
             let root = Path::new(field(&v, "root")?);

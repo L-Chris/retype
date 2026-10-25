@@ -2,6 +2,7 @@ package io.github.retype.ime
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,9 +42,18 @@ fun LanPage() {
       }
       Text(state.message, style = MaterialTheme.typography.bodySmall)
       Text("支持物理局域网和 Tailscale，连接后自动重连。",style=MaterialTheme.typography.bodySmall)
+      Text("手机主动连接电脑，无需开放手机端口。", style = MaterialTheme.typography.bodySmall)
+      val endpoint = state.connection.ifEmpty { state.target }
+      if (state.enabled && endpoint.isNotEmpty()) {
+        SelectionContainer {
+          Text("${if (state.connection.isNotEmpty()) "当前连接" else "连接目标"}：$endpoint", style = MaterialTheme.typography.bodySmall)
+        }
+      }
+      if (state.enabled && endpoint.isEmpty()) {
+        Text("请在电脑端查看连接地址与端口，或通过同一局域网自动发现。", style = MaterialTheme.typography.bodySmall)
+      }
       if (state.name.isNotEmpty()) {
         Text(state.name)
-        if(state.connection.isNotEmpty()) Text(state.connection,style=MaterialTheme.typography.bodySmall)
         TextButton(onClick={editAddress=!editAddress}) {Text("连接地址…")}
         if(editAddress) {
           OutlinedTextField(savedAddresses,{savedAddresses=it},label={Text("IP 或域名，可附带端口")},supportingText={Text("多个地址用逗号分隔；补充 Tailscale 地址无需重新关联")},modifier=Modifier.fillMaxWidth())

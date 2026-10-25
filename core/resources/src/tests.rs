@@ -1,6 +1,45 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 
+#[test]
+fn resource_api_selection_requires_the_pinned_official_attachment() {
+    let component = Catalog::builtin().unwrap().components.remove(1);
+    let valid = serde_json::json!({
+        "tag_name":component.release_tag(), "draft":false, "prerelease":false,
+        "assets":[{"id":42,"url":"https://api.github.com/repos/L-Chris/retype/releases/assets/42",
+            "name":component.asset(),"state":"uploaded","size":component.compressed_bytes,
+            "digest":format!("sha256:{}",component.compressed_sha256)}]
+    });
+    assert_eq!(
+        component.download_url(&valid).unwrap(),
+        valid["assets"][0]["url"]
+    );
+    assert!(component
+        .release_url()
+        .ends_with(&format!("/tags/{}", component.release_tag())));
+    for (field, value) in [
+        ("url", serde_json::json!("https://example.com/resource.gz")),
+        ("size", serde_json::json!(1)),
+        (
+            "digest",
+            serde_json::json!(format!("sha256:{}", "0".repeat(64))),
+        ),
+        ("state", serde_json::json!("new")),
+        ("name", serde_json::json!("other.gz")),
+        ("id", serde_json::json!(0)),
+    ] {
+        let mut bad = valid.clone();
+        bad["assets"][0][field] = value;
+        assert!(component.download_url(&bad).is_err(), "{field}");
+    }
+    let mut old = valid.clone();
+    old["tag_name"] = serde_json::json!("v0.0.1");
+    assert!(component.download_url(&old).is_err());
+    let mut legacy = valid;
+    legacy["assets"][0]["digest"] = serde_json::Value::Null;
+    assert!(component.download_url(&legacy).is_ok());
+}
+
 pub(crate) struct Temp(pub PathBuf);
 impl Temp {
     pub fn new() -> Self {

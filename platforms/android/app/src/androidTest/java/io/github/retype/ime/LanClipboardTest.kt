@@ -32,6 +32,7 @@ class LanClipboardTest {
       withTimeout(15_000) {while(lan.state.value.connection!="10.0.2.2:$port" || lan.state.value.message!="已连接") delay(50)}
       assertEquals(before,listOf(prefs.getString("peer", ""),prefs.getString("pin", ""),SecretVault(context).get("lan-token")))
       assertNull(lan.state.value.code)
+      assertEquals("10.0.2.2:$port", lan.state.value.target)
       instrumentation.runOnMainSync {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         assertEquals("电脑文字\nHello 👋", clipboard.primaryClip?.getItemAt(0)?.text?.toString())
