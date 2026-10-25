@@ -8,6 +8,9 @@ on:
       source-ref:
         required: true
         type: string
+      replacing:
+        type: boolean
+        default: false
     secrets:
       ANDROID_KEYSTORE_BASE64:
         required: true
@@ -76,12 +79,25 @@ jobs:
       - name: Verify and prepare release files
         env:
           VERSION: ${{ inputs.version }}
+          REPLACING: ${{ inputs.replacing }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p dist/android
+          signer="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          certificate() { "$signer" verify --print-certs "$1" | sed -n 's/^Signer #[0-9][0-9]* certificate SHA-256 digest: //p' | sort; }
+          if [[ "$REPLACING" == true ]]; then
+            gh release download "v$VERSION" --pattern "retype-$VERSION-android.apk" --dir "$RUNNER_TEMP/previous-android"
+            previous_certificate="$(certificate "$RUNNER_TEMP/previous-android/retype-$VERSION-android.apk")"
+            [[ -n "$previous_certificate" ]] || { echo 'Previous APK signing certificate is missing.' >&2; exit 1; }
+          fi
           for abi in arm64-v8a x86_64 universal; do
             apk="platforms/android/app/build/outputs/apk/release/app-$abi-release.apk"
             "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify "$apk"
+            if [[ "$REPLACING" == true ]]; then
+              [[ "$(certificate "$apk")" == "$previous_certificate" ]] || { echo 'APK signer changed; refusing to replace the release.' >&2; exit 1; }
+            fi
             "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "$apk"
             if [[ "$abi" == universal ]]; then
               name="retype-$VERSION-android.apk"
