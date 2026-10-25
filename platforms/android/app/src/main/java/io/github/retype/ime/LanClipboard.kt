@@ -46,9 +46,9 @@ data class LanState(
 /** One process-wide connection. The default IME owns clipboard access; no accessibility service. */
 class LanClipboard private constructor(private val context: Context) {
   companion object {
-    private const val TTL = 600_000L
-    private const val MAX_TEXT = 65_536
-    private const val MAX_FRAME = 524_288
+    private val policy = JSONObject(NativeBridge.feature(JSONObject().put("type", "featurePolicy").toString())).getJSONObject("clipboard")
+    private val MAX_TEXT = policy.getInt("maxText")
+    private val MAX_FRAME = policy.getInt("maxFrame")
     @Volatile private var instance: LanClipboard? = null
 
     fun get(context: Context): LanClipboard =
@@ -88,10 +88,8 @@ class LanClipboard private constructor(private val context: Context) {
   private var pairingJob: Job? = null
   private val outgoing = AtomicReference<JSONObject?>(null)
   private val gate = Any()
-  private var clock = 0L
   private var sequence = maxOf(prefs.getLong("seq", 0), System.currentTimeMillis())
   private var latest: JSONObject? = null
-  private val seen = mutableMapOf<String, Long>()
   private var appliedText: String? = null
   private val discoveredAddresses = mutableMapOf<String, List<String>>()
   private var discoveryStop: (() -> Unit)? = null
@@ -134,6 +132,7 @@ class LanClipboard private constructor(private val context: Context) {
       discoveryStop = null
       synchronized(gate) {
         latest = null
+        protocol("clear")
         outgoing.set(null)
       }
     }
@@ -250,6 +249,12 @@ class LanClipboard private constructor(private val context: Context) {
     if (resumeConnection) resume()
   }
 
+  private fun protocol(operation: String, now: Long = System.currentTimeMillis(), configure: (JSONObject) -> Unit = {}): JSONObject {
+    val request = JSONObject().put("type", "clipboard").put("operation", operation).put("now", now)
+    configure(request)
+    return JSONObject(NativeBridge.feature(request.toString()))
+  }
+
   private fun capture() {
     if (!mutable.value.enabled) return
     val ime =
@@ -266,15 +271,7 @@ class LanClipboard private constructor(private val context: Context) {
       synchronized(gate) {
         if (appliedText == text && clip.description.label?.toString() == "retype") return
         sequence++
-        clock = maxOf(clock, System.currentTimeMillis()) + 1
-        val event =
-            JSONObject()
-                .put("origin", id)
-                .put("seq", sequence)
-                .put("clock", clock)
-                .put("created", System.currentTimeMillis())
-                .put("text", text)
-        seen[id] = sequence
+        val event = protocol("local") { it.put("origin", id).put("seq", sequence).put("text", text) }.optJSONObject("event") ?: return
         latest = event
         outgoing.set(event)
         prefs.edit().putLong("seq", sequence).apply()
@@ -287,31 +284,10 @@ class LanClipboard private constructor(private val context: Context) {
 
   private fun accept(event: JSONObject) {
     val now = System.currentTimeMillis()
-    val origin = event.getString("origin")
-    val seq = event.getLong("seq")
-    val remoteClock = event.getLong("clock")
-    val created = event.getLong("created")
     val text = event.getString("text")
-    require(origin.matches(Regex("[a-fA-F0-9]{32}")) && seq > 0 && remoteClock > 0)
-    require(text.isNotEmpty() && !text.contains('\u0000') && text.toByteArray().size <= MAX_TEXT)
-    if (created > now + 60_000 || created + TTL < now) return
+    val lifetime = protocol("valid", now) { it.put("event", event) }
     synchronized(gate) {
-      if (seq <= (seen[origin] ?: 0)) return
-      if (!seen.containsKey(origin) && seen.size >= 32) return
-      seen[origin] = seq
-      clock = maxOf(clock, remoteClock)
-      val old = latest
-      if (
-          old != null &&
-              compareValuesBy(
-                  event,
-                  old,
-                  { it.getLong("clock") },
-                  { it.getString("origin") },
-                  { it.getLong("seq") },
-              ) <= 0
-      )
-          return
+      if (!protocol("accept", now) { it.put("event", event) }.getBoolean("accepted")) return
       latest = event
     }
     main.post {
@@ -325,7 +301,7 @@ class LanClipboard private constructor(private val context: Context) {
       update { it.copy(text = text) }
     }
     scope.launch {
-      delay(maxOf(0, created + TTL - System.currentTimeMillis()))
+      delay(lifetime.getLong("remaining"))
       synchronized(gate) { if (latest === event) update { it.copy(text = null) } }
     }
   }
@@ -333,7 +309,7 @@ class LanClipboard private constructor(private val context: Context) {
   fun pasteText(): String? =
       synchronized(gate) {
         val event = latest ?: return null
-        if (!mutable.value.enabled || event.getLong("created") + TTL < System.currentTimeMillis())
+        if (!mutable.value.enabled || !protocol("valid") { it.put("event", event) }.getBoolean("valid"))
             null
         else event.getString("text")
       }
@@ -452,7 +428,7 @@ class LanClipboard private constructor(private val context: Context) {
         if (System.currentTimeMillis() - lastRead > 45_000) error("连接已断开")
         if (ready) {
           outgoing.getAndSet(null)?.let { event ->
-            if (event.getLong("created") + TTL >= System.currentTimeMillis())
+            if (protocol("valid") { it.put("event", event) }.getBoolean("valid"))
                 send(JSONObject().put("type", "clip").put("clip", event))
           }
           if (System.currentTimeMillis() - heartbeat >= 15_000) {

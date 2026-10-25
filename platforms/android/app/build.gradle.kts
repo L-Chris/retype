@@ -10,7 +10,6 @@ val optimizeRelease = providers.gradleProperty("retypeOptimize").map(String::toB
 val releaseTests = providers.gradleProperty("retypeTestRelease").map(String::toBoolean).getOrElse(false)
 val bundleDictionary by tasks.registering(Copy::class) {
     from(rootDir.resolve("../../NOTICE.txt"))
-    from(rootDir.resolve("../../apps/settings-egui/dictionary-packs.json"))
     from(rootDir.resolve("../../LICENSE"))
     from(rootDir.resolve("../../data/dict/raw/wanxiang-base/LICENSE")) { rename { "LICENSE-wanxiang" } }
     from(rootDir.resolve("../../data/dict/raw/LICENSE-Unicode.txt"))

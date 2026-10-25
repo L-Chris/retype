@@ -22,8 +22,8 @@ retype-learning-store = { path = "../../../core/learning", features = ["sqlite"]
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 base64 = "0.22"
-retype-ai = { path = "../../windows/ai", features = ["service"] }
-retype-sync = { path = "../../windows/sync" }
+retype-ai = { package = "retype-ai-core", path = "../../../core/ai", features = ["service"] }
+retype-sync = { package = "retype-sync-core", path = "../../../core/sync" }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

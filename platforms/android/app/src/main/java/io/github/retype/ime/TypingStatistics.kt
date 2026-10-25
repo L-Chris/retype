@@ -32,7 +32,7 @@ data class Counts(
     fun speed(chinese: Boolean): Long? {
         val n = if (chinese) this.chinese else englishWords
         val ms = if (chinese) chineseMs else englishWordMs
-        return if (n < (if (chinese) 10 else 5) || ms < 10000) null else kotlin.math.round(n * 60000.0 / ms).toLong()
+        return NativeBridge.statisticsSpeed(n, ms, if (chinese) 10 else 5).takeIf { it >= 0 }
     }
 }
 
@@ -347,15 +347,12 @@ class ActivityClock : AutoCloseable {
     fun backspace():Counts { words(backspace = true);return Counts(input=measure(3)) }
 
     fun commit(text: String, chinese: Boolean): Counts {
-        val chineseCount = text.codePoints().filter { Character.UnicodeScript.of(it) == Character.UnicodeScript.HAN }.count()
-        val englishCount = text.count { it in 'a'..'z' || it in 'A'..'Z' }.toLong()
         val ms = if (language == chinese) pending else 0
         pending = 0
-        val chineseMs = ms * chineseCount / (chineseCount + englishCount).coerceAtLeast(1)
-        val englishMs = if (englishCount > 0) ms - chineseMs else 0
-        return Counts(chinese = chineseCount, english = englishCount,
-            chineseMs = chineseMs, englishMs = englishMs,
-            englishWords = words(text, boundary = chinese), englishWordMs = englishMs,input=measure(0,text))
+        val counts = NativeBridge.statisticsCounts(text, ms)
+        return Counts(chinese = counts[0], english = counts[1],
+            chineseMs = counts[2], englishMs = counts[3],
+            englishWords = words(text, boundary = chinese), englishWordMs = counts[3], input = measure(0, text))
     }
 
     fun reset() {

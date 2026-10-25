@@ -3,7 +3,6 @@ use crate::statistics;
 #[path = "../../../platforms/windows/common/base_resources.rs"]
 mod base_resources;
 use retype_types::PinyinScheme;
-use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
 use std::{
     fs,
@@ -214,35 +213,12 @@ pub fn preferences() -> Result<Preferences> {
         directory,
     })
 }
-#[derive(Clone, serde::Deserialize)]
-pub struct Pack {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub bytes: u64,
-    pub sha256: String,
-}
+pub use retype_resources::packs::Pack;
 pub fn packs() -> Result<Vec<Pack>> {
-    Ok(serde_json::from_str(include_str!(
-        "../dictionary-packs.json"
-    ))?)
+    Ok(retype_resources::packs::catalog()?)
 }
 pub fn checksum(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(hash
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(retype_resources::checksum(path)?)
 }
 pub fn pack_installed(root: &Path, pack: &Pack) -> bool {
     let expected = fs::read_to_string(root.join(format!("{}.sha256", pack.id))).unwrap_or_default();
@@ -287,13 +263,7 @@ pub fn set_pack(
     let pack = packs.get(index).ok_or("无效词库")?;
     let root = local_root()?.join("dict-packs");
     if enabled && !pack_installed(&root, pack) {
-        download_pack(
-            &root,
-            pack,
-            &preferences()?.directory.join("retype-dict-build.exe"),
-            cancel,
-            progress,
-        )?;
+        download_pack(&root, pack, cancel, progress)?;
     }
     cancelled(cancel)?;
     pack_preference(index, enabled)
@@ -313,10 +283,9 @@ pub fn sync_enabled_packs() -> Result<()> {
         return Ok(());
     };
     let cancel = AtomicBool::new(false);
-    let builder = preferences()?.directory.join("retype-dict-build.exe");
     for (index, pack) in packs()?.iter().enumerate() {
         if preferences()?.pack_mask & (1 << index) != 0 && !pack_installed(&root, pack) {
-            download_pack(&root, pack, &builder, &cancel, |_| {})?;
+            download_pack(&root, pack, &cancel, |_| {})?;
             set(
                 "DictionaryGeneration",
                 dword_at(KEY, "DictionaryGeneration")?
@@ -330,14 +299,12 @@ pub fn sync_enabled_packs() -> Result<()> {
 fn download_pack(
     root: &Path,
     pack: &Pack,
-    builder: &Path,
     cancel: &AtomicBool,
     mut progress: impl FnMut(f32),
 ) -> Result<()> {
     fs::create_dir_all(root)?;
     let nonce = chrono::Local::now().timestamp_micros();
     let raw = root.join(format!("{}-{nonce}.yaml", pack.id));
-    let tsv = raw.with_extension("tsv");
     let binary = raw.with_extension("bin");
     let result = (|| -> Result<()> {
         cancelled(cancel)?;
@@ -346,10 +313,7 @@ fn download_pack(
             .timeout_connect(Some(Duration::from_secs(20)))
             .build()
             .into();
-        let url = format!(
-            "https://raw.githubusercontent.com/amzxyz/rime-wanxiang/v18.0.14/dicts/{}.dict.yaml",
-            pack.id
-        );
+        let url = pack.source_url();
         let mut response = agent.get(&url).call()?;
         let mut reader = response.body_mut().as_reader();
         let mut output = fs::File::create(&raw)?;
@@ -370,23 +334,8 @@ fn download_pack(
         }
         output.sync_all()?;
         drop(output);
-        if received != pack.bytes || checksum(&raw)? != pack.sha256 {
-            return Err("词库校验失败，请重试".into());
-        }
         cancelled(cancel)?;
-        let result = Command::new(builder)
-            .args(["--in"])
-            .arg(&raw)
-            .arg("--out")
-            .arg(&tsv)
-            .args(["--max-word-len", "8", "--no-verify"])
-            .creation_flags(0x08000000)
-            .output()?;
-        if !result.status.success() || !binary.is_file() {
-            return Err(
-                format!("词库转换失败：{}", String::from_utf8_lossy(&result.stderr)).into(),
-            );
-        }
+        retype_resources::packs::compile_source(&pack.id, &raw, &binary)?;
         cancelled(cancel)?;
         let digest = checksum(&binary)?;
         replace(&binary, &root.join(format!("{}.bin", pack.id)))?;
@@ -396,7 +345,7 @@ fn download_pack(
         replace(&staging, &checksum_path)?;
         Ok(())
     })();
-    for path in [&raw, &tsv, &binary] {
+    for path in [&raw, &binary] {
         let _ = fs::remove_file(path);
     }
     result

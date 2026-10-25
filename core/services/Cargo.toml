@@ -7,9 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-retype-ai = { path = "../../platforms/windows/ai", features = ["service"] }
-retype-sync = { path = "../../platforms/windows/sync" }
+retype-ai = { package = "retype-ai-core", path = "../ai", features = ["service"] }
+retype-sync = { package = "retype-sync-core", path = "../sync" }
 retype-types.workspace = true
+retype-updater.workspace = true
 retype-dict.workspace = true
 retype-pinyin.workspace = true
 retype-english.workspace = true

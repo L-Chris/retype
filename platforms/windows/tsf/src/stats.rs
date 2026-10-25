@@ -225,20 +225,20 @@ pub(crate) fn commit(clock: &Mutex<ActivityClock>, text: &str, boundary: bool) {
     }
 }
 fn commit_delta(clock: &mut ActivityClock, text: &str, boundary: bool) -> Delta {
-    let (chinese, english) = count(text);
+    let counts = retype_types::statistics::commit_counts(
+        text,
+        u64::from(std::mem::take(&mut clock.composition_ms)),
+    );
+    let chinese = counts.chinese as u32;
+    let english = counts.english as u32;
+    let chinese_ms = counts.chinese_ms as u32;
+    let english_ms = counts.english_ms as u32;
     let input = clock.input.commit(text);
     let mut english_words = clock.words.feed(text);
     if boundary {
         english_words = english_words.saturating_add(clock.words.finish());
     }
-    let elapsed = std::mem::take(&mut clock.composition_ms);
-    let chinese_ms =
-        (u64::from(elapsed) * u64::from(chinese) / u64::from((chinese + english).max(1))) as u32;
-    let english_ms = if english > 0 {
-        elapsed.saturating_sub(chinese_ms)
-    } else {
-        0
-    };
+
     Delta {
         timestamp_ms: now_ms(),
         chinese,
@@ -279,23 +279,10 @@ pub(crate) fn backspace(clock: &Mutex<ActivityClock>) {
     }
 }
 
+#[cfg(test)]
 fn count(text: &str) -> (u32, u32) {
-    text.chars().fold((0u32, 0u32), |(chinese, english), ch| {
-        if is_han(ch) {
-            (chinese.saturating_add(1), english)
-        } else if ch.is_ascii_alphabetic() {
-            (chinese, english.saturating_add(1))
-        } else {
-            (chinese, english)
-        }
-    })
-}
-
-fn is_han(ch: char) -> bool {
-    matches!(ch as u32,
-        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF |
-        0x20000..=0x2A6DF | 0x2A700..=0x2B73F | 0x2B740..=0x2B81F |
-        0x2B820..=0x2CEAF | 0x2CEB0..=0x2EBEF | 0x30000..=0x323AF)
+    let (chinese, english) = retype_types::statistics::character_counts(text);
+    (chinese as u32, english as u32)
 }
 
 fn writer(receiver: Receiver<Delta>, root: PathBuf, voice: bool) {

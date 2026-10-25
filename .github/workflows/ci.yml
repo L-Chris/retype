@@ -36,9 +36,14 @@ jobs:
         with:
           shared-key: core-linux
 
+      - name: Shared core dependency boundaries
+        run: python tools/ci/check-core-boundaries.py
+
       - name: 内核 crate 编译 + 测试
         run: |
           cargo test --locked \
+            -p retype-ai-core --features retype-ai-core/service \
+            -p retype-sync-core \
             -p retype-types \
             -p retype-pinyin \
             -p retype-dict \
@@ -57,6 +62,8 @@ jobs:
         # 写成 `... -- -D warnings -p xxx` 会报 `Unrecognized option: 'p'`。
         run: |
           cargo clippy --locked --all-targets \
+            -p retype-ai-core --features retype-ai-core/service \
+            -p retype-sync-core \
             -p retype-types \
             -p retype-pinyin \
             -p retype-dict \

@@ -28,6 +28,10 @@ object NativeBridge {
 
     @JvmStatic external fun acknowledge(handle: Long, generation: Long, accepted: Boolean)
 
+    @JvmStatic external fun statisticsMath(operation: Int, left: LongArray, right: LongArray = longArrayOf()): LongArray
+    @JvmStatic external fun statisticsCounts(text: String, elapsed: Long): LongArray
+    @JvmStatic external fun statisticsSpeed(count: Long, ms: Long, minimum: Long): Long
+
     @JvmStatic external fun statisticsCreate(): Long
     @JvmStatic external fun statisticsEdit(handle: Long, before: Int, after: Int, flags: Int)
     @JvmStatic external fun statisticsUpdate(handle: Long, operation: Int, text: String): LongArray?

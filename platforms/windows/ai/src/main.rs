@@ -61,8 +61,8 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     match command {
                         Command::Start { id, mut settings } => {
-                            let config = retype_ai::config::Config::load()
-                                .map_err(|_| "无法读取语音设置")?;
+                            let config =
+                                retype_ai::config::load().map_err(|_| "无法读取语音设置")?;
                             if settings.provider.is_empty() && settings.model.is_empty() {
                                 settings = config.voice.clone();
                             }

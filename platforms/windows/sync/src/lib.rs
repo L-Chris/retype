@@ -1,19 +1,9 @@
-pub mod clipboard_protocol;
+//! Desktop clipboard, process and configuration adapters for shared synchronization.
+pub use retype_sync_core::{
+    clipboard_protocol, hash, model, pairing, schema, statistics, webdav, Result,
+};
 pub mod config;
 #[cfg(any(windows, target_os = "macos"))]
 pub mod lan;
-pub mod model;
-pub mod pairing;
 #[cfg(windows)]
 pub mod runtime;
-pub mod statistics;
-pub mod webdav;
-pub type Result<T> = std::result::Result<T, String>;
-
-pub fn hash(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}

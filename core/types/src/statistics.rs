@@ -182,6 +182,31 @@ impl InputStats {
     pub fn add(&mut self, other: &Self) {
         self.combine(other, u64::saturating_add);
     }
+    pub fn merge_max(&mut self, other: &Self) {
+        self.combine(other, u64::max);
+    }
+    /// Fixed numeric JNI format; contains no text or editor identity.
+    pub fn from_values(values: &[u64]) -> Option<Self> {
+        if values.len() != LENGTH_BUCKETS * 6 + 2 {
+            return None;
+        }
+        let mut input = Self::default();
+        for (row, values) in input
+            .chinese
+            .iter_mut()
+            .chain(&mut input.english)
+            .zip(values.as_chunks::<3>().0)
+        {
+            *row = LengthCounts {
+                inputs: values[0],
+                corrected: values[1],
+                units: values[2],
+            };
+        }
+        input.cancelled = values[LENGTH_BUCKETS * 6];
+        input.spelling_deletions = values[LENGTH_BUCKETS * 6 + 1];
+        Some(input)
+    }
     pub fn values(&self) -> impl Iterator<Item = u64> + '_ {
         self.chinese
             .iter()
@@ -247,6 +272,34 @@ impl Totals {
     }
     pub fn english_speed(self) -> Option<u64> {
         speed(self.english_words, self.english_word_ms, 5)
+    }
+}
+/// Typing characters exclude digits and punctuation on every platform.
+pub fn character_counts(text: &str) -> (u64, u64) {
+    text.chars().fold((0, 0), |(zh, en), ch| {
+        (
+            zh + u64::from(is_han(ch)),
+            en + u64::from(ch.is_ascii_alphabetic()),
+        )
+    })
+}
+/// Allocate one committed composition's active time using the shared character policy.
+pub fn commit_counts(text: &str, elapsed: u64) -> Totals {
+    let (chinese, english) = character_counts(text);
+    let chinese_ms = ((u128::from(elapsed) * u128::from(chinese))
+        / u128::from((chinese + english).max(1))) as u64;
+    let english_ms = if english > 0 {
+        elapsed.saturating_sub(chinese_ms)
+    } else {
+        0
+    };
+    Totals {
+        chinese,
+        english,
+        chinese_ms,
+        english_ms,
+        english_word_ms: english_ms,
+        ..Default::default()
     }
 }
 pub fn speed(count: u64, ms: u64, minimum: u64) -> Option<u64> {
@@ -421,5 +474,49 @@ mod input_tests {
             (word.total(false).inputs, word.total(false).corrected),
             (1, 1)
         );
+    }
+}
+
+#[cfg(test)]
+mod cross_platform_policy_tests {
+    use super::*;
+    #[test]
+    fn numeric_bridge_preserves_exact_buckets_and_idempotent_max_merge() {
+        let mut input = InputStats::default();
+        input.record(true, 27, true, 2);
+        input.record(false, 10, false, 0);
+        let values: Vec<_> = input.values().collect();
+        let mut restored = InputStats::from_values(&values).unwrap_or_default();
+        assert_eq!(restored, input);
+        restored.merge_max(&input);
+        assert_eq!(restored, input);
+        assert_eq!(restored.grouped(true)[5].units, 27);
+        assert!(InputStats::from_values(&values[..121]).is_none());
+    }
+    #[test]
+    fn mixed_commit_ignores_digits_and_allocates_time_equally() {
+        let counts = commit_counts("你a1", 1000);
+        assert_eq!(
+            (
+                counts.chinese,
+                counts.english,
+                counts.chinese_ms,
+                counts.english_ms
+            ),
+            (1, 1, 500, 500)
+        );
+        let counts = commit_counts("123 🙂", 1000);
+        assert_eq!(
+            (counts.total(), counts.chinese_ms, counts.english_ms),
+            (0, 0, 0)
+        );
+        let counts = commit_counts("你a", u64::MAX);
+        assert_eq!(counts.chinese_ms + counts.english_ms, u64::MAX);
+    }
+    #[test]
+    fn all_clients_round_speed_halves_up_and_apply_the_same_thresholds() {
+        assert_eq!(speed(5, 24000, 5), Some(13));
+        assert_eq!(speed(4, 24000, 5), None);
+        assert_eq!(speed(5, 9999, 5), None);
     }
 }
