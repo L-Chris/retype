@@ -2683,7 +2683,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "retype-ai"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-ai-core",
  "retype-learning",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "retype-ai-core"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "retype-types",
@@ -2706,7 +2706,7 @@ dependencies = [
 
 [[package]]
 name = "retype-android"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "jni 0.21.1",
@@ -2726,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "retype-candidate-ui"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "egui",
  "png 0.17.16",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "retype-cloud"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "futures",
  "retype-types",
@@ -2746,14 +2746,14 @@ dependencies = [
 
 [[package]]
 name = "retype-context"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-types",
 ]
 
 [[package]]
 name = "retype-diag"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-candidate-ui",
  "retype-cloud",
@@ -2769,7 +2769,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "pinyin",
  "retype-file-map",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "retype-dict-build"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2790,7 +2790,7 @@ dependencies = [
 
 [[package]]
 name = "retype-engine"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "crossbeam-channel",
  "futures",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "retype-english"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-file-map",
  "retype-types",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "retype-ffi"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-dict",
  "retype-engine",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "retype-file-map"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "memmap2",
  "sha2 0.11.0",
@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "retype-learning"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-dict",
  "retype-learning-store",
@@ -2849,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "retype-learning-store"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-dict",
  "retype-pinyin",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "retype-macos"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "chrono",
  "retype-ai",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "retype-pinyin"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "pinyin",
  "retype-types",
@@ -2892,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "retype-resource-build"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "flate2",
  "retype-english",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "retype-resources"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "flate2",
  "fs2",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "retype-services"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "retype-ai-core",
@@ -2934,7 +2934,7 @@ dependencies = [
 
 [[package]]
 name = "retype-settings-egui"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "chrono",
  "eframe",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "retype-sync"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "fs2",
@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "retype-sync-core"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "hmac",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "retype-tsf"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "retype-ai",
  "retype-candidate-ui",
@@ -3018,14 +3018,14 @@ dependencies = [
 
 [[package]]
 name = "retype-types"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "retype-updater"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3036,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "retype-updater-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "chrono",
  "retype-updater",
