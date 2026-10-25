@@ -591,11 +591,11 @@ mod compatibility_tests {
             learning: Default::default(),
             statistics: Vec::new(),
         };
-        assert!(validate_snapshot(&snapshot).is_ok());
+        assert!(crate::schema::validate_snapshot(&snapshot, &snapshot.device).is_ok());
         if let Some(field) = snapshot.fields.get_mut("input.english") {
             field.stamp.device = "invalid".into();
         }
-        assert!(validate_snapshot(&snapshot).is_err());
+        assert!(crate::schema::validate_snapshot(&snapshot, &snapshot.device).is_err());
     }
 
     /// Opt-in readback using the saved account. Never applies or publishes settings.

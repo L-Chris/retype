@@ -666,16 +666,12 @@ mod tests {
         Ok(())
     }
     #[test]
-    #[ignore = "downloads the pinned upstream pack and needs RETYPE_TEST_DICT_BUILDER"]
+    #[ignore = "downloads the pinned upstream pack"]
     fn download_and_convert_without_changing_user_preferences() -> Result<()> {
-        let builder = PathBuf::from(
-            std::env::var_os("RETYPE_TEST_DICT_BUILDER")
-                .ok_or("Missing test dictionary builder")?,
-        );
         let root =
             std::env::temp_dir().join(format!("retype-pack-egui-smoke-{}", std::process::id()));
         let pack = packs()?.remove(0);
-        let result = download_pack(&root, &pack, &builder, &AtomicBool::new(false), |_| {});
+        let result = download_pack(&root, &pack, &AtomicBool::new(false), |_| {});
         if result.is_ok() {
             assert!(pack_installed(&root, &pack));
         }
