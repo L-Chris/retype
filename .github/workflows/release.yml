@@ -7,6 +7,10 @@ on:
       tag:
         description: Release tag (e.g. v0.6.4)
         required: true
+      android-only:
+        description: Replace only Android assets in an existing release
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -19,6 +23,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       android-signing: ${{ steps.android-signing.outputs.ready }}
+      android-only: ${{ steps.scope.outputs.android-only }}
+      source-sha: ${{ steps.scope.outputs.source-sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -55,6 +61,27 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "RETYPE_VERSION=$cargo_version" >> "$GITHUB_ENV"
 
+      - name: Select publication scope
+        id: scope
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          ANDROID_ONLY: ${{ inputs.android-only || false }}
+          FORCED: ${{ github.event.forced || false }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mode=false
+          annotation="$(git for-each-ref --format='%(contents)' "refs/tags/$TAG")"
+          if [[ "$ANDROID_ONLY" == true ]] || grep -Fxq 'Retype-Republish: android' <<< "$annotation"; then
+            mode=true
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.draft == false and .prerelease == false' | grep -Fxq true
+          elif [[ "$FORCED" == true ]]; then
+            echo 'Forced tag updates require an explicit republication scope.' >&2
+            exit 1
+          fi
+          echo "android-only=$mode" >> "$GITHUB_OUTPUT"
+          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Check Android signing availability
         id: android-signing
         env:
@@ -62,10 +89,12 @@ jobs:
           STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_ONLY: ${{ steps.scope.outputs.android-only }}
         run: |
           if [[ -n "$KEYSTORE" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
             echo 'ready=true' >> "$GITHUB_OUTPUT"
           else
+            [[ "$ANDROID_ONLY" != true ]] || { echo 'Android republication requires stable signing credentials.' >&2; exit 1; }
             echo 'ready=false' >> "$GITHUB_OUTPUT"
             echo 'Android APK publishing is skipped until signing secrets are configured.'
           fi
@@ -86,11 +115,12 @@ jobs:
 
   build:
     needs: metadata
+    if: needs.metadata.outputs.android-only != 'true'
     uses: ./.github/workflows/windows.yml
     with:
       version: ${{ needs.metadata.outputs.version }}
       register-tip: true
-      source-ref: ${{ needs.metadata.outputs.tag }}
+      source-ref: ${{ needs.metadata.outputs.source-sha }}
 
   android:
     needs: metadata
@@ -98,19 +128,21 @@ jobs:
     uses: ./.github/workflows/android-release.yml
     with:
       version: ${{ needs.metadata.outputs.version }}
-      source-ref: ${{ needs.metadata.outputs.tag }}
+      source-ref: ${{ needs.metadata.outputs.source-sha }}
+      replacing: ${{ needs.metadata.outputs.android-only == 'true' }}
     secrets: inherit
 
   macos:
     needs: metadata
+    if: needs.metadata.outputs.android-only != 'true'
     uses: ./.github/workflows/macos.yml
     with:
-      source-ref: ${{ needs.metadata.outputs.tag }}
+      source-ref: ${{ needs.metadata.outputs.source-sha }}
 
   publish:
     name: Publish validated installer
     needs: [metadata, build, android, macos]
-    if: ${{ always() && needs.metadata.result == 'success' && needs.build.result == 'success' && needs.macos.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
+    if: ${{ always() && needs.metadata.result == 'success' && needs.metadata.outputs.android-only != 'true' && needs.build.result == 'success' && needs.macos.result == 'success' && (needs.android.result == 'success' || needs.android.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -153,3 +185,68 @@ jobs:
             ${{ needs.android.result == 'success' && 'dist/android/*.sha256' || '' }}
           fail_on_unmatched_files: true
           generate_release_notes: false
+
+  publish-android:
+    name: Replace validated Android assets
+    needs: [metadata, android]
+    if: needs.metadata.outputs.android-only == 'true' && needs.android.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.metadata.outputs.tag }}
+      VERSION: ${{ needs.metadata.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-installer
+          path: dist/android
+      - name: Verify files and back up existing Android assets
+        run: |
+          set -euo pipefail
+          (cd dist/android && sha256sum --check ./*.sha256)
+          gh api "repos/$GH_REPO/releases/tags/$TAG" > before.json
+          mkdir -p backup/android
+          for suffix in -arm64-v8a -x86_64 ''; do
+            for extension in apk apk.sha256; do
+              gh release download "$TAG" --pattern "retype-$VERSION-android$suffix.$extension" --dir backup/android
+            done
+          done
+          (cd backup/android && sha256sum --check ./*.sha256)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-release-backup-${{ github.run_id }}
+          path: |
+            backup/android/*
+            before.json
+          if-no-files-found: error
+      - name: Replace only APKs and Android checksums
+        run: |
+          set -euo pipefail
+          restore_previous_assets() {
+            trap - ERR
+            echo 'Restoring previous Android assets after publication failure.' >&2
+            gh release upload "$TAG" backup/android/*.apk backup/android/*.sha256 --clobber
+          }
+          trap restore_previous_assets ERR
+          gh release upload "$TAG" dist/android/*.apk dist/android/*.sha256 --clobber
+          gh api "repos/$GH_REPO/releases/tags/$TAG" > after.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          before = json.loads(pathlib.Path('before.json').read_text())
+          after = json.loads(pathlib.Path('after.json').read_text())
+          for field in ('id', 'tag_name', 'name', 'body', 'draft', 'prerelease', 'published_at'):
+              assert before[field] == after[field], field
+          previous = {a['name']: a for a in before['assets']}
+          current = {a['name']: a for a in after['assets']}
+          assert previous.keys() == current.keys(), 'release asset set changed'
+          for name, asset in previous.items():
+              if '-android' not in name:
+                  assert (asset['id'], asset['digest']) == (current[name]['id'], current[name]['digest']), name
+          for file in pathlib.Path('dist/android').iterdir():
+              assert current[file.name]['digest'] == 'sha256:' + hashlib.sha256(file.read_bytes()).hexdigest(), file.name
+          print('Android assets replaced; other release assets and metadata preserved.')
+          PY
+          trap - ERR
