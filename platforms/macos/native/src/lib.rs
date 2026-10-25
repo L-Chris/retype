@@ -569,7 +569,8 @@ pub unsafe extern "C" fn rt_runtime_flush(runtime: *const RtRuntime) -> *mut c_c
         rx.recv_timeout(Duration::from_secs(2))
             .map_err(|_| "保存学习记录超时")?;
         runtime.0.statistics.flush()?;
-        Ok(json!(true))
+        // RTJSON expects an object, including for successful termination barriers.
+        Ok(json!({"saved":true}))
     })
 }
 /// # Safety

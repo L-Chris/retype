@@ -41,6 +41,12 @@ void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible) {
 void RTUpdateLog(NSString *stage, BOOL success) {
     RTWriteDiagnosticLog(@"updates.jsonl",@{@"time":@(NSDate.date.timeIntervalSince1970),@"stage":stage,@"success":@(success),@"pid":@(NSProcessInfo.processInfo.processIdentifier),@"version":NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]?:@"test"});
 }
+void RTUpdateSaveLog(BOOL saved, NSString *reason) {
+    // Flush errors describe the worker/bridge state, never input content.
+    NSMutableDictionary *entry=[@{@"time":@(NSDate.date.timeIntervalSince1970),@"stage":saved?@"saved_before_exit":@"save_failed",@"success":@(saved),@"pid":@(NSProcessInfo.processInfo.processIdentifier),@"version":NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]?:@"test"} mutableCopy];
+    if(!saved)entry[@"reason"]=reason?:@"保存结果无效";
+    RTWriteDiagnosticLog(@"updates.jsonl",entry);
+}
 static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
     if([view isKindOfClass:NSSecureTextField.class]&&[view.identifier isEqual:path]){
         NSSecureTextField *field=(NSSecureTextField *)view;field.enabled=value!=nil;

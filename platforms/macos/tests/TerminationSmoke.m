@@ -4,6 +4,7 @@
 
 extern NSDictionary *(^RTTestRuntimeFlush)(void);
 static BOOL flushed;
+static BOOL cancelled;
 @interface RTAppDelegate (TerminationTest)
 - (void)finishTermination:(NSDictionary *)result;
 @end
@@ -13,16 +14,23 @@ static BOOL flushed;
 @implementation RTTerminationDelegate
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
-    self.runtime=(RtRuntime *)1; // The flush hook below owns this test's synthetic runtime.
     self.messages=NSMutableDictionary.dictionary;self.jobs=NSMutableSet.set;
     BOOL fail=[NSProcessInfo.processInfo.arguments containsObject:@"--fail-flush"];
     if(fail){[self.jobs addObject:@"updates"];self.testInstaller=[NSTask new];self.testInstaller.executableURL=[NSURL fileURLWithPath:@"/bin/sleep"];self.testInstaller.arguments=@[@"60"];if(![self.testInstaller launchAndReturnError:NULL])_exit(6);self.updateInstaller=self.testInstaller;}
+    __block BOOL failed=NO;
     RTTestRuntimeFlush=^NSDictionary *{
         if(NSThread.isMainThread)_exit(3);
-        usleep(20000);flushed=YES;return fail?@{@"error":@"synthetic flush failure"}:@{@"value":@YES};
+        if(fail&&!failed){failed=YES;return RTJSON(strdup("{\"error\":\"synthetic flush failure\"}"));}
+        // Use the real Rust barrier and production decoder together. A synthetic
+        // NSDictionary hid the scalar success response that broke real updates.
+        NSDictionary *result=RTJSON(rt_runtime_flush(self.runtime));flushed=YES;return result;
     };
-    // Reproduce termination from an update completion on the main dispatch queue.
-    dispatch_async(dispatch_get_main_queue(),^{[NSApp terminate:nil];});
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+        RtRuntime *runtime=NULL;NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
+        if(opened[@"error"]||!runtime)_exit(8);
+        // Reproduce termination from an update completion on the main dispatch queue.
+        dispatch_async(dispatch_get_main_queue(),^{self.runtime=runtime;[NSApp terminate:nil];});
+    });
 }
 - (void)voiceCancel {}
 - (void)finishTermination:(NSDictionary *)result {
@@ -32,11 +40,13 @@ static BOOL flushed;
 - (void)checkCancellation:(id)sender {
     (void)sender;
     if(self.testInstaller.running||self.updateInstaller||[self.jobs containsObject:@"updates"])_exit(7);
-    puts("Failed saves cancel termination, stop the pending installer and allow retry.");fflush(stdout);_exit(0);
+    cancelled=YES;
+    puts("Failed saves cancel termination, stop the pending installer and allow retry.");fflush(stdout);
+    dispatch_async(dispatch_get_main_queue(),^{[NSApp terminate:nil];});
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
     (void)notification;
-    if([NSProcessInfo.processInfo.arguments containsObject:@"--fail-flush"])_exit(5);
+    if([NSProcessInfo.processInfo.arguments containsObject:@"--fail-flush"]&&!cancelled)_exit(5);
     if(!flushed)_exit(4);
     puts("Update termination from the main queue drains learning/statistics and exits without a nested-loop deadlock.");
 }

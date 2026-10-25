@@ -69,8 +69,9 @@ NSString *RTDataRoot(void) {
     return NSTerminateLater;
 }
 - (void)finishTermination:(NSDictionary *)result {
-    BOOL saved=!result[@"error"];RTUpdateLog(saved?@"saved_before_exit":@"save_failed",saved);
-    if(!saved){if(self.updateInstaller.running)[self.updateInstaller terminate];self.updateInstaller=nil;[self.jobs removeObject:@"updates"];if(self.maintenance)[self startMaintenance];self.messages[@9]=@"保存输入记录失败，已取消退出，请重试";[RTSettings refreshIfLoaded];}
+    BOOL saved=!result[@"error"]&&[result[@"saved"] isEqual:@YES];
+    NSString *reason=result[@"error"]?:@"保存结果无效";RTUpdateSaveLog(saved,reason);
+    if(!saved){if(self.updateInstaller.running)[self.updateInstaller terminate];self.updateInstaller=nil;[self.jobs removeObject:@"updates"];if(self.maintenance)[self startMaintenance];self.messages[@9]=[NSString stringWithFormat:@"保存输入记录失败，已取消退出：%@",reason];[RTSettings refreshIfLoaded];}
     [NSApp replyToApplicationShouldTerminate:saved];
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
