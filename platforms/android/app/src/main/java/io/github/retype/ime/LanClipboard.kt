@@ -12,6 +12,7 @@ import android.provider.Settings
 import java.io.ByteArrayOutputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -82,7 +83,7 @@ class LanClipboard private constructor(private val context: Context) {
       )
   val state = mutable.asStateFlow()
   private var job: Job? = null
-  @Volatile private var socket: SSLSocket? = null
+  private val socket = AtomicReference<Socket?>(null)
   @Volatile private var pairingPin = ""
   @Volatile private var pairingMode = ""
   @Volatile private var pairingExpires = 0L
@@ -127,9 +128,6 @@ class LanClipboard private constructor(private val context: Context) {
     else {
       cancelPair(false)
       update { it.copy(message = "已关闭") }
-      job?.cancel()
-      socket?.close()
-      job = null
       discoveryStop?.invoke()
       discoveryStop = null
       synchronized(gate) {
@@ -246,7 +244,7 @@ class LanClipboard private constructor(private val context: Context) {
     pairingJob?.cancel()
     pairingJob = null
     job?.cancel()
-    socket?.close()
+    closeSocket()
     job = null
     update { it.copy(code = null, expires = 0, connection = "", message = "关联已取消") }
     if (resumeConnection) resume()
@@ -317,9 +315,18 @@ class LanClipboard private constructor(private val context: Context) {
         else event.getString("text")
       }
 
+  // TLS close can write close_notify, so UI actions must never close on the main thread.
+  // Detach first: a delayed close must only affect the old connection.
+  private fun closeSocket() {
+    val previous = socket.getAndSet(null) ?: return
+    scope.launch {
+      runCatching { previous.close() }
+    }
+  }
+
   private fun connect(address: String, pairing: Boolean) {
     job?.cancel()
-    socket?.close()
+    closeSocket()
     job = scope.launch {
       var initialPair = pairing
       var delayMs = 1000L
@@ -392,12 +399,12 @@ class LanClipboard private constructor(private val context: Context) {
     for(ip in resolved.take(16)) {
       currentCoroutineContext().ensureActive()
       val candidate=ssl.socketFactory.createSocket() as SSLSocket
-      socket=candidate
+      socket.set(candidate)
       try {candidate.connect(InetSocketAddress(ip,port),3000);connected=candidate;break}
       catch(error: Exception){candidate.close();android.util.Log.i("retype-lan","TCP connection failed: $address (${error.javaClass.simpleName})")}
     }
     val connection=connected?:error("设备连接失败，请检查路由、防火墙和同步端口")
-    socket = connection
+    socket.set(connection)
     try {
       connection.soTimeout = 5000
       connection.startHandshake()
@@ -556,7 +563,7 @@ class LanClipboard private constructor(private val context: Context) {
       update { it.copy(message = "设备离线，正在重连…", connection="") }
     } finally {
       connection.close()
-      if (socket === connection) socket = null
+      socket.compareAndSet(connection, null)
     }
   }
 

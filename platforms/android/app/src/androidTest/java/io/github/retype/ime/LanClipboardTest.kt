@@ -40,7 +40,7 @@ class LanClipboardTest {
       }
       withTimeout(5000) { while (lan.state.value.text != null) delay(50) }
       delay(500)
-      lan.enable(false)
+      instrumentation.runOnMainSync { lan.enable(false) }
       assertNull(lan.pasteText())
     } finally {
       lan.unlink()
