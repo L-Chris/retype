@@ -73,6 +73,8 @@ void RTRegisterHooks(void);
 - (void)hideFor:(id<RTCandidateOwner>)owner;
 @end
 
+void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible);
+
 @interface RTSettings : NSWindowController
 + (instancetype)shared;
 + (void)refreshIfLoaded;

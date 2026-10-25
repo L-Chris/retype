@@ -8,7 +8,19 @@ fn idle_accepted_socket_waits_for_input_instead_of_spinning() -> Result<()> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let mut client = TcpStream::connect(listener.local_addr().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
-    let (mut accepted, _) = listener.accept().map_err(|e| e.to_string())?;
+    // TCP connect completion can precede the listener becoming readable on macOS.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (mut accepted, _) = loop {
+        match listener.accept() {
+            Ok(connection) => break connection,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(1))
+            }
+            Err(error) => return Err(format!("accept failed: {error}")),
+        }
+    };
     // Winsock inherits the listener's nonblocking mode. Force that precondition
     // on every platform so macOS tests cover the Windows regression too.
     accepted.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -130,6 +142,7 @@ impl Fixture {
             senders: Vec::new(),
             pair_code: "123456".into(),
             attempts: 0,
+            target: None,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
@@ -230,8 +243,7 @@ impl Drop for Fixture {
                     retype_ai::secrets::save_cloud_password(&format!("lan-client-{}", peer.id), "");
             }
         }
-        let _ = std::fs::remove_file(self.root.join("config.json"));
-        let _ = std::fs::remove_dir(&self.root);
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -456,5 +468,168 @@ fn wrong_code_and_expired_offer_never_link() -> Result<()> {
             .peers
             .is_empty());
     }
+    Ok(())
+}
+
+#[test]
+fn bound_desktops_reconnect_without_discovery_and_reverse_roles_without_pairing() -> Result<()> {
+    let a = Fixture::new()?;
+    let b = Fixture::new()?;
+    a.state.lock().map_err(|_| "lock")?.status.mode = "join".into();
+    let aid = a.state.lock().map_err(|_| "lock")?.config.id.clone();
+    let bid = b.state.lock().map_err(|_| "lock")?.config.id.clone();
+    let link = |client: &Fixture, address: std::net::SocketAddr, remote: String| {
+        let state = Arc::clone(&client.state);
+        let incoming = Arc::clone(&client.incoming);
+        let folder = client.root.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let quit = Arc::clone(&stop);
+        (
+            stop,
+            std::thread::spawn(move || {
+                let blocked = socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::STREAM,
+                    Some(socket2::Protocol::TCP),
+                )
+                .map_err(|e| e.to_string())?;
+                blocked
+                    .bind(
+                        &"127.0.0.1:0"
+                            .parse::<std::net::SocketAddr>()
+                            .map_err(|e| e.to_string())?
+                            .into(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let unavailable = blocked
+                    .local_addr()
+                    .map_err(|e| e.to_string())?
+                    .as_socket()
+                    .ok_or("address")?
+                    .to_string();
+                outbound::connect_candidates(
+                    &[unavailable, address.to_string()],
+                    &remote,
+                    &state,
+                    &quit,
+                    &incoming,
+                    &folder,
+                )
+            }),
+        )
+    };
+    let wait = |fixture: &Fixture, id: &String, online| -> Result<()> {
+        let start = Instant::now();
+        while fixture
+            .state
+            .lock()
+            .map_err(|_| "lock")?
+            .status
+            .online
+            .contains(id)
+            != online
+        {
+            if start.elapsed() > Duration::from_secs(6) {
+                return Err("connection state timed out".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    };
+    // Explicit address pairing learns the remote ID from the PAKE-bound response.
+    let (quit, worker) = link(&a, b.address, String::new());
+    wait(&a, &bid, true)?;
+    let original = token(&aid);
+    assert!(!original.is_empty());
+    assert!(a.state.lock().map_err(|_| "lock")?.config.peers[0]
+        .addresses
+        .contains(&b.address.to_string()));
+    quit.store(true, Ordering::Relaxed);
+    worker.join().map_err(|_| "thread")??;
+    wait(&b, &aid, false)?;
+    let impostor = Fixture::new()?;
+    assert!(outbound::connect(
+        impostor.address,
+        &bid,
+        &a.state,
+        &a.stop,
+        &a.incoming,
+        &a.root
+    )
+    .is_err());
+    assert_eq!(a.state.lock().map_err(|_| "lock")?.config.peers[0].id, bid);
+    assert_eq!(original, token(&aid));
+    // Now the old TCP server dials its old client. No code or discovery is used.
+    let (quit, worker) = link(&b, a.address, aid.clone());
+    wait(&b, &aid, true)?;
+    assert_eq!(original, token(&aid));
+    assert_eq!(a.state.lock().map_err(|_| "lock")?.config.peers.len(), 1);
+    assert_eq!(b.state.lock().map_err(|_| "lock")?.config.peers.len(), 1);
+    b.publish("same binding, new route")?;
+    assert_eq!(
+        a.receive(Duration::from_secs(3))?.text,
+        "same binding, new route"
+    );
+    a.publish("reverse direction reply")?;
+    assert_eq!(
+        b.receive(Duration::from_secs(3))?.text,
+        "reverse direction reply"
+    );
+    quit.store(true, Ordering::Relaxed);
+    worker.join().map_err(|_| "thread")??;
+    Ok(())
+}
+
+#[test]
+fn resume_proofs_bind_both_devices_certificate_and_fresh_nonces() -> Result<()> {
+    let token = "a".repeat(64);
+    let client = "b".repeat(32);
+    let server = "c".repeat(32);
+    let cert = "d".repeat(64);
+    let nonce = "e".repeat(32);
+    let challenge = "f".repeat(32);
+    let proof = crate::pairing::Proof::resume(&token, &client, &server, &cert, &nonce, &challenge)?;
+    let tag = proof.tag("server")?;
+    assert!(proof.verify("client", &tag).is_err());
+    for changed in [
+        crate::pairing::Proof::resume(&token, &server, &client, &cert, &nonce, &challenge)?,
+        crate::pairing::Proof::resume(
+            &token,
+            &client,
+            &server,
+            &"0".repeat(64),
+            &nonce,
+            &challenge,
+        )?,
+        crate::pairing::Proof::resume(&token, &client, &server, &cert, &challenge, &nonce)?,
+    ] {
+        assert!(changed.verify("server", &tag).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn old_binding_metadata_keeps_identity_port_and_peers_when_addresses_are_added() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let local = "a".repeat(32);
+    let remote = "b".repeat(32);
+    config::write_json(
+        &fixture.root.join("config.json"),
+        &json!({"enabled":true,"port":54821,"id":local,"name":"Old desktop","peers":[{"id":remote,"name":"Old peer"}]}),
+    )?;
+    let mut config = load_at(&fixture.root)?;
+    assert!(config.peers[0].addresses.is_empty());
+    assert!(remember_addresses(
+        &mut config,
+        &remote,
+        ["home:54821".into(), "100.64.0.1:54821".into()]
+    ));
+    config::write_json(&fixture.root.join("config.json"), &config)?;
+    let saved = load_at(&fixture.root)?;
+    assert_eq!(saved.id, local);
+    assert_eq!(saved.port, 54821);
+    assert_eq!(saved.peers[0].id, remote);
+    assert_eq!(saved.peers.len(), 1);
+    assert_eq!(saved.peers[0].addresses.len(), 2);
     Ok(())
 }

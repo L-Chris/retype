@@ -30,6 +30,18 @@ static void PumpUntil(BOOL (^done)(void)){
     while(!done()&&CFAbsoluteTimeGetCurrent()<deadline)[NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.01]];
     Check(done(),@"Async settings operation must finish");
 }
+static void CheckInputMenuSettings(RTSettings *settings){
+    RetypeInputController *controller=[RetypeInputController new];
+    NSMenuItem *item=[controller menu].itemArray.lastObject;
+    Check(item.target==controller&&item.action==@selector(showPreferences:),@"The input menu uses the controller's standard preferences action");
+    [settings.window orderOut:nil];
+    [controller doCommandBySelector:item.action commandDictionary:@{kIMKCommandMenuItemName:item}];
+    PumpUntil(^BOOL{return settings.window.visible;});
+    [settings.window miniaturize:nil];
+    [controller doCommandBySelector:NSSelectorFromString(@"showSettings:") commandDictionary:@{}];
+    PumpUntil(^BOOL{return settings.window.visible&&!settings.window.miniaturized;});
+    printf("System input-menu settings commands reopen hidden/minimized windows; legacy selectors remain supported.\n");
+}
 static void CheckAsyncSettings(RTSettings *settings){
     dispatch_semaphore_t entered=dispatch_semaphore_create(0),release=dispatch_semaphore_create(0);
     RTTestSecretRead=^NSString *(NSString *account){
@@ -139,6 +151,7 @@ int main(void){@autoreleasepool{
     NSArray *inputRows=@[@{@"inputs":@20,@"corrected":@2,@"units":@20},@{@"inputs":@30,@"corrected":@3,@"units":@60},@{@"inputs":@0,@"corrected":@0,@"units":@0},@{@"inputs":@10,@"corrected":@2,@"units":@40},@{@"inputs":@25,@"corrected":@5,@"units":@180},@{@"inputs":@15,@"corrected":@3,@"units":@240}];
     delegate.statistics=@{@"input":@{@"chinese":inputRows,@"english":inputRows,@"cancelled":@7},@"versions":@[@"",@"0.8.0",@"0.9.0"],@"current":count,@"recent":count,@"previous":count,@"voice":count,@"bars":@[@{@"label":@"9/29",@"counts":count},@{@"label":@"9/30",@"counts":count},@{@"label":@"10/1",@"counts":count}]};
     RTSettings *settings=RTSettings.shared;[settings showWindow:nil];[settings.window makeKeyAndOrderFront:nil];
+    CheckInputMenuSettings(settings);
     CheckAsyncSettings(settings);
     CheckDeletion();
     CheckTranslationCapture();

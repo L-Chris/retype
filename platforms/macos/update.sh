@@ -24,4 +24,6 @@ codesign --verify --strict "$staging/retype.app"
 mv "$destination" "$staging/previous.app"
 if ! mv "$staging/retype.app" "$destination"; then mv "$staging/previous.app" "$destination"; exit 1; fi
 "$destination/Contents/MacOS/retype" --register
+# Refresh the cached input-source icon after replacing the bundle.
+pkill -u "$(id -u)" -x TextInputMenuAgent || true
 open -a "$destination"

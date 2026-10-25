@@ -21,6 +21,8 @@ if ! mv "$staging/retype.app" "$destination"; then
     exit 1
 fi
 "$destination/Contents/MacOS/retype" --register
+# Re-registering updates the icon URL, but the menu agent retains the old image.
+pkill -u "$(id -u)" -x TextInputMenuAgent || true
 open -a "$destination" --args --settings
 open 'x-apple.systempreferences:com.apple.Keyboard-Settings.extension'
 echo 'Add retype in Keyboard > Text Input > Edit > +. If absent, log out and back in once.'

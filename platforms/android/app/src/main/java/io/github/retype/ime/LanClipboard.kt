@@ -39,6 +39,8 @@ data class LanState(
     val expires: Long = 0,
     val nearby: List<NearbyClipboard> = emptyList(),
     val text: String? = null,
+    val addresses: String = "",
+    val connection: String = "",
 )
 
 /** One process-wide connection. The default IME owns clipboard access; no accessibility service. */
@@ -73,6 +75,7 @@ class LanClipboard private constructor(private val context: Context) {
           LanState(
               enabled = prefs.getBoolean("enabled", false),
               name = prefs.getString("name", "") ?: "",
+              addresses = prefs.getString("manualAddresses", "") ?: "",
           )
       )
   val state = mutable.asStateFlow()
@@ -90,6 +93,7 @@ class LanClipboard private constructor(private val context: Context) {
   private var latest: JSONObject? = null
   private val seen = mutableMapOf<String, Long>()
   private var appliedText: String? = null
+  private val discoveredAddresses = mutableMapOf<String, List<String>>()
   private var discoveryStop: (() -> Unit)? = null
   private val id =
       prefs.getString("id", null)
@@ -117,7 +121,7 @@ class LanClipboard private constructor(private val context: Context) {
   fun enable(value: Boolean) {
     prefs.edit().putBoolean("enabled", value).commit()
     update {
-      it.copy(enabled = value, message = if (value) "连接中…" else "已关闭", text = null, code = null)
+      it.copy(enabled = value, message = if (value) "连接中…" else "已关闭", text = null, code = null, connection = if(value) it.connection else "")
     }
     if (value) resume()
     else {
@@ -138,20 +142,47 @@ class LanClipboard private constructor(private val context: Context) {
   fun unlink() {
     enable(false)
     vault.save("lan-token", "")
-    prefs.edit().remove("address").remove("pin").remove("peer").remove("name").commit()
-    update { it.copy(name = "") }
+    prefs.edit().remove("address").remove("addresses").remove("manualAddresses").remove("pin").remove("peer").remove("name").commit()
+    synchronized(discoveredAddresses) {discoveredAddresses.clear()}
+    update { it.copy(name = "", addresses = "", connection = "") }
   }
 
   fun showCode() {
     startPairing("show", SecureRandom().nextInt(1_000_000).toString().padStart(6, '0'))
   }
 
-  fun join(code: String) {
+  fun join(code: String, address: String = ""): Boolean {
+    val target=runCatching { if(address.isBlank()) "" else LanEndpoint.normalize(address) }.getOrElse { error -> update {it.copy(message=error.message?:"设备地址无效")};return false }
     require(code.matches(Regex("[0-9]{6}")))
-    startPairing("join", code)
+    startPairing("join", code, target)
+    return true
   }
 
-  private fun startPairing(mode: String, code: String) {
+  fun setAddresses(value: String) {
+    val values=runCatching {LanEndpoint.list(value)}.getOrElse { error -> update {it.copy(message=error.message?:"设备地址无效")};return }
+    if(prefs.getString("peer", "").isNullOrEmpty()) return
+    val text=values.joinToString(", ")
+    prefs.edit().putString("manualAddresses", text).commit()
+    update {it.copy(addresses=text,connection="",message="正在尝试设备连接地址…")}
+    if(prefs.getBoolean("enabled",false)) connect(prefs.getString("address", "").orEmpty(),false)
+  }
+
+  private fun candidates(fallback: String): List<String> {
+    val peer=prefs.getString("peer", "").orEmpty()
+    val discovered=synchronized(discoveredAddresses){discoveredAddresses[peer].orEmpty()}
+    val saved=runCatching {org.json.JSONArray(prefs.getString("addresses", "[]"))}.getOrNull()
+    val learned=if(saved==null) emptyList() else (0 until saved.length()).map {saved.optString(it)}
+    return (discovered + LanEndpoint.list(prefs.getString("manualAddresses", "").orEmpty()) + learned + listOf(prefs.getString("address",fallback).orEmpty())).filter(String::isNotBlank).distinct().sortedBy(LanEndpoint::priority).take(8)
+  }
+
+  private fun remember(address: String, advertised: org.json.JSONArray?) {
+    val old=runCatching {org.json.JSONArray(prefs.getString("addresses", "[]"))}.getOrDefault(org.json.JSONArray())
+    val values=listOf(address)+(0 until (advertised?.length()?:0)).take(8).map {advertised!!.optString(it)}+(0 until old.length()).map {old.optString(it)}
+    val valid=values.mapNotNull {runCatching {LanEndpoint.normalize(it)}.getOrNull()}.distinct().take(8)
+    prefs.edit().putString("addresses",org.json.JSONArray(valid).toString()).putString("address",address).commit()
+  }
+
+  private fun startPairing(mode: String, code: String, target: String = "") {
     cancelPair(false)
     prefs.edit().putBoolean("enabled", true).commit()
     pairingMode = mode
@@ -182,7 +213,7 @@ class LanClipboard private constructor(private val context: Context) {
           }
           val wanted = if (pairingMode == "show") "join" else "show"
           val peer =
-              mutable.value.nearby.firstOrNull {
+              if(target.isNotEmpty()) NearbyClipboard("",target,wanted) else mutable.value.nearby.firstOrNull {
                 it.mode == wanted && synchronized(tried) { it.address !in tried }
               }
           if (peer != null) {
@@ -315,10 +346,16 @@ class LanClipboard private constructor(private val context: Context) {
       var delayMs = 1000L
       while (isActive && prefs.getBoolean("enabled", false)) {
         try {
-          session(
-              if (initialPair) address else prefs.getString("address", address) ?: address,
-              initialPair,
-          )
+          val endpoints=if(initialPair) listOf(address) else candidates(address)
+          var failure: Exception?=null
+          var completed=false
+          for(endpoint in endpoints) {
+            currentCoroutineContext().ensureActive()
+            try { session(endpoint,initialPair);completed=true;break }
+            catch(e: CancellationException){throw e}
+            catch(e: Exception){failure=e;android.util.Log.i("retype-lan","Endpoint failed: $endpoint (${e.javaClass.simpleName})")}
+          }
+          if(!completed) throw failure?:IllegalStateException("缺少设备连接地址")
           initialPair = false
           delayMs = 1000
         } catch (e: CancellationException) {
@@ -336,7 +373,7 @@ class LanClipboard private constructor(private val context: Context) {
                 message = if (initialPair) "尚未找到匹配设备，请检查匹配码及两端连接" else "设备离线，正在重连…",
             )
           }
-          if (initialPair) break
+          if (initialPair && (pairingMode.isEmpty() || System.currentTimeMillis()>=pairingExpires)) break
         }
         delay(delayMs)
         delayMs = minOf(30_000, delayMs * 2)
@@ -350,12 +387,8 @@ class LanClipboard private constructor(private val context: Context) {
     val host = address.substring(0, separator)
     val port = address.substring(separator + 1).toInt()
     require(port in 1..65535)
-    val resolved = InetAddress.getByName(host)
-    require(
-        resolved.isSiteLocalAddress || resolved.isLinkLocalAddress || resolved.isLoopbackAddress
-    ) {
-      "仅支持局域网地址"
-    }
+    val resolved = InetAddress.getAllByName(host).filter(LanEndpoint::allowed).sortedBy(LanEndpoint::overlay)
+    require(resolved.isNotEmpty()) { "设备地址不属于局域网或 Tailscale" }
     val expectedPin = if (pairing) "" else prefs.getString("pin", "") ?: ""
     require(pairing || expectedPin.isNotEmpty())
     val trust =
@@ -372,10 +405,17 @@ class LanClipboard private constructor(private val context: Context) {
           }
         }
     val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), SecureRandom()) }
-    val connection = ssl.socketFactory.createSocket() as SSLSocket
+    var connected: SSLSocket?=null
+    for(ip in resolved.take(16)) {
+      currentCoroutineContext().ensureActive()
+      val candidate=ssl.socketFactory.createSocket() as SSLSocket
+      socket=candidate
+      try {candidate.connect(InetSocketAddress(ip,port),3000);connected=candidate;break}
+      catch(error: Exception){candidate.close();android.util.Log.i("retype-lan","TCP connection failed: $address (${error.javaClass.simpleName})")}
+    }
+    val connection=connected?:error("设备连接失败，请检查路由、防火墙和同步端口")
     socket = connection
     try {
-      connection.connect(InetSocketAddress(resolved, port), 5000)
       connection.soTimeout = 5000
       connection.startHandshake()
       connection.soTimeout = 200
@@ -399,6 +439,7 @@ class LanClipboard private constructor(private val context: Context) {
       )
       var ready = false
       var expectedProof = ""
+      var pairingPeer = ""
       var pairedToken = ""
       val frame = ByteArrayOutputStream()
 
@@ -436,7 +477,9 @@ class LanClipboard private constructor(private val context: Context) {
         frame.reset()
         when (message.getString("type")) {
           "pair" -> {
-            require(pairing && sessionCode.matches(Regex("[0-9]{6}")))
+            require(pairing && expectedProof.isEmpty() && sessionCode.matches(Regex("[0-9]{6}")))
+            pairingPeer=message.getString("id")
+            require(pairingPeer.matches(Regex("[a-fA-F0-9]{32}")))
             val begin =
                 JSONObject(
                     NativeBridge.feature(
@@ -469,7 +512,7 @@ class LanClipboard private constructor(private val context: Context) {
           }
           "error" -> error(message.optString("message", "关联失败"))
           "paired" -> {
-            require(pairing && expectedProof.isNotEmpty())
+            require(pairing && expectedProof.isNotEmpty() && message.getString("id")==pairingPeer)
             require(pairingPin == sessionCode && System.currentTimeMillis() < pairingExpires) { "匹配码已失效" }
             require(
                 MessageDigest.isEqual(
@@ -493,7 +536,7 @@ class LanClipboard private constructor(private val context: Context) {
           }
           "ready" -> {
             if (pairing) {
-              require(pairedToken.isNotEmpty())
+              require(pairedToken.isNotEmpty() && message.getString("id")==pairingPeer)
               prefs
                   .edit()
                   .putString("address", address)
@@ -502,6 +545,8 @@ class LanClipboard private constructor(private val context: Context) {
                   .putString("name", message.getString("name"))
                   .commit()
             } else require(message.getString("id") == prefs.getString("peer", ""))
+            remember(address,message.optJSONArray("addresses"))
+            android.util.Log.i("retype-lan","Authenticated connection ready: $address")
             ready = true
             if (pairing) {
               pairingPin = ""
@@ -509,7 +554,7 @@ class LanClipboard private constructor(private val context: Context) {
               pairingExpires = 0
             }
             update {
-              it.copy(code = null, expires = 0, name = message.getString("name"), message = "已连接")
+              it.copy(code = null, expires = 0, name = message.getString("name"), message = "已连接", connection=address)
             }
             synchronized(gate) {
               latest?.let { event -> if (event.getString("origin") == id) outgoing.set(event) }
@@ -525,7 +570,7 @@ class LanClipboard private constructor(private val context: Context) {
         }
       }
       if (!ready) error("关联未完成")
-      update { it.copy(message = "设备离线，正在重连…") }
+      update { it.copy(message = "设备离线，正在重连…", connection="") }
     } finally {
       connection.close()
       if (socket === connection) socket = null
@@ -542,7 +587,7 @@ class LanClipboard private constructor(private val context: Context) {
           override fun onDiscoveryStopped(type: String) {}
 
           override fun onStartDiscoveryFailed(type: String, error: Int) {
-            update { it.copy(message = "未能发现设备，请检查两端是否连接同一局域网") }
+            update { if(it.connection.isEmpty()) it.copy(message = "自动发现不可用，可填写设备地址连接") else it }
           }
 
           override fun onStopDiscoveryFailed(type: String, error: Int) {}
@@ -559,12 +604,12 @@ class LanClipboard private constructor(private val context: Context) {
 
                   override fun onServiceResolved(info: NsdServiceInfo) {
                     val host = info.host ?: return
-                    if (!host.isSiteLocalAddress && !host.isLinkLocalAddress) return
-                    val address = "${host.hostAddress}:${info.port}"
+                    if (!LanEndpoint.allowed(host)) return
+                    val address = "${if(host.address.size==16) "[${host.hostAddress}]" else host.hostAddress}:${info.port}"
                     val peerId = info.attributes["id"]?.toString(Charsets.UTF_8)
                     val mode = info.attributes["mode"]?.toString(Charsets.UTF_8) ?: ""
                     if (peerId != null && peerId == prefs.getString("peer", ""))
-                        prefs.edit().putString("address", address).apply()
+                        synchronized(discoveredAddresses) {discoveredAddresses[peerId]=(discoveredAddresses[peerId].orEmpty()+address).distinct().take(8)}
                     update {
                       it.copy(
                           nearby =

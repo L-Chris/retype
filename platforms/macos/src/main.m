@@ -36,7 +36,7 @@ NSString *RTDataRoot(void) {
     self.resourceMessage = @"";
     [self loadRuntime];
     [self startMaintenance];
-    if ([NSProcessInfo.processInfo.arguments containsObject:@"--settings"]) [self showSettings:nil];
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--settings"]) [self showSettings:@"launch_argument"];
     #endif
 }
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -55,7 +55,7 @@ NSString *RTDataRoot(void) {
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
     (void)sender; (void)visible;
-    [self showSettings:nil];
+    [self showSettings:@"reopen"];
     return NO;
 }
 - (void)loadRuntime {
@@ -76,12 +76,17 @@ NSString *RTDataRoot(void) {
     });
 }
 - (void)showSettings:(id)sender {
-    (void)sender;
+    NSString *source=[sender isKindOfClass:NSString.class]?sender:@"application";
+    RTSettingsOpenLog(@"requested",source,NO);
     RTSettings *settings = [RTSettings shared];
     [RTSettings refreshIfLoaded];
+    settings.window.collectionBehavior |= NSWindowCollectionBehaviorMoveToActiveSpace;
+    [NSApp unhide:nil];
+    if(settings.window.miniaturized)[settings.window deminiaturize:nil];
     [settings showWindow:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [settings.window makeKeyAndOrderFront:nil];
+    RTSettingsOpenLog(@"presented",source,settings.window.visible);
 }
 - (void)runResources:(int)action source:(NSString *)source {
     if (self.resourceBusy) return;

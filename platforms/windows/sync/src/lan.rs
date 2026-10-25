@@ -20,9 +20,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(any(target_os = "macos", test))]
+#[path = "lan_address.rs"]
+mod address;
 #[path = "lan_client.rs"]
 mod outbound;
+pub use address::{normalize_address, DEFAULT_PORT};
 #[cfg(test)]
 #[path = "lan_tests.rs"]
 mod tests;
@@ -31,6 +33,8 @@ mod tests;
 pub struct Peer {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub addresses: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +68,8 @@ pub struct Status {
     pub port: u16,
     pub addresses: Vec<String>,
     pub online: Vec<String>,
+    #[serde(default)]
+    pub connections: std::collections::BTreeMap<String, String>,
     pub pending: Option<Pending>,
     pub pairing: bool,
     #[serde(default)]
@@ -84,6 +90,9 @@ pub enum Command {
     Enable(bool),
     Pair,
     Join(String),
+    JoinAddress { code: String, address: String },
+    Address { id: String, address: String },
+    Port(u16),
     Cancel,
     Remove(String),
 }
@@ -98,6 +107,7 @@ struct State {
     senders: Vec<(String, Mailbox)>,
     pair_code: String,
     attempts: u8,
+    target: Option<String>,
 }
 struct SessionGuard<'a> {
     state: &'a Mutex<State>,
@@ -109,6 +119,7 @@ impl Drop for SessionGuard<'_> {
         if let Ok(mut s) = self.state.lock() {
             if let Some(peer) = &self.peer {
                 s.status.online.retain(|id| id != peer);
+                s.status.connections.remove(peer);
                 s.senders.retain(|(id, _)| id != peer);
             }
             if self
@@ -174,6 +185,25 @@ pub fn status_at(root: &Path) -> Status {
 pub fn command(command: Command) -> Result<()> {
     let root = root()?;
     private_directory(&root)?;
+    match &command {
+        Command::Join(code) if !crate::pairing::valid_code(code) => {
+            return Err("请输入 6 位匹配码".into())
+        }
+        Command::JoinAddress { code, address } => {
+            if !crate::pairing::valid_code(code) {
+                return Err("请输入 6 位匹配码".into());
+            }
+            normalize_address(address)?;
+        }
+        Command::Address { id, address } => {
+            if !load_at(&root)?.peers.iter().any(|p| &p.id == id) {
+                return Err("设备未关联".into());
+            }
+            address_list(address)?;
+        }
+        Command::Port(0) => return Err("端口范围为 1–65535".into()),
+        _ => {}
+    }
     config::write_json(&root.join("command.json"), &command)?;
     #[cfg(windows)]
     {
@@ -303,14 +333,70 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
 fn credential(id: &str) -> String {
     format!("lan-peer-{id}")
 }
+fn client_identity(id: &str) -> Value {
+    retype_ai::secrets::cloud_password(&format!("lan-client-{id}"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null)
+}
 fn token(id: &str) -> String {
-    retype_ai::secrets::cloud_password(&credential(id)).unwrap_or_default()
+    let saved = retype_ai::secrets::cloud_password(&credential(id)).unwrap_or_default();
+    if saved.is_empty() {
+        client_identity(id)["token"]
+            .as_str()
+            .unwrap_or_default()
+            .into()
+    } else {
+        saved
+    }
 }
 fn lan_address(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => v.is_private() || v.is_link_local() || v.is_loopback(),
-        IpAddr::V6(v) => v.is_loopback() || v.is_unique_local() || v.is_unicast_link_local(),
+    address::allowed(ip)
+}
+fn address_list(value: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for item in value
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let normalized = normalize_address(item)?;
+        if !out.contains(&normalized) {
+            out.push(normalized);
+        }
+        if out.len() > 8 {
+            return Err("最多保存 8 个连接地址".into());
+        }
     }
+    Ok(out)
+}
+fn remember_addresses(
+    config: &mut Config,
+    id: &str,
+    values: impl IntoIterator<Item = String>,
+) -> bool {
+    let Some(peer) = config.peers.iter_mut().find(|p| p.id == id) else {
+        return false;
+    };
+    let before = peer.addresses.clone();
+    for value in values {
+        if let Ok(value) = normalize_address(&value) {
+            if !peer.addresses.contains(&value) && peer.addresses.len() < 8 {
+                peer.addresses.push(value);
+            }
+        }
+    }
+    peer.addresses != before
+}
+fn advertised_addresses(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| normalize_address(s).ok())
+        .collect()
 }
 fn tls() -> Result<(Arc<ServerConfig>, Vec<u8>)> {
     let mut saved =
@@ -392,6 +478,8 @@ fn session(
     let mut authenticated = false;
     let mut pairing = false;
     let mut exchange = None;
+    let mut resume = None;
+    let mut remote_addresses = Vec::new();
     let mut server_proof = String::new();
     let mut pair_code = String::new();
     let pending = Arc::new(Mutex::new(None::<Clip>));
@@ -443,12 +531,31 @@ fn session(
                     if !state.config.enabled {
                         return Err("同步已关闭".into());
                     }
+                    remote_addresses = advertised_addresses(&message["addresses"]);
                     let saved = token(&peer);
                     if state.config.peers.iter().any(|p| p.id == peer)
                         && !saved.is_empty()
                         && message["token"].as_str() == Some(saved.as_str())
                     {
                         authenticated = true;
+                    } else if state.config.peers.iter().any(|p| p.id == peer)
+                        && !saved.is_empty()
+                        && message["resume"].is_string()
+                    {
+                        let challenge = uuid::Uuid::new_v4().simple().to_string();
+                        let proof = crate::pairing::Proof::resume(
+                            &saved,
+                            &peer,
+                            &state.config.id,
+                            &crate::hash(cert),
+                            message["resume"].as_str().unwrap_or_default(),
+                            &challenge,
+                        )?;
+                        send(
+                            &mut stream,
+                            json!({"type":"resume","id":state.config.id,"challenge":challenge,"proof":proof.tag("server")?}),
+                        )?;
+                        resume = Some(proof);
                     } else if state.pair_until.is_some_and(|t| t > Instant::now())
                         && state.status.pending.is_none()
                         && state.attempts < 5
@@ -484,6 +591,14 @@ fn session(
                     } else {
                         return Err("设备未关联或匹配码已失效".into());
                     }
+                }
+                "resumeProof" if !authenticated && resume.is_some() => {
+                    resume
+                        .take()
+                        .ok_or("设备身份验证失败")?
+                        .verify("client", message["proof"].as_str().unwrap_or_default())
+                        .map_err(|_| "设备身份验证失败")?;
+                    authenticated = true;
                 }
                 "proof" if pairing && !client_confirmed => {
                     let proof = exchange
@@ -547,6 +662,7 @@ fn session(
                 state.config.peers.push(Peer {
                     id: peer.clone(),
                     name: name.clone(),
+                    addresses: Vec::new(),
                 });
                 config::write_json(&root.join("config.json"), &state.config)?;
                 state.status.pending = None;
@@ -577,12 +693,26 @@ fn session(
                 if state.status.online.contains(&peer) {
                     return Err("设备已有连接".into());
                 }
+                if remember_addresses(&mut state.config, &peer, remote_addresses.clone()) {
+                    config::write_json(&root.join("config.json"), &state.config)?;
+                }
+                let connected = stream
+                    .sock
+                    .peer_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                state.status.connections.insert(peer.clone(), connected);
+                diagnostic(
+                    root,
+                    "connection_ready",
+                    json!({"peer":peer,"address":state.status.connections.get(&peer)}),
+                );
                 guard.peer = Some(peer.clone());
                 state.status.online.push(peer.clone());
                 state.senders.push((peer.clone(), Arc::clone(&pending)));
                 send(
                     &mut stream,
-                    json!({"type":"ready", "id":state.config.id, "name":state.config.name}),
+                    json!({"type":"ready", "id":state.config.id, "name":state.config.name,"addresses":local_addresses(state.status.port)}),
                 )?;
                 if let Some(clip) = &state.journal.latest {
                     if clip.valid(now()) {
@@ -625,10 +755,10 @@ pub fn serve() -> Result<()> {
         senders: Vec::new(),
         pair_code: String::new(),
         attempts: 0,
+        target: None,
     }));
     let stop = Arc::new(AtomicBool::new(false));
     let clip_tx: Mailbox = Arc::new(Mutex::new(None));
-    #[cfg(target_os = "macos")]
     {
         let state = Arc::clone(&shared);
         let quit = Arc::clone(&stop);
@@ -638,6 +768,7 @@ pub fn serve() -> Result<()> {
     }
     let mut clip_rx = Some(Arc::clone(&clip_tx));
     let mut listener = None;
+    let mut ipv6_listener = None;
     let mut identity = None;
     let mut discovery: Option<mdns_sd::ServiceDaemon> = None;
     let mut watcher = None;
@@ -667,9 +798,16 @@ pub fn serve() -> Result<()> {
             let _ = std::fs::remove_file(&command_path);
             if let Ok(command) = serde_json::from_slice::<Command>(&bytes) {
                 let mut s = shared.lock().map_err(|_| "设备状态不可用")?;
+                let target = match &command {
+                    Command::JoinAddress { address, .. } => Some(normalize_address(address)?),
+                    _ => None,
+                };
                 match command {
                     Command::Enable(value) => {
                         s.config.enabled = value;
+                        if !value {
+                            s.target = None;
+                        }
                         s.journal = Journal::default();
                         if !value {
                             s.status.pending = None;
@@ -677,6 +815,7 @@ pub fn serve() -> Result<()> {
                         }
                     }
                     Command::Pair => {
+                        s.target = None;
                         diagnostic(&root, "pairing_started", json!({"mode":"show"}));
                         s.config.enabled = true;
                         s.pair_until = Some(Instant::now() + Duration::from_secs(120));
@@ -688,7 +827,8 @@ pub fn serve() -> Result<()> {
                         s.status.pending = None;
                         s.status.message = "请在另一台设备输入此匹配码".into();
                     }
-                    Command::Join(code) => {
+                    Command::Join(code) | Command::JoinAddress { code, address: _ } => {
+                        s.target = target;
                         if crate::pairing::valid_code(&code) {
                             diagnostic(&root, "pairing_started", json!({"mode":"join"}));
                             s.config.enabled = true;
@@ -702,7 +842,25 @@ pub fn serve() -> Result<()> {
                             s.status.message = "正在查找并关联设备…".into();
                         }
                     }
+                    Command::Address { id, address } => {
+                        let addresses = address_list(&address)?;
+                        if let Some(peer) = s.config.peers.iter_mut().find(|p| p.id == id) {
+                            peer.addresses = addresses;
+                        }
+                    }
+                    Command::Port(port) => {
+                        if port > 0 {
+                            s.config.port = port;
+                            listener = None;
+                            ipv6_listener = None;
+                            if let Some(mdns) = discovery.take() {
+                                let _ = mdns.shutdown();
+                            }
+                            advertised_mode.clear();
+                        }
+                    }
                     Command::Cancel => {
+                        s.target = None;
                         s.pair_until = None;
                         s.pair_code.clear();
                         s.status.code.clear();
@@ -714,7 +872,6 @@ pub fn serve() -> Result<()> {
                     Command::Remove(id) => {
                         s.config.peers.retain(|p| p.id != id);
                         let _ = retype_ai::secrets::save_cloud_password(&credential(&id), "");
-                        #[cfg(target_os = "macos")]
                         let _ = retype_ai::secrets::save_cloud_password(
                             &format!("lan-client-{id}"),
                             "",
@@ -727,6 +884,7 @@ pub fn serve() -> Result<()> {
         let enabled = shared.lock().map_err(|_| "设备状态不可用")?.config.enabled;
         if !enabled && listener.is_some() {
             listener = None;
+            ipv6_listener = None;
             identity = None;
             if let Some(mdns) = discovery.take() {
                 let _ = mdns.shutdown();
@@ -734,11 +892,30 @@ pub fn serve() -> Result<()> {
         }
         if enabled && listener.is_none() {
             let saved_port = shared.lock().map_err(|_| "设备状态不可用")?.config.port;
-            let socket = TcpListener::bind(("0.0.0.0", saved_port))
-                .or_else(|_| TcpListener::bind(("0.0.0.0", 0)))
-                .map_err(|_| "无法启动局域网连接")?;
+            let port = if saved_port == 0 {
+                DEFAULT_PORT
+            } else {
+                saved_port
+            };
+            let socket = match TcpListener::bind(("0.0.0.0", port)) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    diagnostic(
+                        &root,
+                        "listen_error",
+                        json!({"port":port,"error":error.to_string()}),
+                    );
+                    let mut s = shared.lock().map_err(|_| "设备状态不可用")?;
+                    s.status.message = format!("无法监听端口 {port}，请检查端口占用或更改监听端口");
+                    config::write_json(&root.join("status.json"), &s.status)?;
+                    drop(s);
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            };
             socket.set_nonblocking(true).map_err(|_| "无法设置监听")?;
             let port = socket.local_addr().map_err(|_| "无法获取监听端口")?.port();
+            ipv6_listener = listen_ipv6(port).ok();
             identity = Some(tls()?);
             if let Ok(mdns) = mdns_sd::ServiceDaemon::new() {
                 let _ = mdns.disable_interface(mdns_sd::IfKind::IPv6);
@@ -752,6 +929,7 @@ pub fn serve() -> Result<()> {
                     [
                         ("id", s.config.id.as_str()),
                         ("version", "2"),
+                        ("dial", "1"),
                         (
                             "platform",
                             if cfg!(target_os = "macos") {
@@ -810,6 +988,7 @@ pub fn serve() -> Result<()> {
                     [
                         ("id", s.config.id.as_str()),
                         ("version", "2"),
+                        ("dial", "1"),
                         (
                             "platform",
                             if cfg!(target_os = "macos") {
@@ -832,36 +1011,42 @@ pub fn serve() -> Result<()> {
                 advertised_mode = s.status.mode.clone();
             }
         }
-        if let (Some(socket), Some((tls, cert))) = (&listener, &identity) {
-            while let Ok((connection, address)) = socket.accept() {
-                if !enabled || !lan_address(address.ip()) || slots.load(Ordering::Relaxed) >= 8 {
-                    continue;
-                }
-                slots.fetch_add(1, Ordering::Relaxed);
-                let slots = Arc::clone(&slots);
-                let shared = Arc::clone(&shared);
-                let quit = Arc::clone(&stop);
-                let tls = Arc::clone(tls);
-                let cert = cert.clone();
-                let root = root.clone();
-                let clipboard = Arc::clone(&clip_tx);
-                std::thread::spawn(move || {
-                    diagnostic(
-                        &root,
-                        "incoming_connection",
-                        json!({"address":address.to_string()}),
-                    );
-                    if let Err(error) =
-                        session(connection, tls, &cert, &shared, &root, &quit, &clipboard)
+        for socket in [listener.as_ref(), ipv6_listener.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some((tls, cert)) = &identity {
+                while let Ok((connection, address)) = socket.accept() {
+                    if !enabled || !lan_address(address.ip()) || slots.load(Ordering::Relaxed) >= 8
                     {
+                        continue;
+                    }
+                    slots.fetch_add(1, Ordering::Relaxed);
+                    let slots = Arc::clone(&slots);
+                    let shared = Arc::clone(&shared);
+                    let quit = Arc::clone(&stop);
+                    let tls = Arc::clone(tls);
+                    let cert = cert.clone();
+                    let root = root.clone();
+                    let clipboard = Arc::clone(&clip_tx);
+                    std::thread::spawn(move || {
                         diagnostic(
                             &root,
-                            "incoming_error",
-                            json!({"address":address.to_string(),"message":error}),
+                            "incoming_connection",
+                            json!({"address":address.to_string()}),
                         );
-                    }
-                    slots.fetch_sub(1, Ordering::Relaxed);
-                });
+                        if let Err(error) =
+                            session(connection, tls, &cert, &shared, &root, &quit, &clipboard)
+                        {
+                            diagnostic(
+                                &root,
+                                "incoming_error",
+                                json!({"address":address.to_string(),"message":error}),
+                            );
+                        }
+                        slots.fetch_sub(1, Ordering::Relaxed);
+                    });
+                }
             }
         }
         if last_status.elapsed() >= Duration::from_secs(1) {
@@ -887,7 +1072,11 @@ pub fn serve() -> Result<()> {
                 .into();
                 s.pair_until = None;
             }
+            if enabled {
+                s.status.addresses = local_addresses(s.status.port);
+            }
             if !enabled {
+                s.status.connections.clear();
                 s.status.message = "已关闭".into();
                 s.status.online.clear();
             }
@@ -909,13 +1098,32 @@ pub fn serve() -> Result<()> {
     }
     Ok(())
 }
+fn listen_ipv6(port: u16) -> std::io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(true)?;
+    socket.bind(
+        &std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)
+            .into(),
+    )?;
+    socket.listen(16)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
 fn local_addresses(port: u16) -> Vec<String> {
     let mut addresses: Vec<_> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
         .map(|interface| interface.ip())
-        .filter(|ip| ip.is_ipv4() && !ip.is_loopback() && lan_address(*ip))
-        .map(|ip| format!("{ip}:{port}"))
+        .filter(|ip| {
+            !ip.is_loopback()
+                && lan_address(*ip)
+                && !matches!(ip,IpAddr::V6(v) if v.is_unicast_link_local())
+        })
+        .map(|ip| std::net::SocketAddr::new(ip, port).to_string())
         .collect();
     addresses.sort();
     addresses.dedup();

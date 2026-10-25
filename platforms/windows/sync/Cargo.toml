@@ -32,6 +32,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
 mdns-sd = "0.21"
 if-addrs = "0.15"
+socket2 = "0.6"
 
 [[bin]]
 name = "retype-sync-host"

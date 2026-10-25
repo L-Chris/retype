@@ -195,11 +195,24 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     mode.target = self;
     [menu addItem:mode];
     [menu addItem:NSMenuItem.separatorItem];
-    NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"设置…" action:@selector(showSettings:) keyEquivalent:@""];
-    settings.target = NSApp.delegate;
+    NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"设置…" action:@selector(showPreferences:) keyEquivalent:@""];
+    settings.target = self;
     [menu addItem:settings];
     return menu;
 }
+// InputMethodKit dispatches system input-menu commands to the input controller,
+// not the NSMenuItem target in the input method process.
+- (void)doCommandBySelector:(SEL)selector commandDictionary:(NSDictionary *)info {
+    if(selector==@selector(showPreferences:) || selector==@selector(showSettings:)) [self showPreferences:info];
+    else if(selector==@selector(toggleMode:)) [self toggleMode:info];
+    else [super doCommandBySelector:selector commandDictionary:info];
+}
+- (void)showPreferences:(id)sender {
+    (void)sender;RTSettingsOpenLog(@"menu_received",@"input_menu",NO);
+    // Return from menu tracking before activating another window.
+    dispatch_async(dispatch_get_main_queue(),^{[(RTAppDelegate *)NSApp.delegate showSettings:@"input_menu"];});
+}
+- (void)showSettings:(id)sender {[self showPreferences:sender];}
 - (void)toggleMode:(id)sender { (void)sender; if (self.session) [self applyCommand:@{@"type":@"toggle"}]; }
 - (void)shortcut:(NSString *)role {
     if([role isEqual:@"mode"]){if(!self.session)[self ensureSession];if(self.session)[self applyCommand:@{@"type":@"toggle"}];}

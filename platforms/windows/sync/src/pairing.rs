@@ -51,6 +51,34 @@ impl Exchange {
     }
 }
 impl Proof {
+    /// Resume an existing trust relationship even when TCP roles are reversed.
+    /// Fresh nonces and the actual TLS certificate bind both proofs to this session.
+    pub fn resume(
+        token: &str,
+        client: &str,
+        server: &str,
+        cert: &str,
+        nonce: &str,
+        challenge: &str,
+    ) -> Result<Self> {
+        let hex = |s: &str, len| s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex(token, 64)
+            || !crate::config::valid_id(client)
+            || !crate::config::valid_id(server)
+            || !hex(cert, 64)
+            || !hex(nonce, 32)
+            || !hex(challenge, 32)
+        {
+            return Err("设备身份验证数据无效".into());
+        }
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(token.as_bytes()).map_err(|_| "设备身份验证失败")?;
+        mac.update(
+            format!("retype-clip-resume-v1:{client}:{server}:{cert}:{nonce}:{challenge}")
+                .as_bytes(),
+        );
+        Ok(Self(mac.finalize().into_bytes().to_vec()))
+    }
     pub fn tag(&self, role: &str) -> Result<String> {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).map_err(|_| "关联验证失败")?;
         mac.update(format!("retype-clip-v2-confirm:{role}").as_bytes());

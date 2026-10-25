@@ -24,6 +24,14 @@ class LanClipboardTest {
       lan.pairForTest("10.0.2.2:$port", "123456", InstrumentationRegistry.getArguments().getString("phoneShow") == "true")
       withTimeout(15_000) { while (lan.state.value.text != "电脑文字\nHello 👋") delay(50) }
       assertEquals("电脑文字\nHello 👋", lan.pasteText())
+      val prefs=context.getSharedPreferences("lanClipboard",android.content.Context.MODE_PRIVATE)
+      val before=listOf(prefs.getString("peer", ""),prefs.getString("pin", ""),SecretVault(context).get("lan-token"))
+      // Add a failing candidate, then reconnect through a different saved route.
+      // The peer identity and credentials must remain unchanged, without a new code.
+      lan.setAddresses("10.0.2.2:1, 10.0.2.2:$port")
+      withTimeout(15_000) {while(lan.state.value.connection!="10.0.2.2:$port" || lan.state.value.message!="已连接") delay(50)}
+      assertEquals(before,listOf(prefs.getString("peer", ""),prefs.getString("pin", ""),SecretVault(context).get("lan-token")))
+      assertNull(lan.state.value.code)
       instrumentation.runOnMainSync {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         assertEquals("电脑文字\nHello 👋", clipboard.primaryClip?.getItemAt(0)?.text?.toString())

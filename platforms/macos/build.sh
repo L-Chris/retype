@@ -41,8 +41,10 @@ for size in 16 32 128 256 512; do
     sips -z "$double" "$double" assets/logo.png --out "$stage/retype.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$stage/retype.iconset" -o "$bundle/Contents/Resources/retype.icns"
-sips -z 18 18 assets/logo.png --out "$bundle/Contents/Resources/menu.png" >/dev/null
-sips -z 36 36 assets/logo.png --out "$bundle/Contents/Resources/menu@2x.png" >/dev/null
+# Render a centered vector mask at its menu-bar point size, independent of the app icon.
+xcrun clang -isysroot "$sdk" -mmacosx-version-min=13.0 -fobjc-arc -O2 -Wall -Wextra -Werror \
+    platforms/macos/tools/MenuIcon.m -framework Foundation -framework CoreGraphics -o "$stage/menu-icon"
+"$stage/menu-icon" "$bundle/Contents/Resources/menuTemplate.pdf"
 # Ad-hoc signing supports local development. Public distribution needs a Developer ID and notarization.
 codesign --force --options runtime --entitlements platforms/macos/entitlements.plist --sign "${RETYPE_MACOS_SIGN_IDENTITY:--}" "$bundle"
 codesign --verify --strict --verbose=2 "$bundle"

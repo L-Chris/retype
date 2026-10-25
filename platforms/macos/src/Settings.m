@@ -13,9 +13,7 @@ static NSTextField *RTLabel(NSString *text, CGFloat size) {
     return label;
 }
 // Metadata only: no field values, provider URLs, credentials or input text.
-static void RTSettingsLog(NSString *event, NSInteger page, CFAbsoluteTime started, BOOL success) {
-    double elapsed=MAX(0,(CFAbsoluteTimeGetCurrent()-started)*1000);
-    NSDictionary *entry=@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":event,@"page":@(page),@"duration_ms":@(elapsed),@"success":@(success)};
+static void RTWriteSettingsLog(NSDictionary *entry) {
     static dispatch_queue_t queue;static dispatch_once_t once;
     dispatch_once(&once,^{queue=dispatch_queue_create("retype.settings.diagnostics",DISPATCH_QUEUE_SERIAL);});
     dispatch_async(queue,^{
@@ -31,6 +29,13 @@ static void RTSettingsLog(NSString *event, NSInteger page, CFAbsoluteTime starte
         NSFileHandle *handle=[NSFileHandle fileHandleForWritingAtPath:path];
         @try{[handle seekToEndOfFile];[handle writeData:[NSJSONSerialization dataWithJSONObject:entry options:0 error:NULL]];[handle writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];}@catch(NSException *e){(void)e;}@finally{[handle closeFile];}
     });
+}
+static void RTSettingsLog(NSString *event, NSInteger page, CFAbsoluteTime started, BOOL success) {
+    double elapsed=MAX(0,(CFAbsoluteTimeGetCurrent()-started)*1000);
+    RTWriteSettingsLog(@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":event,@"page":@(page),@"duration_ms":@(elapsed),@"success":@(success)});
+}
+void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible) {
+    RTWriteSettingsLog(@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":@"settings_open",@"stage":stage,@"source":source,@"visible":@(visible),@"pid":@(NSProcessInfo.processInfo.processIdentifier),@"version":NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]?:@"test"});
 }
 static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
     if([view isKindOfClass:NSSecureTextField.class]&&[view.identifier isEqual:path]){
@@ -537,9 +542,12 @@ static RTSettings *RTLoadedSettings;
         [self button:@"关联设备…" action:@selector(joinDevice:) x:176 width:140];self.row+=48;
         if ([lan[@"status"][@"code"] length]) [self label:lan[@"status"][@"code"] size:26];
         if ([lan[@"status"][@"message"] length]) [self label:lan[@"status"][@"message"] size:12];
+        for(NSString *address in lan[@"status"][@"addresses"]) [self label:address size:12];
+        [self button:@"监听端口…" action:@selector(lanPort:) x:20 width:120];self.row+=44;
+        [self label:@"支持物理局域网与 Tailscale；补充地址无需重新关联。" size:12];
         [self finishCard];
         for (NSDictionary *peer in lan[@"config"][@"peers"]) {
-            [self newCard];[self label:peer[@"name"] size:15];NSButton *remove=[self button:@"取消关联" action:@selector(removePeer:) x:20 width:120];remove.identifier=peer[@"id"];self.row+=44;[self finishCard];
+            [self newCard];[self label:peer[@"name"] size:15];NSString *connected=lan[@"status"][@"connections"][peer[@"id"]];[self label:connected?[@"已连接 · " stringByAppendingString:connected]:@"离线" size:12];NSButton *address=[self button:@"连接地址…" action:@selector(peerAddress:) x:152 width:120];address.identifier=peer[@"id"];NSButton *remove=[self button:@"取消关联" action:@selector(removePeer:) x:20 width:120];remove.identifier=peer[@"id"];self.row+=44;[self finishCard];
         }
     } else {
         [self newCard];
@@ -681,9 +689,24 @@ static RTSettings *RTLoadedSettings;
 - (void)lanEnable:(NSSwitch *)sender{[self lanCommand:@{@"Enable":@(sender.state==NSControlStateValueOn)}];}
 - (void)pairCode:(id)sender{(void)sender;[self lanCommand:@"Pair"];}
 - (void)joinDevice:(id)sender{
-    (void)sender;NSAlert *alert=[NSAlert new];alert.messageText=@"关联设备";alert.informativeText=@"输入另一台设备上显示的 6 位匹配码。";
-    NSTextField *field=[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,34)];alert.accessoryView=field;[alert addButtonWithTitle:@"关联"];[alert addButtonWithTitle:@"取消"];
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r){if(r==NSAlertFirstButtonReturn)[self lanCommand:@{@"Join":field.stringValue}];}];
+    (void)sender;NSAlert *alert=[NSAlert new];alert.messageText=@"关联设备";alert.informativeText=@"输入 6 位匹配码；跨网络连接可填写 IP 或域名和端口，留空自动发现。";
+    NSView *fields=[[NSView alloc] initWithFrame:NSMakeRect(0,0,340,80)];
+    NSTextField *code=[[NSTextField alloc] initWithFrame:NSMakeRect(0,46,340,30)];code.placeholderString=@"6 位匹配码";[fields addSubview:code];
+    NSTextField *address=[[NSTextField alloc] initWithFrame:NSMakeRect(0,4,340,30)];address.placeholderString=@"设备地址（可选），例如 home:50206";[fields addSubview:address];
+    alert.accessoryView=fields;[alert addButtonWithTitle:@"关联"];[alert addButtonWithTitle:@"取消"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r){if(r==NSAlertFirstButtonReturn)[self lanCommand:address.stringValue.length?@{@"JoinAddress":@{@"code":code.stringValue,@"address":address.stringValue}}:@{@"Join":code.stringValue}];}];
+}
+- (void)peerAddress:(NSButton *)sender{
+    RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;NSString *identifier=sender.identifier;
+    NSArray *addresses=@[];for(NSDictionary *peer in app.syncStatus[@"lan"][@"config"][@"peers"])if([peer[@"id"] isEqual:identifier])addresses=peer[@"addresses"]?:@[];
+    NSAlert *alert=[NSAlert new];alert.messageText=@"设备连接地址";alert.informativeText=@"填写 IP 或域名，可附带端口；多个地址用逗号分隔。补充 Tailscale 地址无需重新关联。";
+    NSTextField *field=[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,360,34)];field.stringValue=[addresses componentsJoinedByString:@", "];alert.accessoryView=field;[alert addButtonWithTitle:@"保存"];[alert addButtonWithTitle:@"取消"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r){if(r==NSAlertFirstButtonReturn)[self lanCommand:@{@"Address":@{@"id":identifier,@"address":field.stringValue}}];}];
+}
+- (void)lanPort:(id)sender{
+    (void)sender;RTAppDelegate *app=(RTAppDelegate *)NSApp.delegate;NSAlert *alert=[NSAlert new];alert.messageText=@"监听端口";alert.informativeText=@"更改后，请在远端设备更新保存的连接地址。";
+    NSTextField *field=[[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,34)];NSNumber *port=app.syncStatus[@"lan"][@"config"][@"port"];field.stringValue=port.unsignedIntegerValue?port.stringValue:@"50206";alert.accessoryView=field;[alert addButtonWithTitle:@"应用"];[alert addButtonWithTitle:@"取消"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse r){if(r==NSAlertFirstButtonReturn){NSInteger value=field.integerValue;if(value>0&&value<=65535)[self lanCommand:@{@"Port":@(value)}];else{app.messages[@8]=@"端口范围为 1–65535";[self refresh];}}}];
 }
 - (void)removePeer:(NSButton *)sender{[self lanCommand:@{@"Remove":sender.identifier}];}
 - (void)accessibility:(id)sender{(void)sender;AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge id)kAXTrustedCheckOptionPrompt:@YES});}

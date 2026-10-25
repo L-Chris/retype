@@ -1,4 +1,4 @@
-//! macOS connects to desktop hosts as well as accepting Android connections.
+//! Desktop clients connect to desktop hosts as well as accepting Android connections.
 //! TLS certificates are pinned after certificate-bound SPAKE2 confirmation.
 use super::*;
 use rustls::{
@@ -74,9 +74,9 @@ pub(super) fn connect(
     if !lan_address(address.ip()) {
         return Err("仅支持局域网地址".into());
     }
-    let saved =
-        retype_ai::secrets::cloud_password(&format!("lan-client-{remote}")).unwrap_or_default();
-    let credentials: Value = serde_json::from_str(&saved).unwrap_or(Value::Null);
+    let credentials = client_identity(remote);
+    let mut remote = remote.to_owned();
+    let secret = token(&remote);
     let (id, name, mode, code, pair_until, known) = {
         let s = shared.lock().map_err(|_| "设备状态不可用")?;
         (
@@ -88,13 +88,15 @@ pub(super) fn connect(
             s.config.peers.iter().any(|p| p.id == remote),
         )
     };
-    let pairing = !known || credentials["token"].as_str().is_none_or(str::is_empty);
+    let pairing = !known || secret.is_empty();
+    let resuming = !pairing && credentials["pin"].as_str().is_none_or(str::is_empty);
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
     if pairing
         && (!crate::pairing::valid_code(&code) || pair_until.is_none_or(|t| t <= Instant::now()))
     {
         return Err("未开启关联".into());
     }
-    let pin = if pairing {
+    let pin = if pairing || resuming {
         String::new()
     } else {
         credentials["pin"].as_str().ok_or("设备身份丢失")?.into()
@@ -145,11 +147,12 @@ pub(super) fn connect(
     let fingerprint = crate::hash(cert.as_ref());
     send(
         &mut stream,
-        json!({"type":"hello","version":2,"id":id,"name":name,"mode":if pairing{&mode}else{""},"token":if pairing{""}else{credentials["token"].as_str().unwrap_or("")}}),
+        json!({"type":"hello","version":2,"id":id,"name":name,"mode":if pairing{&mode}else{""},"token":if pairing || resuming {""}else{&secret},"resume":if resuming {Some(&nonce)}else{None},"addresses":local_addresses(shared.lock().map_err(|_| "设备状态不可用")?.status.port)}),
     )?;
     let mut decoder = Decoder::default();
     let mut buffer = [0u8; 8192];
     let mut proof = None;
+    let mut resumed = false;
     let mut paired = false;
     let mut ready = false;
     let mut last_read = Instant::now();
@@ -202,12 +205,46 @@ pub(super) fn connect(
         }
         for message in decoder.feed(&buffer[..count])? {
             match message["type"].as_str().unwrap_or_default() {
+                "resume" if resuming && !resumed && !ready => {
+                    if message["id"] != remote {
+                        return Err("设备身份不一致".into());
+                    }
+                    let proof = crate::pairing::Proof::resume(
+                        &secret,
+                        &id,
+                        &remote,
+                        &fingerprint,
+                        &nonce,
+                        message["challenge"].as_str().unwrap_or_default(),
+                    )?;
+                    proof
+                        .verify("server", message["proof"].as_str().unwrap_or_default())
+                        .map_err(|_| "设备身份验证失败")?;
+                    send(
+                        &mut stream,
+                        json!({"type":"resumeProof","proof":proof.tag("client")?}),
+                    )?;
+                    resumed = true;
+                    // The old shared secret authenticates the new transport role.
+                    retype_ai::secrets::save_cloud_password(
+                        &format!("lan-client-{remote}"),
+                        &json!({"pin":fingerprint,"token":secret}).to_string(),
+                    )
+                    .map_err(|_| "无法保存设备身份")?;
+                }
                 "pair" if pairing && !paired => {
+                    if remote.is_empty() {
+                        remote = message["id"]
+                            .as_str()
+                            .filter(|s| config::valid_id(s) && *s != id)
+                            .ok_or("设备身份无效")?
+                            .into();
+                    }
                     if message["id"] != remote {
                         return Err("设备身份不一致".into());
                     }
                     let (exchange, outbound) =
-                        crate::pairing::begin(&code, &id, remote, &fingerprint)?;
+                        crate::pairing::begin(&code, &id, &remote, &fingerprint)?;
                     let confirmation =
                         exchange.finish(message["message"].as_str().ok_or("验证数据无效")?)?;
                     send(
@@ -237,7 +274,8 @@ pub(super) fn connect(
                     .map_err(|_| "无法保存关联凭据")?;
                     s.config.peers.retain(|p| p.id != remote);
                     s.config.peers.push(Peer {
-                        id: remote.into(),
+                        id: remote.clone(),
+                        addresses: vec![address.to_string()],
                         name: message["name"]
                             .as_str()
                             .unwrap_or("Desktop")
@@ -255,17 +293,38 @@ pub(super) fn connect(
                     paired = true;
                 }
                 "ready" => {
-                    if message["id"] != remote || (pairing && !paired) {
+                    if message["id"] != remote || (pairing && !paired) || (resuming && !resumed) {
                         return Err("设备未通过验证".into());
                     }
                     let mut s = shared.lock().map_err(|_| "设备状态不可用")?;
-                    if s.status.online.iter().any(|p| p == remote) {
+                    if !s.config.enabled || !s.config.peers.iter().any(|p| p.id == remote) {
+                        return Err("设备已解除关联".into());
+                    }
+                    if s.status.online.contains(&remote) {
                         return Err("设备已有连接".into());
                     }
+                    let mut endpoints = advertised_addresses(&message["addresses"]);
+                    endpoints.push(address.to_string());
+                    if pairing {
+                        if let Some(target) = s.target.take() {
+                            endpoints.push(target);
+                        }
+                    }
+                    if remember_addresses(&mut s.config, &remote, endpoints) {
+                        config::write_json(&root.join("config.json"), &s.config)?;
+                    }
+                    s.status
+                        .connections
+                        .insert(remote.clone(), address.to_string());
+                    diagnostic(
+                        root,
+                        "connection_ready",
+                        json!({"peer":remote,"address":address.to_string()}),
+                    );
                     ready = true;
-                    guard.peer = Some(remote.into());
-                    s.status.online.push(remote.into());
-                    s.senders.push((remote.into(), Arc::clone(&outgoing)));
+                    guard.peer = Some(remote.clone());
+                    s.status.online.push(remote.clone());
+                    s.senders.push((remote.clone(), Arc::clone(&outgoing)));
                     s.status.message = "已连接".into();
                     if let Some(clip) = &s.journal.latest {
                         if clip.origin == id && clip.valid(now()) {
@@ -291,150 +350,262 @@ pub(super) fn connect(
             }
         }
     }
-    Ok(())
+    if ready || stop.load(Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err("设备在完成验证前断开连接".into())
+    }
 }
-#[cfg(target_os = "macos")]
+pub(super) fn connect_candidates(
+    endpoints: &[String],
+    remote: &str,
+    shared: &Arc<Mutex<State>>,
+    stop: &AtomicBool,
+    clipboard: &Mailbox,
+    root: &Path,
+) -> Result<()> {
+    let mut endpoints = endpoints.to_vec();
+    endpoints.sort_by_key(|s| {
+        s.parse::<std::net::SocketAddr>().map_or(1, |a| {
+            if address::is_tailscale(a.ip()) {
+                2
+            } else {
+                0
+            }
+        })
+    });
+    let mut last_error = "设备离线".to_string();
+    for endpoint in endpoints.into_iter().take(8) {
+        if stop.load(Ordering::Relaxed)
+            || shared
+                .lock()
+                .is_ok_and(|s| !s.config.enabled || s.status.online.iter().any(|id| id == remote))
+        {
+            return Ok(());
+        }
+        let addresses = match address::resolve(&endpoint) {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                diagnostic(
+                    root,
+                    "resolve_error",
+                    json!({"peer":remote,"endpoint":endpoint,"error":error}),
+                );
+                last_error = error;
+                continue;
+            }
+        };
+        for address in addresses {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            diagnostic(
+                root,
+                "connection_started",
+                json!({"peer":remote,"endpoint":endpoint,"address":address.to_string()}),
+            );
+            match connect(address, remote, shared, stop, clipboard, root) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    diagnostic(
+                        root,
+                        "connection_ended",
+                        json!({"peer":remote,"address":address.to_string(),"error":error}),
+                    );
+                    if let Ok(mut s) = shared.lock() {
+                        if s.status.online.is_empty() {
+                            s.status.message = error.clone();
+                        }
+                    }
+                    last_error = error;
+                }
+            }
+        }
+    }
+    Err(last_error)
+}
 pub(super) fn watch(
     shared: Arc<Mutex<State>>,
     stop: Arc<AtomicBool>,
     clipboard: Mailbox,
     root: PathBuf,
 ) {
-    let mdns = match mdns_sd::ServiceDaemon::new() {
-        Ok(mdns) => mdns,
-        Err(_) => {
-            diagnostic(
-                &root,
-                "discovery_error",
-                json!({"message":"无法启动设备发现"}),
-            );
-            return;
-        }
-    };
+    let mdns = mdns_sd::ServiceDaemon::new().ok();
     let mut events = None;
     let active = Arc::new(Mutex::new(std::collections::BTreeSet::<String>::new()));
-    let mut nearby = std::collections::BTreeMap::new();
-    let mut scan = Instant::now();
+    let mut nearby = std::collections::BTreeMap::<String, Box<mdns_sd::ResolvedService>>::new();
+    let retry = Arc::new(Mutex::new(std::collections::BTreeMap::<
+        String,
+        (Instant, u32),
+    >::new()));
+    let mut scan = Instant::now() - Duration::from_secs(3);
+    let mut last_code = String::new();
+    let mut last_routes = Vec::new();
     while !stop.load(Ordering::Relaxed) {
         let enabled = shared.lock().is_ok_and(|s| s.config.enabled);
         if !enabled {
             if events.take().is_some() {
-                let _ = mdns.stop_browse("_retype-clip._tcp.local.");
+                if let Some(mdns) = &mdns {
+                    let _ = mdns.stop_browse("_retype-clip._tcp.local.");
+                }
             }
             nearby.clear();
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
         if events.is_none() {
-            events = mdns.browse("_retype-clip._tcp.local.").ok();
-            diagnostic(
-                &root,
-                "discovery_started",
-                json!({"success":events.is_some()}),
-            );
-        }
-        let Some(receiver) = events.as_ref() else {
-            std::thread::sleep(Duration::from_secs(3));
-            continue;
-        };
-        match receiver.recv_timeout(Duration::from_millis(200)) {
-            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
-                let id = info.get_property_val_str("id").unwrap_or("").to_owned();
-                if config::valid_id(&id) && (nearby.contains_key(&id) || nearby.len() < 64) {
-                    diagnostic(
-                        &root,
-                        "device_discovered",
-                        json!({"peer":id,"port":info.get_port(),"addresses":info.get_addresses_v4().into_iter().map(|ip|ip.to_string()).collect::<Vec<_>>(),"mode":info.get_property_val_str("mode").filter(|mode|matches!(*mode,"show"|"join")).unwrap_or("")}),
-                    );
-                    nearby.insert(id, info);
-                }
-            }
-            Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => {
-                nearby.retain(|_, info| info.get_fullname() != name);
-            }
-            Err(mdns_sd::RecvTimeoutError::Disconnected) => {
-                // A closed channel returns immediately instead of waiting for
-                // recv_timeout. Recreate the browse with backoff, never spin.
+            if let Some(mdns) = &mdns {
+                events = mdns.browse("_retype-clip._tcp.local.").ok();
                 diagnostic(
                     &root,
-                    "discovery_error",
-                    json!({"message":"设备发现已中断，稍后重试"}),
+                    "discovery_started",
+                    json!({"success":events.is_some()}),
                 );
-                events = None;
-                nearby.clear();
-                std::thread::sleep(Duration::from_secs(3));
-                continue;
             }
-            _ => {}
+        }
+        if let Some(receiver) = &events {
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                    let id = info.get_property_val_str("id").unwrap_or("").to_owned();
+                    if config::valid_id(&id) && (nearby.contains_key(&id) || nearby.len() < 64) {
+                        diagnostic(
+                            &root,
+                            "device_discovered",
+                            json!({"peer":id,"port":info.get_port()}),
+                        );
+                        nearby.insert(id, info);
+                    }
+                }
+                Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) => {
+                    nearby.retain(|_, i| i.get_fullname() != name)
+                }
+                Err(mdns_sd::RecvTimeoutError::Disconnected) => {
+                    events = None;
+                    nearby.clear();
+                }
+                _ => {}
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(200));
         }
         if scan.elapsed() < Duration::from_secs(3) {
             continue;
         }
         scan = Instant::now();
-        for (remote, info) in &nearby {
-            let Ok(s) = shared.lock() else { break };
-            let peer_mode = info.get_property_val_str("mode").unwrap_or("");
-            let pair = s.pair_until.is_some_and(|t| t > Instant::now())
-                && ((s.status.mode == "show" && peer_mode == "join")
-                    || (s.status.mode == "join" && peer_mode == "show"));
-            if !s.config.enabled
-                || remote == &s.config.id
-                || s.status.online.contains(remote)
-                || (!pair && !s.config.peers.iter().any(|p| &p.id == remote))
-                || (info.get_property_val_str("platform") == Some("macos") && s.config.id > *remote)
+        let Ok(s) = shared.lock() else { continue };
+        let routes: Vec<_> = s
+            .config
+            .peers
+            .iter()
+            .map(|p| (p.id.clone(), p.addresses.clone()))
+            .collect();
+        if last_code != s.pair_code || last_routes != routes {
+            last_routes = routes;
+            if let Ok(mut r) = retry.lock() {
+                r.clear();
+            }
+            last_code = s.pair_code.clone();
+        }
+        let mut targets = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
+        for peer in &s.config.peers {
+            if !peer.addresses.is_empty() {
+                targets.insert(peer.id.clone(), (peer.id.clone(), peer.addresses.clone()));
+            }
+        }
+        let pairing = s.pair_until.is_some_and(|t| t > Instant::now());
+        for (id, info) in &nearby {
+            let opposite = (s.status.mode == "show"
+                && info.get_property_val_str("mode") == Some("join"))
+                || (s.status.mode == "join" && info.get_property_val_str("mode") == Some("show"));
+            let known = s.config.peers.iter().any(|p| &p.id == id);
+            if !known
+                && (!pairing
+                    || !opposite
+                    || s.target.is_some()
+                    || (info.get_property_val_str("dial") == Some("1") && s.config.id > *id))
             {
                 continue;
             }
-            let id = remote.clone();
-            drop(s);
-            let Ok(mut connecting) = active.lock() else {
-                break;
-            };
-            if !connecting.insert(id.clone()) {
+            if id == &s.config.id {
                 continue;
             }
-            drop(connecting);
-            let Some(ip) = info
-                .get_addresses_v4()
-                .into_iter()
-                .find(|ip| lan_address(IpAddr::V4(*ip)))
-            else {
-                if let Ok(mut a) = active.lock() {
-                    a.remove(&id);
+            let entry = targets
+                .entry(id.clone())
+                .or_insert_with(|| (id.clone(), Vec::new()));
+            for ip in info.get_addresses_v4() {
+                if lan_address(IpAddr::V4(ip)) {
+                    let a = format!("{ip}:{}", info.get_port());
+                    if !entry.1.contains(&a) {
+                        entry.1.push(a);
+                    }
                 }
+            }
+        }
+        if pairing {
+            if let Some(target) = &s.target {
+                targets.insert(
+                    format!("pair:{target}"),
+                    (String::new(), vec![target.clone()]),
+                );
+            }
+        }
+        let local_id = s.config.id.clone();
+        let online = s.status.online.clone();
+        drop(s);
+        for (key, (id, addresses)) in targets {
+            if online.contains(&id) || addresses.is_empty() {
+                continue;
+            }
+            if retry
+                .lock()
+                .is_ok_and(|r| r.get(&key).is_some_and(|(at, _)| *at > Instant::now()))
+            {
+                continue;
+            }
+            let Ok(mut busy) = active.lock() else {
                 continue;
             };
-            let address = std::net::SocketAddr::new(IpAddr::V4(ip), info.get_port());
+            if busy.len() >= 8 || !busy.insert(key.clone()) {
+                continue;
+            }
+            drop(busy);
             let state = Arc::clone(&shared);
             let quit = Arc::clone(&stop);
             let clips = Arc::clone(&clipboard);
             let folder = root.clone();
             let active = Arc::clone(&active);
+            let retry = Arc::clone(&retry);
+            let local_id = local_id.clone();
             std::thread::spawn(move || {
-                diagnostic(
-                    &folder,
-                    "connection_started",
-                    json!({"peer":id,"address":address.to_string()}),
-                );
-                let result = connect(address, &id, &state, &quit, &clips, &folder);
-                diagnostic(
-                    &folder,
-                    "connection_ended",
-                    json!({"peer":id,"address":address.to_string(),"error":result.as_ref().err()}),
-                );
-                if let Ok(mut a) = active.lock() {
-                    a.remove(&id);
+                // Stagger simultaneous dials while still allowing either reachable direction.
+                if !id.is_empty() && local_id > id {
+                    std::thread::sleep(Duration::from_millis(1500));
                 }
-                if let Err(message) = result {
-                    if let Ok(mut s) = state.lock() {
-                        if pair {
-                            s.pair_until = None;
-                            s.status.message = message;
-                        }
-                    }
+                let success =
+                    connect_candidates(&addresses, &id, &state, &quit, &clips, &folder).is_ok();
+                if let Ok(mut r) = retry.lock() {
+                    let n = if success {
+                        0
+                    } else {
+                        r.get(&key).map_or(0, |(_, n)| *n).saturating_add(1)
+                    };
+                    let seconds = if success {
+                        1
+                    } else {
+                        (3u64.saturating_mul(1u64 << n.min(4))).min(30)
+                    };
+                    r.insert(
+                        key.clone(),
+                        (Instant::now() + Duration::from_secs(seconds), n),
+                    );
+                }
+                if let Ok(mut busy) = active.lock() {
+                    busy.remove(&key);
                 }
             });
         }
     }
-    let _ = mdns.shutdown();
+    if let Some(mdns) = mdns {
+        let _ = mdns.shutdown();
+    }
 }

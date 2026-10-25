@@ -18,6 +18,9 @@ fun LanPage() {
   val state by clipboard.state.collectAsState()
   var showJoin by remember { mutableStateOf(false) }
   var code by remember { mutableStateOf("") }
+  var address by remember { mutableStateOf("") }
+  var editAddress by remember { mutableStateOf(false) }
+  var savedAddresses by remember(state.addresses) { mutableStateOf(state.addresses) }
   var now by remember { mutableStateOf(System.currentTimeMillis()) }
   LaunchedEffect(state.expires) {
     now = System.currentTimeMillis()
@@ -37,8 +40,15 @@ fun LanPage() {
         Switch(state.enabled, clipboard::enable)
       }
       Text(state.message, style = MaterialTheme.typography.bodySmall)
+      Text("支持物理局域网和 Tailscale，连接后自动重连。",style=MaterialTheme.typography.bodySmall)
       if (state.name.isNotEmpty()) {
         Text(state.name)
+        if(state.connection.isNotEmpty()) Text(state.connection,style=MaterialTheme.typography.bodySmall)
+        TextButton(onClick={editAddress=!editAddress}) {Text("连接地址…")}
+        if(editAddress) {
+          OutlinedTextField(savedAddresses,{savedAddresses=it},label={Text("IP 或域名，可附带端口")},supportingText={Text("多个地址用逗号分隔；补充 Tailscale 地址无需重新关联")},modifier=Modifier.fillMaxWidth())
+          TextButton(onClick={clipboard.setAddresses(savedAddresses)}) {Text("保存地址")}
+        }
         TextButton(onClick = clipboard::unlink) { Text("解除关联") }
       }
       if (state.enabled) {
@@ -79,6 +89,7 @@ fun LanPage() {
     Card {
       Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("输入另一台设备的匹配码")
+        OutlinedTextField(address,{address=it},label={Text("设备地址（可选）")},supportingText={Text("例如 home:50206；留空自动发现局域网设备")},singleLine=true,modifier=Modifier.fillMaxWidth())
         OutlinedTextField(
             code,
             { code = it.filter { c -> c in '0'..'9' }.take(6) },
@@ -90,9 +101,10 @@ fun LanPage() {
         Row {
           Button(
               onClick = {
-                clipboard.join(code)
-                code = ""
-                showJoin = false
+                if(clipboard.join(code,address)) {
+                  code = ""
+                  showJoin = false
+                }
               },
               enabled = code.matches(Regex("[0-9]{6}")),
           ) {

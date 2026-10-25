@@ -11,6 +11,9 @@ pub struct LanPage {
     last_poll: Instant,
     error: Option<String>,
     join_code: String,
+    join_address: String,
+    editing_peer: Option<(String, String)>,
+    listen_port: String,
     show_join: bool,
     job: Option<mpsc::Receiver<Result<(), String>>>,
 }
@@ -22,6 +25,9 @@ impl LanPage {
             last_poll: Instant::now() - Duration::from_secs(2),
             error: None,
             join_code: String::new(),
+            join_address: String::new(),
+            editing_peer: None,
+            listen_port: String::new(),
             show_join: false,
             job: None,
         }
@@ -49,6 +55,14 @@ impl LanPage {
                 .and_then(|root| lan::load_at(&root).map(|config| (config, lan::status_at(&root))))
             {
                 Ok((config, status)) => {
+                    if self.listen_port.is_empty() {
+                        self.listen_port = if config.port == 0 {
+                            lan::DEFAULT_PORT
+                        } else {
+                            config.port
+                        }
+                        .to_string();
+                    }
                     self.config = config;
                     self.status = status;
                 }
@@ -114,6 +128,11 @@ impl LanPage {
                         }
                         if self.show_join {
                             ui.add_space(12.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.join_address)
+                                    .hint_text("设备地址（可选），例如 home:50206；留空自动发现")
+                                    .desired_width(f32::INFINITY),
+                            );
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.join_code)
@@ -130,7 +149,15 @@ impl LanPage {
                                     )
                                     .clicked()
                                 {
-                                    self.command(ui.ctx(), Command::Join(self.join_code.clone()));
+                                    let command = if self.join_address.trim().is_empty() {
+                                        Command::Join(self.join_code.clone())
+                                    } else {
+                                        Command::JoinAddress {
+                                            code: self.join_code.clone(),
+                                            address: self.join_address.clone(),
+                                        }
+                                    };
+                                    self.command(ui.ctx(), command);
                                     self.join_code.clear();
                                 }
                                 if ui.button("取消").clicked() {
@@ -149,15 +176,82 @@ impl LanPage {
                                 } else {
                                     "离线"
                                 });
+                                if ui.button("连接地址…").clicked() {
+                                    self.editing_peer =
+                                        Some((peer.id.clone(), peer.addresses.join(", ")));
+                                }
                                 if ui.button("解除关联").clicked() {
-                                    self.command(ui.ctx(), Command::Remove(peer.id));
+                                    self.command(ui.ctx(), Command::Remove(peer.id.clone()));
                                 }
                             });
+                            if let Some(address) = self.status.connections.get(&peer.id) {
+                                ui.small(address);
+                            }
+                            if self
+                                .editing_peer
+                                .as_ref()
+                                .is_some_and(|(id, _)| id == &peer.id)
+                            {
+                                let mut edit = self.editing_peer.take().unwrap_or_default();
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut edit.1)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("IP 或域名，可附带端口；多个地址用逗号分隔"),
+                                );
+                                ui.small("补充 Tailscale 地址即可继续使用原绑定，无需匹配码。");
+                                let mut close = false;
+                                ui.horizontal(|ui| {
+                                    if ui.button("保存地址").clicked() {
+                                        self.command(
+                                            ui.ctx(),
+                                            Command::Address {
+                                                id: edit.0.clone(),
+                                                address: edit.1.clone(),
+                                            },
+                                        );
+                                        close = true;
+                                    }
+                                    if ui.button("取消").clicked() {
+                                        close = true;
+                                    }
+                                });
+                                if !close {
+                                    self.editing_peer = Some(edit);
+                                }
+                            }
                             ui.add_space(8.0);
                         }
                     }
                     ui.add_space(12.0);
-                    ui.label("两端需连接同一局域网；首次连接请允许防火墙的专用网络访问。");
+                    ui.label(
+                        "支持物理局域网和 Tailscale；指定地址时，请允许路由及防火墙访问同步端口。",
+                    );
+                    ui.collapsing("本机连接地址与端口", |ui| {
+                        for address in self.status.addresses.clone() {
+                            ui.horizontal(|ui| {
+                                ui.monospace(&address);
+                                if ui.small_button("复制").clicked() {
+                                    ui.ctx().copy_text(address);
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label("监听端口");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.listen_port)
+                                    .desired_width(90.0)
+                                    .char_limit(5),
+                            );
+                            if ui.button("应用").clicked() {
+                                match self.listen_port.parse::<u16>() {
+                                    Ok(port) if port > 0 => {
+                                        self.command(ui.ctx(), Command::Port(port))
+                                    }
+                                    _ => self.error = Some("端口范围为 1–65535".into()),
+                                }
+                            }
+                        });
+                    });
                 });
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::RED, error);
