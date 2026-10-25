@@ -76,6 +76,7 @@ void RTRegisterHooks(void);
 
 void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible);
 void RTUpdateLog(NSString *stage, BOOL success);
+void RTUpdateSaveLog(BOOL saved, NSString *reason);
 
 @interface RTSettings : NSWindowController
 + (instancetype)shared;

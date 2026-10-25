@@ -290,7 +290,7 @@ fn termination_barrier_flushes_only_acknowledged_learning_and_numeric_statistics
         let output = rt_runtime_flush(&handle);
         let result: Value = serde_json::from_str(CStr::from_ptr(output).to_str().unwrap()).unwrap();
         rt_string_free(output);
-        assert_eq!(result, true);
+        assert_eq!(result, json!({"saved":true}));
     }
     let rows =
         retype_sync::statistics::capture(&path.with_extension("statistics"), &"a".repeat(32))
