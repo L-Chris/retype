@@ -13,14 +13,14 @@ static NSTextField *RTLabel(NSString *text, CGFloat size) {
     return label;
 }
 // Metadata only: no field values, provider URLs, credentials or input text.
-static void RTWriteSettingsLog(NSDictionary *entry) {
+static void RTWriteDiagnosticLog(NSString *filename, NSDictionary *entry) {
     static dispatch_queue_t queue;static dispatch_once_t once;
     dispatch_once(&once,^{queue=dispatch_queue_create("retype.settings.diagnostics",DISPATCH_QUEUE_SERIAL);});
     dispatch_async(queue,^{
         NSString *directory=[RTDataRoot() stringByAppendingPathComponent:@"logs"];
         NSFileManager *files=NSFileManager.defaultManager;
         [files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:NULL];
-        NSString *path=[directory stringByAppendingPathComponent:@"settings-performance.jsonl"];
+        NSString *path=[directory stringByAppendingPathComponent:filename];
         if([[files attributesOfItemAtPath:path error:NULL][NSFileSize] unsignedLongLongValue]>=262144){
             NSString *previous=[path stringByAppendingString:@".previous"];
             [files removeItemAtPath:previous error:NULL];[files moveItemAtPath:path toPath:previous error:NULL];
@@ -30,12 +30,16 @@ static void RTWriteSettingsLog(NSDictionary *entry) {
         @try{[handle seekToEndOfFile];[handle writeData:[NSJSONSerialization dataWithJSONObject:entry options:0 error:NULL]];[handle writeData:[@"\n" dataUsingEncoding:NSUTF8StringEncoding]];}@catch(NSException *e){(void)e;}@finally{[handle closeFile];}
     });
 }
+static void RTWriteSettingsLog(NSDictionary *entry) {RTWriteDiagnosticLog(@"settings-performance.jsonl",entry);}
 static void RTSettingsLog(NSString *event, NSInteger page, CFAbsoluteTime started, BOOL success) {
     double elapsed=MAX(0,(CFAbsoluteTimeGetCurrent()-started)*1000);
     RTWriteSettingsLog(@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":event,@"page":@(page),@"duration_ms":@(elapsed),@"success":@(success)});
 }
 void RTSettingsOpenLog(NSString *stage, NSString *source, BOOL visible) {
     RTWriteSettingsLog(@{@"time":@(NSDate.date.timeIntervalSince1970),@"event":@"settings_open",@"stage":stage,@"source":source,@"visible":@(visible),@"pid":@(NSProcessInfo.processInfo.processIdentifier),@"version":NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]?:@"test"});
+}
+void RTUpdateLog(NSString *stage, BOOL success) {
+    RTWriteDiagnosticLog(@"updates.jsonl",@{@"time":@(NSDate.date.timeIntervalSince1970),@"stage":stage,@"success":@(success),@"pid":@(NSProcessInfo.processInfo.processIdentifier),@"version":NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"]?:@"test"});
 }
 static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
     if([view isKindOfClass:NSSecureTextField.class]&&[view.identifier isEqual:path]){

@@ -109,6 +109,7 @@ RestartApplications=no
 [Files]
 Source: "platforms\windows\installer\update-*.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "platforms\windows\installer\refresh-hosts.ps1"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "platforms\windows\installer\firewall-migrate.ps1"; Flags: dontcopy
 Source: "assets\retype.ico"; DestDir: "{code:GetPayloadDir}"; DestName: "retype.ico"; Flags: ignoreversion
 ; Standalone Rust settings; keep the installed name compatible with older TIPs.
 Source: "{#BaseDir}\retype-settings-egui.exe"; DestDir: "{code:GetPayloadDir}\settings"; DestName: "retype.exe"; Flags: ignoreversion
@@ -125,7 +126,7 @@ Source: "{#BaseDir}\retype-update-launcher.exe"; DestDir: "{app}"; Flags: ignore
 ; Single per-user learning writer, independent of any application's TIP DLL.
 Source: "{#BaseDir}\retype-learning-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 Source: "{#BaseDir}\retype-ai-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
-Source: "{#BaseDir}\retype-sync-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
+Source: "{#BaseDir}\retype-sync-host.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion; AfterInstall: MigrateFirewallRules
 ; 终端调试台：M0 阶段唯一能真正体验输入链路的东西，必须有快捷方式
 Source: "{#BaseDir}\retype-diag.exe"; DestDir: "{code:GetPayloadDir}"; Flags: ignoreversion
 ; Converts optional dictionaries downloaded later in Settings. No optional data is bundled.
@@ -170,6 +171,8 @@ var
   SearchRefreshReady: Boolean;
   PayloadSuffix: String;
   Previous64, Previous32: String;
+  PreviousPayloadDir: String;
+  FirewallMigrationAttempted: Boolean;
   InstallCommitted, RegistrationStarted: Boolean;
 
 function GetPayloadDir(Param: String): String;
@@ -187,11 +190,32 @@ begin
   Result := GetSHA256OfFile(GetPayloadDir('') + '\x86\retype_ime.dll');
 end;
 
+procedure MigrateFirewallRules;
+var
+  ResultCode: Integer;
+  Params: String;
+begin
+  // Run elevated before publishing ActiveDir or starting the new user hosts.
+  ExtractTemporaryFile('firewall-migrate.ps1');
+  FirewallMigrationAttempted := PreviousPayloadDir <> '';
+  Params := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\firewall-migrate.ps1') + '" -InstallRoot "' + ExpandConstant('{app}') + '" -Directory "' + GetPayloadDir('') + '"';
+  if PreviousPayloadDir <> '' then Params := Params + ' -PreviousDirectory "' + PreviousPayloadDir + '"';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Params,
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Log('Could not start firewall authorization migration')
+  else
+    Log(Format('Firewall authorization migration: %d', [ResultCode]));
+end;
+
 function InitializeSetup: Boolean;
 begin
   PayloadSuffix := GetDateTimeString('yyyymmddhhnnss', '-', ':') + '-' + IntToStr(Random(1000000));
   RegQueryStringValue(HKLM64, 'Software\Classes\CLSID\{#TipCLSID}\InprocServer32', '', Previous64);
   RegQueryStringValue(HKLM32, 'Software\Classes\CLSID\{#TipCLSID}\InprocServer32', '', Previous32);
+  RegQueryStringValue(HKLM64, 'SOFTWARE\retype', 'ActiveDir', PreviousPayloadDir);
+  if (PreviousPayloadDir = '') and (Previous64 <> '') then
+    PreviousPayloadDir := ExtractFileDir(Previous64);
   Result := True;
 end;
 
@@ -211,6 +235,10 @@ var
   Code: Integer;
 begin
   if RegistrationStarted and not InstallCommitted then begin
+    if FirewallMigrationAttempted and FileExists(PreviousPayloadDir + '\retype-sync-host.exe') then
+      Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+        '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\firewall-migrate.ps1') + '" -InstallRoot "' + ExpandConstant('{app}') + '" -PreviousDirectory "' + GetPayloadDir('') + '" -Directory "' + PreviousPayloadDir + '"',
+        '', SW_HIDE, ewWaitUntilTerminated, Code);
     if (Previous64 <> '') and FileExists(Previous64) then
       Exec(ExpandConstant('{sys}\regsvr32.exe'), '/s "' + Previous64 + '"', '', SW_HIDE, ewWaitUntilTerminated, Code);
     if (Previous32 <> '') and FileExists(Previous32) then

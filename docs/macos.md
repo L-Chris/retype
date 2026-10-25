@@ -62,6 +62,8 @@ bash platforms/macos/install.sh /path/to/retype.app
 
 ## 存储与线程
 
+更新过程分别显示下载校验、解压检查、安装准备、保存与重启阶段。安装脚本验证就绪后才退出输入法；退出保存失败会取消安装并允许重试，替换或注册失败会尝试恢复旧应用。`logs/updates.jsonl` 记录应用更新阶段，`logs/update-install.log` 记录安装与失败原因，`updates/install-state.json` 保存最终状态；日志位于下述用户数据目录，不包含输入文本或凭证。
+
 用户数据：`~/Library/Application Support/retype/`，其中 `dictionaries/` 为共享只读映射词库，`learning.db` 为 SQLite 个人学习，`learning.statistics/` 为数字统计日志，`sync/` 为同步状态。普通设置由当前输入法 bundle 的 UserDefaults 保存，API Key、WebDAV 密码和配对凭证使用 macOS 钥匙串。所有输入会话共享一份系统词库和学习缓存，失去焦点时释放会话及工作线程；输入进程独立运行，不向每个应用加载 DLL。
 
 按键回调不下载文件、不打开数据库。英文纠错使用现有异步后端并检查输入代次；候选宽度由 AppKit 测量后传给内核，使分页、数字选词与显示范围一致。切换输入框结束轮询并清空旧状态，过期选词请求不生效。学习只在客户端 `insertText` 返回后入队，异常时拒绝该次学习；退出前等待已确认学习和统计写入。InputMethodKit 的插入接口没有可验证的布尔回执，因此无法确认应用内部的后续异步拒绝。系统安全输入框通常会绕过第三方输入法，仍需真机验证。

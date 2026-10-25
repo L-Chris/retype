@@ -59,6 +59,7 @@
 
 static NSDictionary *RTCopyDocument(void){NSData *d=[NSJSONSerialization dataWithJSONObject:RTPreferences.shared.value options:0 error:NULL];return [NSJSONSerialization JSONObjectWithData:d options:NSJSONReadingMutableContainers error:NULL];}
 static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type":@"cloudAccount",@"config":config})[@"value"]?:@"";}
+static NSDictionary *RTInstallState(void){NSData *data=[NSData dataWithContentsOfFile:[RTDataRoot() stringByAppendingPathComponent:@"updates/install-state.json"]];id state=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL]:nil;return [state isKindOfClass:NSDictionary.class]?state:@{};}
 
 @implementation RTAppDelegate (Features)
 - (void)feature:(NSDictionary *)request completion:(void (^)(NSDictionary *))completion {
@@ -157,9 +158,10 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
     if(![NSBundle.mainBundle.bundlePath isEqual:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Input Methods/retype.app"]]){self.messages[@9]=@"请先安装输入法，再使用自动更新";[RTSettings refreshIfLoaded];return;}
     NSAlert *confirm=[NSAlert new];confirm.messageText=[@"安装 retype " stringByAppendingString:self.update[@"version"]];confirm.informativeText=@"安装后将重启输入法，应用和个人数据会保留。";[confirm addButtonWithTitle:@"下载并安装"];[confirm addButtonWithTitle:@"取消"];
     if([confirm runModal]!=NSAlertFirstButtonReturn)return;
-    [self.jobs addObject:@"updates"];self.messages[@9]=@"正在下载并校验…";[RTSettings refreshIfLoaded];
+    [self.jobs addObject:@"updates"];self.messages[@9]=@"正在下载安装包并校验…";RTUpdateLog(@"download_started",YES);[RTSettings refreshIfLoaded];
     [self feature:@{@"type":@"downloadUpdate",@"release":self.update} completion:^(NSDictionary *r){
-        if(r[@"error"]){[self.jobs removeObject:@"updates"];self.messages[@9]=r[@"error"];[RTSettings refreshIfLoaded];return;}
+        if(r[@"error"]){RTUpdateLog(@"download_failed",NO);[self.jobs removeObject:@"updates"];self.messages[@9]=r[@"error"];[RTSettings refreshIfLoaded];return;}
+        RTUpdateLog(@"download_verified",YES);self.messages[@9]=@"正在解压并检查安装包…";[RTSettings refreshIfLoaded];
         NSString *archive=r[@"value"][@"path"],*version=r[@"value"][@"version"];
         NSString *helper=[NSBundle.mainBundle pathForResource:@"update" ofType:@"sh"],*bundle=NSBundle.mainBundle.bundlePath;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
@@ -170,15 +172,32 @@ static NSString *RTCloudAccount(NSDictionary *config){return RTFeature(@{@"type"
             NSString *source=[directory stringByAppendingPathComponent:@"retype-macos/retype.app"];
             NSDictionary *info=[NSDictionary dictionaryWithContentsOfFile:[source stringByAppendingPathComponent:@"Contents/Info.plist"]];
             ok=ok&&[info[@"CFBundleIdentifier"] isEqual:@"io.github.retype.inputmethod.Retype"]&&[info[@"CFBundleShortVersionString"] isEqual:version];
+            if(ok){NSTask *verify=[NSTask new];verify.executableURL=[NSURL fileURLWithPath:@"/usr/bin/codesign"];verify.arguments=@[@"--verify",@"--strict",source];ok=[verify launchAndReturnError:NULL];if(ok){[verify waitUntilExit];ok=verify.terminationStatus==0;}}
             dispatch_async(dispatch_get_main_queue(),^{
+                RTUpdateLog(ok?@"package_verified":@"package_invalid",ok);
                 if(!ok||!helper){[self.jobs removeObject:@"updates"];self.messages[@9]=@"更新包无效";[RTSettings refreshIfLoaded];return;}
                 NSTask *installer=[NSTask new];installer.executableURL=[NSURL fileURLWithPath:@"/bin/bash"];installer.arguments=@[helper,source,bundle,[NSString stringWithFormat:@"%d",NSProcessInfo.processInfo.processIdentifier]];
-                if([installer launchAndReturnError:NULL])[NSApp terminate:nil];else{[self.jobs removeObject:@"updates"];self.messages[@9]=@"无法启动安装程序";[RTSettings refreshIfLoaded];}
+                if([installer launchAndReturnError:NULL]){
+                    self.updateInstaller=installer;
+                    self.messages[@9]=@"正在检查安装环境…";[RTSettings refreshIfLoaded];
+                    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0),^{
+                        BOOL ready=NO;NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:15];
+                        while(installer.running&&deadline.timeIntervalSinceNow>0){NSDictionary *state=RTInstallState();if([state[@"pid"] intValue]==installer.processIdentifier&&[state[@"stage"] isEqual:@"running"]&&[state[@"step"] isEqual:@"waiting_for_exit"]){ready=YES;break;}[NSThread sleepForTimeInterval:.05];}
+                        if(!ready&&installer.running)[installer terminate];
+                        dispatch_async(dispatch_get_main_queue(),^{
+                            RTUpdateLog(ready?@"waiting_for_exit":@"installer_not_ready",ready);
+                            if(ready){self.messages[@9]=@"正在保存输入记录并重启输入法…";[RTSettings refreshIfLoaded];[NSApp performSelector:@selector(terminate:) withObject:nil afterDelay:0];}
+                            else{self.updateInstaller=nil;[self.jobs removeObject:@"updates"];self.messages[@9]=@"安装准备失败，请重试；详细记录见 logs/update-install.log";[RTSettings refreshIfLoaded];}
+                        });
+                    });
+                }
+                else{RTUpdateLog(@"installer_start_failed",NO);[self.jobs removeObject:@"updates"];self.messages[@9]=@"无法启动安装程序";[RTSettings refreshIfLoaded];}
             });
         });
     }];
 }
 - (void)startMaintenance {
+    if([RTInstallState()[@"stage"] isEqual:@"failed"]){self.messages[@9]=@"上次更新安装未完成，请重试；详细记录见 logs/update-install.log";}
     __weak RTAppDelegate *weakSelf=self;
     self.maintenance=[NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer *timer){(void)timer;RTAppDelegate *app=weakSelf;if(!app)return;
         NSTimeInterval now=NSDate.date.timeIntervalSince1970;
