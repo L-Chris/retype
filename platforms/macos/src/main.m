@@ -70,7 +70,7 @@ NSString *RTDataRoot(void) {
 }
 - (void)finishTermination:(NSDictionary *)result {
     BOOL saved=!result[@"error"];RTUpdateLog(saved?@"saved_before_exit":@"save_failed",saved);
-    if(!saved){if(self.updateInstaller.running)[self.updateInstaller terminate];self.updateInstaller=nil;[self.jobs removeObject:@"updates"];self.messages[@9]=@"保存输入记录失败，已取消退出，请重试";[RTSettings refreshIfLoaded];}
+    if(!saved){if(self.updateInstaller.running)[self.updateInstaller terminate];self.updateInstaller=nil;[self.jobs removeObject:@"updates"];if(self.maintenance)[self startMaintenance];self.messages[@9]=@"保存输入记录失败，已取消退出，请重试";[RTSettings refreshIfLoaded];}
     [NSApp replyToApplicationShouldTerminate:saved];
 }
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)visible {
