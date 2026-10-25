@@ -50,7 +50,6 @@ internal data class UpdateStatus(
 
 internal object AppUpdates {
   private const val API = "https://api.github.com/repos/L-Chris/retype/releases?per_page=30"
-  private const val ASSET_API = "https://api.github.com/repos/L-Chris/retype/releases/assets/"
   private const val API_VERSION = "2026-03-10"
   private const val MAX_APK = 256L * 1024 * 1024
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -59,53 +58,21 @@ internal object AppUpdates {
   val status = mutableStatus.asStateFlow()
   private var job: Job? = null
 
-  internal fun versionCode(version: String): Int {
-    require(version.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+"))) { "无效版本号" }
-    val p = version.split('.').map { it.toInt() }
-    require(p[0] <= 200000 && p[1] <= 99 && p[2] <= 99) { "版本号超出范围" }
-    return p[0] * 10000 + p[1] * 100 + p[2]
-  }
+  internal fun versionCode(version: String): Int = JSONObject(NativeBridge.feature(
+      JSONObject().put("type", "updateVersionCode").put("version", version).toString())).getInt("code")
 
   internal fun parseReleases(text: String, supportedAbis: List<String> = Build.SUPPORTED_ABIS.toList()): AndroidRelease? {
     val releases = JSONArray(text)
-    val available = mutableListOf<AndroidRelease>()
-    for (i in 0 until releases.length()) {
-      val r = releases.getJSONObject(i)
-      if (r.optBoolean("draft") || r.optBoolean("prerelease")) continue
-      val tag = r.optString("tag_name")
-      if (!tag.startsWith("v")) continue
-      val version = tag.substring(1)
-      val code = runCatching { versionCode(version) }.getOrNull() ?: continue
-      val assets = r.optJSONArray("assets") ?: continue
-      for (name in AndroidPackages.names(version, supportedAbis)) {
-        var apk: JSONObject? = null
-        var hash: JSONObject? = null
-        for (a in 0 until assets.length()) {
-          val asset = assets.getJSONObject(a)
-          if (asset.optString("name") == name) apk = asset
-          if (asset.optString("name") == "$name.sha256") hash = asset
-        }
-        if (apk == null || hash == null) continue
-        val url = assetUrl(apk) ?: continue
-        val hashUrl = assetUrl(hash) ?: continue
-        val size = apk.optLong("size")
-        if (url == hashUrl || size !in 1..MAX_APK) continue
-        available += AndroidRelease(version, code, url, hashUrl, size, r.optString("body").take(24000))
-        break
-      }
-    }
-    return available.maxByOrNull { it.code }
+    return runCatching {
+      val result = JSONObject(NativeBridge.feature(JSONObject().put("type", "updateSelect")
+          .put("releases", releases).put("abis", JSONArray(supportedAbis)).toString()))
+      val r = result.optJSONObject("release") ?: return null
+      AndroidRelease(r.getString("version"), r.getInt("code"), r.getString("url"), r.getString("hashUrl"), r.getLong("size"), r.getString("notes"))
+    }.getOrNull()
   }
 
-  private fun assetUrl(asset: JSONObject): String? {
-    val id = asset.optLong("id")
-    return "$ASSET_API$id".takeIf { id > 0 && asset.optString("url") == it }
-  }
-
-  private fun isAssetUrl(url: String): Boolean {
-    val id = url.removePrefix(ASSET_API).toLongOrNull() ?: return false
-    return id > 0 && url == "$ASSET_API$id"
-  }
+  private fun isAssetUrl(url: String): Boolean = JSONObject(NativeBridge.feature(
+      JSONObject().put("type", "updateAsset").put("url", url).toString())).getBoolean("valid")
 
   internal fun cachedRelease(text: String): AndroidRelease? = runCatching {
     val cached = JSONObject(text)

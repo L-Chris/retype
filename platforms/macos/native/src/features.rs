@@ -1,7 +1,6 @@
 use retype_ai::config::{Config as AiConfig, Provider};
 use retype_dict::{Layer, LayeredDict};
 use retype_sync::statistics::Bucket;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
@@ -13,19 +12,9 @@ type Result<T> = std::result::Result<T, String>;
 #[cfg(test)]
 #[path = "feature_tests.rs"]
 mod tests;
-#[derive(Deserialize)]
-pub struct Pack {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub bytes: u64,
-    pub sha256: String,
-}
+pub use retype_resources::packs::Pack;
 pub fn packs() -> Result<Vec<Pack>> {
-    serde_json::from_str(include_str!(
-        "../../../../apps/settings-egui/dictionary-packs.json"
-    ))
-    .map_err(|e| e.to_string())
+    retype_resources::packs::catalog()
 }
 fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key].as_str().ok_or_else(|| format!("Missing {key}"))
@@ -115,24 +104,9 @@ fn install_pack(root: &Path, id: &str) -> Result<Value> {
     {
         return Ok(json!({"installed":true}));
     }
-    let raw = read_url(
-        &format!(
-            "https://raw.githubusercontent.com/amzxyz/rime-wanxiang/v18.0.14/dicts/{}.dict.yaml",
-            pack.id
-        ),
-        pack.bytes,
-        false,
-    )?;
-    if raw.len() as u64 != pack.bytes || retype_updater::sha256_hex(&raw) != pack.sha256 {
-        return Err("词库校验失败".into());
-    }
-    let tsv = retype_dict::rime::tsv(std::io::BufReader::new(raw.as_slice()))?;
+    let raw = read_url(&pack.source_url(), pack.bytes, false)?;
     let staging = path.with_extension(format!("{}.download", retype_ai::config::new_id()));
-    let mut file = std::fs::File::create(&staging).map_err(|e| e.to_string())?;
-    retype_dict::binary::compile(std::io::Cursor::new(tsv), &mut file)
-        .map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
+    retype_resources::packs::compile_bytes(&pack, &raw, &staging)?;
     let mut permissions = std::fs::metadata(&staging)
         .map_err(|e| e.to_string())?
         .permissions();
@@ -307,17 +281,6 @@ pub fn perform(v: Value) -> Result<Value> {
         _=>retype_services::perform(v),
     }
 }
-fn asset_url(asset: &Value) -> Result<String> {
-    let id = asset["id"]
-        .as_u64()
-        .filter(|id| *id > 0)
-        .ok_or("更新附件身份无效")?;
-    let expected = format!("https://api.github.com/repos/L-Chris/retype/releases/assets/{id}");
-    if asset["url"] != expected {
-        return Err("更新附件地址无效".into());
-    }
-    Ok(expected)
-}
 fn check_update() -> Result<Value> {
     let bytes = read_url(
         "https://api.github.com/repos/L-Chris/retype/releases?per_page=30",
@@ -329,56 +292,22 @@ fn check_update() -> Result<Value> {
 fn parse_updates(releases: &Value) -> Result<Value> {
     let current =
         retype_updater::parse_version(env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
-    let mut selected = None;
-    for release in releases.as_array().ok_or("更新列表无效")? {
-        if release["draft"].as_bool() != Some(false)
-            || release["prerelease"].as_bool() != Some(false)
-        {
-            continue;
-        }
-        let Some(tag) = release["tag_name"].as_str() else {
-            continue;
-        };
-        let Ok(version) = retype_updater::parse_version(tag) else {
-            continue;
-        };
-        if version <= current || selected.as_ref().is_some_and(|(v, _)| *v >= version) {
-            continue;
-        }
-        let name = format!("retype-{}-macos-universal.zip", tag.trim_start_matches('v'));
-        let Some(assets) = release["assets"].as_array() else {
-            continue;
-        };
-        let Some(zip) = assets.iter().find(|a| a["name"] == name) else {
-            continue;
-        };
-        let Some(hash) = assets
-            .iter()
-            .find(|a| a["name"] == format!("{name}.sha256"))
-        else {
-            continue;
-        };
-        let size = zip["size"]
-            .as_u64()
-            .filter(|n| *n > 0 && *n <= 256 * 1024 * 1024)
-            .ok_or("更新文件大小无效")?;
-        selected = Some((
-            version,
-            json!({"version":tag.trim_start_matches('v'),"url":asset_url(zip)?,"hashUrl":asset_url(hash)?,"size":size,"notes":release["body"].as_str().unwrap_or("")}),
-        ));
-    }
-    Ok(selected
-        .map(|(_, v)| v)
-        .unwrap_or_else(|| json!({"current":true})))
+    retype_updater::package::select(
+        releases,
+        &[retype_updater::Platform::MacosUniversal],
+        Some(&current),
+    )
+    .map_err(|e| e.to_string())?
+    .map(|p| serde_json::to_value(p).map_err(|e| e.to_string()))
+    .unwrap_or_else(|| Ok(json!({"current":true})))
 }
 fn download_update(root: &Path, release: &Value) -> Result<Value> {
-    let valid = |url: &str| {
-        url.strip_prefix("https://api.github.com/repos/L-Chris/retype/releases/assets/")
-            .is_some_and(|id| id.parse::<u64>().is_ok_and(|n| n > 0))
-    };
     let url = field(release, "url")?;
     let hash_url = field(release, "hashUrl")?;
-    if !valid(url) || !valid(hash_url) || url == hash_url {
+    if !retype_updater::package::valid_asset_url(url)
+        || !retype_updater::package::valid_asset_url(hash_url)
+        || url == hash_url
+    {
         return Err("更新附件地址无效，请重新检查更新".into());
     }
     let hash_bytes = read_url(hash_url, 4096, true)?;

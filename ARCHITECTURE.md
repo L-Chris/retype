@@ -283,6 +283,9 @@ pub trait KernelBackend: Send + Sync {
 
 ```text
 core/
+  ai/          retype-ai-core    共享提供商配置、翻译 prompt、模型协议和语音会话
+  sync/        retype-sync-core  同步 schema、冲突合并、统计交换、剪贴板协议、地址策略与配对
+  services/    retype-services   Android/macOS 公共功能桥接；仅依赖 core 内模块
   types/       retype-types      领域类型，零依赖（InputEvent/RenderState/Candidate/…）
   pinyin/      retype-pinyin     音节表 · 切分 · 词格 · Viterbi k-best · 模糊音/简拼
   dict/        retype-dict       SystemDict(mmap) · UserDict · 分层加权 · 学习 · AsyncDict(异步加载)
@@ -307,7 +310,7 @@ tools/dict-build/                词库构建：词频表 + 拼音 → dict.bin
 data/dict/                       词库源数据
 ```
 
-依赖方向严格单向（CI 用「内核 crate 在 ubuntu 上编译」这条 job 强制检查）：
+依赖方向严格单向。CI 同时运行 Linux 编译与 `tools/ci/check-core-boundaries.py`，禁止 core 包依赖 `platforms/` 下的适配器：
 
 ```text
 types ◄── pinyin ◄── dict ◄── engine ──► tsf / ffi
@@ -320,7 +323,9 @@ updater（独立，只依赖 serde_json/sha2）──► platforms/windows/updat
 
 **铁律**：`core/*` 里不允许出现 `windows` crate（用 `#[cfg(windows)]` 隔离的平台胶水除外，且只能放在 `platforms/`）。这条规则由 CI 的 `core-portability` job 在 **ubuntu** 上编译全部内核 crate 来强制 —— 一旦有人在 `core/` 里引了平台 API，那个 job 会先红。
 
-同理 `core/updater` 不含任何网络实现，HTTP 走 `HttpFetcher` trait，真实实现（`ureq`）只在 `platforms/windows/updater` 里。详见 [docs/auto-update.md](./docs/auto-update.md)。
+`core/updater` 共用版本解析、平台产物命名、正式版筛选和附件校验规则，不含网络实现。Windows HTTP 走 `HttpFetcher` trait；macOS/Android 调用共享选择器，网络下载、签名验证和安装由各端负责。可选词库目录、来源校验与编译统一位于 `core/resources::packs`。详见 [docs/auto-update.md](./docs/auto-update.md)。
+
+统计的字符分类、上屏耗时分配、速度舍入、回改采集与长度分桶统一位于 `core/types::statistics`；Android 通过数值 JNI 接口复用，SQLite、日志文件和图表由平台管理。外端专属设置字段会随快照保留，但不触发本端配置写入。凭据、麦克风、剪贴板、系统输入接口和进程管理继续留在平台适配层。
 
 ---
 

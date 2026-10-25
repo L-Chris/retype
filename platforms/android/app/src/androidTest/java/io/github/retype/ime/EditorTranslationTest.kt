@@ -22,7 +22,7 @@ class EditorTranslationTest {
         val original = store.ai()
         val originalShortcuts = store.prefs.getString("shortcuts", null)
         val oldIme = device.executeShellCommand("settings get secure default_input_method").trim()
-        val ime = "io.github.retype.ime/.RetypeImeService"
+        val ime = android.content.ComponentName(context, RetypeImeService::class.java).flattenToShortString()
         val wasEnabled =
             device.executeShellCommand("ime list -s").lineSequence().any { it.trim() == ime }
         val server =
@@ -109,7 +109,8 @@ class EditorTranslationTest {
                 .commit()
             device.executeShellCommand("ime enable $ime")
             device.executeShellCommand("ime set $ime")
-            device.executeShellCommand("am start -W -n io.github.retype.ime/.EditorFixtureActivity")
+            val activity = android.content.ComponentName(context, EditorFixtureActivity::class.java).flattenToShortString()
+            device.executeShellCommand("am start -W -n $activity")
             val editor = find(androidx.test.uiautomator.By.desc("editor-normal"))!!
             editor.click()
             editor.text = "Hello"
@@ -123,7 +124,13 @@ class EditorTranslationTest {
             if (android.os.Build.VERSION.SDK_INT >= 33) instrumentation.uiAutomation.clearCache()
             assertFalse(device.hasObject(androidx.test.uiautomator.By.text("已翻译")))
             find(androidx.test.uiautomator.By.desc("editor-normal"))!!.text = "Hello again"
-            device.executeShellCommand("input keycombination 113 57 7")
+            // Accessibility text replacement can restart the input connection.
+            // Wait for that connection, then inject one chord with explicit modifiers.
+            find(androidx.test.uiautomator.By.desc("editor-normal"))!!.click()
+            instrumentation.waitForIdleSync()
+            device.waitForIdle()
+            assertTrue(device.pressKeyCode(android.view.KeyEvent.KEYCODE_0,
+                android.view.KeyEvent.META_CTRL_ON or android.view.KeyEvent.META_ALT_ON))
             assertNotNull(
                 "Ctrl+Alt+0 must trigger translation",
                 find(androidx.test.uiautomator.By.text("你好"), 15000),

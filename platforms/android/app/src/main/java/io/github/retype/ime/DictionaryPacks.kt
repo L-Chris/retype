@@ -15,10 +15,7 @@ object DictionaryPacks {
     private val mutex = Mutex()
 
     fun catalog(context: Context): List<JSONObject> {
-        val array =
-            JSONArray(
-                context.assets.open("dictionary-packs.json").bufferedReader().use { it.readText() }
-            )
+        val array = JSONObject(NativeBridge.feature(JSONObject().put("type", "packCatalog").toString())).getJSONArray("packs")
         return List(array.length()) { array.getJSONObject(it) }
     }
 
@@ -83,9 +80,7 @@ object DictionaryPacks {
         val raw = File(root, "$id-$nonce.yaml")
         val binary = File(root, "$id-$nonce.tmp")
         val connection =
-            URL(
-                    "https://raw.githubusercontent.com/amzxyz/rime-wanxiang/v18.0.14/dicts/$id.dict.yaml"
-                )
+            URL(pack.getString("url"))
                 .openConnection() as HttpURLConnection
         connection.instanceFollowRedirects = false
         connection.connectTimeout = 20000
@@ -110,12 +105,10 @@ object DictionaryPacks {
                     out.fd.sync()
                 }
             }
-            check(count == expected && sha256(raw.readBytes()) == pack.getString("sha256")) {
-                "词库校验失败"
-            }
             NativeBridge.feature(
                 JSONObject()
-                    .put("type", "compilePack")
+                    .put("type", "compileVerifiedPack")
+                    .put("id", id)
                     .put("source", raw.absolutePath)
                     .put("destination", binary.absolutePath)
                     .toString()

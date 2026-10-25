@@ -1,4 +1,4 @@
-use retype_learning::protocol::SyncLearning;
+use retype_learning_store::protocol::SyncLearning;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +39,27 @@ pub struct Snapshot {
     pub statistics: Vec<crate::statistics::Bucket>,
 }
 impl State {
+    /// Only provider absence means deletion. Foreign platform fields remain in snapshots.
+    pub fn capture_settings(&mut self, device: &str, current: &BTreeMap<String, Value>) {
+        let mut values = current.clone();
+        for key in self
+            .fields
+            .keys()
+            .filter(|key| key.starts_with("providers/") && !current.contains_key(*key))
+        {
+            values.insert(key.clone(), Value::Null);
+        }
+        self.capture(device, &values);
+    }
+    /// Apply only settings owned by this adapter, plus provider additions/deletions.
+    pub fn values_for(&self, local: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+        self.fields
+            .iter()
+            .filter(|(k, _)| local.contains_key(*k) || k.starts_with("providers/"))
+            .map(|(k, f)| (k.clone(), f.value.clone()))
+            .collect()
+    }
+
     pub fn capture(&mut self, device: &str, values: &BTreeMap<String, Value>) {
         for (key, value) in values {
             if self.fields.get(key).is_some_and(|f| f.value == *value) {
@@ -161,6 +182,31 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn foreign_fields_are_forwarded_without_local_writes_and_provider_deletions_survive() {
+        let mut state = State::default();
+        let mac = BTreeMap::from([
+            ("shortcuts.macos".into(), serde_json::json!({"mode": 10})),
+            ("input.scheme".into(), serde_json::json!(0)),
+            (
+                "providers/deleted".into(),
+                serde_json::json!({"id": "deleted"}),
+            ),
+        ]);
+        state.capture("a", &mac);
+        let windows = BTreeMap::from([("input.scheme".into(), serde_json::json!(0))]);
+        state.capture_settings("b", &windows);
+        let revision = state.revision;
+        state.capture_settings("b", &windows);
+        assert_eq!(state.revision, revision);
+        assert!(state.values().contains_key("shortcuts.macos"));
+        assert!(!state.values_for(&windows).contains_key("shortcuts.macos"));
+        assert_eq!(state.values_for(&windows)["providers/deleted"], Value::Null);
+        assert_eq!(
+            state.values_for(&mac)["shortcuts.macos"],
+            mac["shortcuts.macos"]
+        );
+    }
     fn snapshot(state: &State) -> Snapshot {
         Snapshot {
             version: 1,

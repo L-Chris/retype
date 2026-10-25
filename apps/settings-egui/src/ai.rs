@@ -60,7 +60,7 @@ impl AiPages {
         self.voice_test = None;
     }
     pub fn new() -> Self {
-        let loaded = Config::load();
+        let loaded = retype_ai::config::load();
         let mut error = loaded
             .as_ref()
             .err()
@@ -117,9 +117,7 @@ impl AiPages {
                     .map_err(|_| "无法保存 API Key".to_string())?;
             }
         }
-        self.config
-            .save()
-            .map_err(|e| format!("无法保存 AI 配置：{e}"))?;
+        retype_ai::config::save(&self.config).map_err(|e| format!("无法保存 AI 配置：{e}"))?;
         for id in self.saved_keys.keys() {
             if !self.keys.contains_key(id) {
                 let _ = retype_ai::secrets::save_key(id, "");

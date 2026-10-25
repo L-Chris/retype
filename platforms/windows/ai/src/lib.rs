@@ -3,7 +3,7 @@ pub mod client;
 pub mod config;
 #[cfg(all(windows, feature = "service"))]
 pub mod microphone;
-pub mod protocol;
+pub use retype_ai_core::protocol;
 #[cfg(windows)]
 #[path = "credentials.rs"]
 pub mod secrets;
@@ -14,6 +14,4 @@ pub mod secrets;
 pub mod service;
 pub mod voice;
 #[cfg(feature = "service")]
-mod voice_live;
-#[cfg(feature = "service")]
-pub mod voice_service;
+pub use retype_ai_core::voice_service;

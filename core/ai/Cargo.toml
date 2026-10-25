@@ -1,0 +1,23 @@
+[package]
+name = "retype-ai-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+service = ["dep:ureq", "dep:tungstenite", "dep:url"]
+
+[dependencies]
+retype-types.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+base64 = "0.22"
+ureq = { workspace = true, optional = true }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
+url = { version = "2", optional = true }
+
+[lints]
+workspace = true

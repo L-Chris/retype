@@ -3,7 +3,11 @@ package io.github.retype.ime
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal val inputLengthLabels = listOf("1", "2", "3", "4", "5–10", "11+")
+internal val inputLengthLabels: List<String> by lazy {
+    val labels = JSONObject(NativeBridge.feature(JSONObject().put("type", "featurePolicy").toString())).getJSONObject("statistics").getJSONArray("lengthLabels")
+    List(labels.length()) { labels.getString(it) }
+}
+
 private fun sum(a: Long, b: Long) = if (a > Long.MAX_VALUE - b) Long.MAX_VALUE else a + b
 
 data class LengthCounts(val inputs: Long = 0, val corrected: Long = 0, val units: Long = 0) {
@@ -19,21 +23,16 @@ data class InputMeasurements(
     val spellingDeletions: Long = 0,
 ) {
     init { require(chinese.size == 20 && english.size == 20) }
-    fun grouped(ch: Boolean): List<LengthCounts> {
-        val rows = MutableList(6) { LengthCounts() }
-        (if (ch) chinese else english).forEachIndexed { i, value ->
-            val group = when (i + 1) { 1 -> 0; 2 -> 1; 3 -> 2; 4 -> 3; in 5..10 -> 4; else -> 5 }
-            rows[group] = rows[group] + value
-        }
-        return rows
+    private fun numeric(): LongArray = LongArray(122).also { out ->
+        (chinese + english).forEachIndexed { i, c -> out[i * 3] = c.inputs; out[i * 3 + 1] = c.corrected; out[i * 3 + 2] = c.units }
+        out[120] = cancelled; out[121] = spellingDeletions
     }
-    fun total(ch: Boolean) = (if (ch) chinese else english).fold(LengthCounts(), LengthCounts::plus)
-    operator fun plus(other: InputMeasurements) = combine(other, ::sum)
-    fun mergeMax(other: InputMeasurements) = combine(other, ::maxOf)
-    private fun combine(other: InputMeasurements, f: (Long, Long) -> Long): InputMeasurements {
-        fun rows(a: List<LengthCounts>, b: List<LengthCounts>) = a.zip(b) { x, y -> LengthCounts(f(x.inputs, y.inputs), f(x.corrected, y.corrected), f(x.units, y.units)) }
-        return InputMeasurements(rows(chinese, other.chinese), rows(english, other.english), f(cancelled, other.cancelled), f(spellingDeletions, other.spellingDeletions))
+    fun grouped(ch: Boolean): List<LengthCounts> = NativeBridge.statisticsMath(if (ch) 2 else 3, numeric()).let { a ->
+        List(a.size / 3) { i -> LengthCounts(a[i * 3], a[i * 3 + 1], a[i * 3 + 2]) }
     }
+    fun total(ch: Boolean): LengthCounts = NativeBridge.statisticsMath(if (ch) 4 else 5, numeric()).let { LengthCounts(it[0], it[1], it[2]) }
+    operator fun plus(other: InputMeasurements): InputMeasurements = fromNative(NativeBridge.statisticsMath(0, numeric(), other.numeric()))!!
+    fun mergeMax(other: InputMeasurements): InputMeasurements = fromNative(NativeBridge.statisticsMath(1, numeric(), other.numeric()))!!
     fun toJson(): JSONObject {
         fun rows(values: List<LengthCounts>) = JSONArray().also { a -> values.forEach { a.put(JSONObject().put("inputs", it.inputs).put("corrected", it.corrected).put("units", it.units)) } }
         return JSONObject().put("chinese", rows(chinese)).put("english", rows(english)).put("cancelled", cancelled).put("spelling_deletions", spellingDeletions)

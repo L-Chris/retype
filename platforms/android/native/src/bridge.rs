@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 use super::*;
 use jni::{
-    objects::{JClass, JObject, JObjectArray, JString, JValue},
+    objects::{JClass, JLongArray, JObject, JObjectArray, JString, JValue},
     sys::{jboolean, jint, jlong, jlongArray, jobject, jobjectArray, jstring},
     JNIEnv,
 };
@@ -312,4 +312,101 @@ pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsDestroy(
         statistics().lock().map_err(|e| e.to_string())?.remove(&id);
         Ok(())
     });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsCounts(
+    mut env: JNIEnv,
+    _: JClass,
+    text: JString,
+    elapsed: jlong,
+) -> jlongArray {
+    guard(&mut env, |env| {
+        let text: String = env.get_string(&text).map_err(|e| e.to_string())?.into();
+        let c = retype_types::statistics::commit_counts(&text, elapsed.max(0) as u64);
+        let values = [
+            c.chinese as i64,
+            c.english as i64,
+            c.chinese_ms as i64,
+            c.english_ms as i64,
+        ];
+        let array = env.new_long_array(4).map_err(|e| e.to_string())?;
+        env.set_long_array_region(&array, 0, &values)
+            .map_err(|e| e.to_string())?;
+        Ok(array.into_raw())
+    })
+}
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsSpeed(
+    mut env: JNIEnv,
+    _: JClass,
+    count: jlong,
+    ms: jlong,
+    minimum: jlong,
+) -> jlong {
+    guard(&mut env, |_| {
+        Ok(retype_types::statistics::speed(
+            count.max(0) as u64,
+            ms.max(0) as u64,
+            minimum.max(0) as u64,
+        )
+        .map_or(-1, |v| v.min(i64::MAX as u64) as i64))
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_io_github_retype_ime_NativeBridge_statisticsMath(
+    mut env: JNIEnv,
+    _: JClass,
+    operation: jint,
+    left: JLongArray,
+    right: JLongArray,
+) -> jlongArray {
+    guard(&mut env, |env| {
+        use retype_types::statistics::{InputStats, LengthCounts, LENGTH_BUCKETS};
+        let read = |env: &mut JNIEnv, array: JLongArray| -> Result<InputStats, String> {
+            if env.get_array_length(&array).map_err(|e| e.to_string())? as usize
+                != LENGTH_BUCKETS * 6 + 2
+            {
+                return Err("统计数组长度无效".into());
+            }
+            let mut values = vec![0i64; LENGTH_BUCKETS * 6 + 2];
+            env.get_long_array_region(&array, 0, &mut values)
+                .map_err(|e| e.to_string())?;
+            if values.iter().any(|v| *v < 0) {
+                return Err("统计值无效".into());
+            }
+            InputStats::from_values(&values.into_iter().map(|v| v as u64).collect::<Vec<_>>())
+                .ok_or_else(|| "统计数组无效".into())
+        };
+        let mut input = read(env, left)?;
+        let flatten = |rows: &[LengthCounts]| {
+            rows.iter()
+                .flat_map(|r| [r.inputs, r.corrected, r.units])
+                .collect::<Vec<_>>()
+        };
+        let values = match operation {
+            0 => {
+                input.add(&read(env, right)?);
+                input.values().collect()
+            }
+            1 => {
+                input.merge_max(&read(env, right)?);
+                input.values().collect()
+            }
+            2 | 3 => flatten(&input.grouped(operation == 2)),
+            4 | 5 => flatten(&[input.total(operation == 4)]),
+            _ => return Err("统计操作无效".into()),
+        };
+        let values: Vec<i64> = values
+            .into_iter()
+            .map(|v| v.min(i64::MAX as u64) as i64)
+            .collect();
+        let array = env
+            .new_long_array(values.len() as i32)
+            .map_err(|e| e.to_string())?;
+        env.set_long_array_region(&array, 0, &values)
+            .map_err(|e| e.to_string())?;
+        Ok(array.into_raw())
+    })
 }

@@ -26,6 +26,8 @@ pub enum Platform {
     AndroidArm64,
     AndroidArm32,
     AndroidX64,
+    AndroidUniversal,
+    MacosUniversal,
 }
 
 impl Platform {
@@ -39,13 +41,17 @@ impl Platform {
         match self {
             Self::WindowsX64 => "-windows-x64-setup.exe",
             Self::WindowsX86 => "-windows-x86-setup.exe",
-            Self::AndroidArm64 => "-android-arm64.apk",
-            Self::AndroidArm32 => "-android-arm32.apk",
-            Self::AndroidX64 => "-android-x64.apk",
+            Self::AndroidArm64 => "-android-arm64-v8a.apk",
+            Self::AndroidArm32 => "-android-armeabi-v7a.apk",
+            Self::AndroidX64 => "-android-x86_64.apk",
+            Self::AndroidUniversal => "-android.apk",
+            Self::MacosUniversal => "-macos-universal.zip",
         }
     }
 
     pub fn current() -> Option<Self> {
+        #[cfg(target_os = "macos")]
+        return Some(Self::MacosUniversal);
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         return Some(Self::WindowsX64);
         #[cfg(all(target_os = "windows", target_arch = "x86"))]
@@ -57,6 +63,7 @@ impl Platform {
         #[cfg(all(target_os = "android", target_arch = "x86_64"))]
         return Some(Self::AndroidX64);
         #[cfg(not(any(
+            target_os = "macos",
             all(
                 target_os = "windows",
                 any(target_arch = "x86_64", target_arch = "x86")

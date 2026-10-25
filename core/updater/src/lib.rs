@@ -37,6 +37,7 @@
 
 pub mod github;
 pub mod mock;
+pub mod package;
 pub mod verify;
 pub mod version;
 

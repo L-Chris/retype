@@ -10,12 +10,7 @@ use retype_sync::{
     webdav::WebDav,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::BTreeMap,
-    io::{BufReader, Cursor},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 pub static LEARNING_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 type Result<T> = std::result::Result<T, String>;
@@ -25,6 +20,9 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
+        "featurePolicy" => Ok(
+            json!({"clipboard":{"maxText":retype_sync::clipboard_protocol::MAX_TEXT,"maxFrame":retype_sync::clipboard_protocol::MAX_FRAME,"ttl":retype_sync::clipboard_protocol::TTL_MS,"port":retype_sync::lan_address::DEFAULT_PORT},"statistics":{"lengthLabels":retype_types::statistics::LENGTH_LABELS,"lengthBuckets":retype_types::statistics::LENGTH_BUCKETS}}),
+        ),
         "resourceCatalog" => {
             let catalog = retype_resources::Catalog::builtin()?;
             Ok(
@@ -130,6 +128,83 @@ pub fn perform(v: Value) -> Result<Value> {
             }
             Ok(json!({"words":words,"state":counter.checkpoint()}))
         }
+        "updateAsset" => {
+            Ok(json!({"valid":retype_updater::package::valid_asset_url(field(&v,"url")?)}))
+        }
+        "updateVersionCode" => Ok(
+            json!({"code":retype_updater::package::android_version_code(field(&v,"version")?).map_err(|e|e.to_string())?}),
+        ),
+        "updatePackageNames" => {
+            let abis: Vec<String> =
+                serde_json::from_value(v["abis"].clone()).map_err(|_| "设备架构无效")?;
+            Ok(
+                json!({"names":retype_updater::package::android_targets(&abis).into_iter().map(|p|retype_updater::package::asset_name(v["version"].as_str().unwrap_or(""),p)).collect::<Vec<_>>()}),
+            )
+        }
+        "updateSelect" => {
+            let abis: Vec<String> =
+                serde_json::from_value(v["abis"].clone()).map_err(|_| "设备架构无效")?;
+            let selected = retype_updater::package::select(
+                &v["releases"],
+                &retype_updater::package::android_targets(&abis),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            let release = selected.map(|p| {
+                let code =
+                    retype_updater::package::android_version_code(&p.version).unwrap_or_default();
+                let mut value = serde_json::to_value(p).unwrap_or_default();
+                value["code"] = json!(code);
+                value
+            });
+            Ok(json!({"release":release}))
+        }
+        "lanEndpoint" => {
+            use retype_sync::lan_address as address;
+            let value = field(&v, "value")?;
+            match field(&v, "operation")? {
+                "normalize" => Ok(json!({"address":address::normalize_address(value)?})),
+                "list" => Ok(json!({"addresses":address::normalize_list(value)?})),
+                "priority" => Ok(json!({"priority":address::priority(value)?})),
+                "allowed" | "overlay" => {
+                    let ip = value.parse().map_err(|_| "设备 IP 无效")?;
+                    Ok(json!({"allowed":address::allowed(ip),"overlay":address::is_tailscale(ip)}))
+                }
+                _ => Err("设备地址操作无效".into()),
+            }
+        }
+        "clipboard" => {
+            use retype_sync::clipboard_protocol::{Clip, Journal};
+            use std::sync::{Mutex, OnceLock};
+            static JOURNAL: OnceLock<Mutex<Journal>> = OnceLock::new();
+            let mut journal = JOURNAL
+                .get_or_init(Default::default)
+                .lock()
+                .map_err(|_| "剪贴板状态异常")?;
+            let now = v["now"].as_u64().ok_or("剪贴板时间无效")?;
+            match field(&v, "operation")? {
+                "local" => Ok(
+                    json!({"event":journal.local(field(&v,"origin")?,v["seq"].as_u64().ok_or("剪贴板序号无效")?,field(&v,"text")?.into(),now)}),
+                ),
+                "accept" => {
+                    let clip: Clip =
+                        serde_json::from_value(v["event"].clone()).map_err(|_| "剪贴板消息无效")?;
+                    Ok(json!({"accepted":journal.accept(clip,now)}))
+                }
+                "clear" => {
+                    journal.latest = None;
+                    Ok(json!({}))
+                }
+                "valid" => {
+                    let clip: Clip =
+                        serde_json::from_value(v["event"].clone()).map_err(|_| "剪贴板消息无效")?;
+                    Ok(
+                        json!({"valid":clip.valid(now),"remaining":clip.created.saturating_add(retype_sync::clipboard_protocol::TTL_MS).saturating_sub(now)}),
+                    )
+                }
+                _ => Err("剪贴板操作无效".into()),
+            }
+        }
         "pairBegin" | "pairFinish" | "pairCancel" => retype_sync::pairing::mobile(&v),
         "models" => {
             let p: Provider =
@@ -157,14 +232,26 @@ pub fn perform(v: Value) -> Result<Value> {
                 field(&v, "key")?
             )?))
         }
-        "compilePack" => {
-            let source = std::fs::File::open(field(&v, "source")?).map_err(|e| e.to_string())?;
-            let tsv = retype_dict::rime::tsv(BufReader::new(source))?;
+        "packCatalog" => {
+            let rows = retype_resources::packs::catalog()?
+                .into_iter()
+                .map(|p| {
+                    let url = p.source_url();
+                    let mut value = serde_json::to_value(p).unwrap_or_default();
+                    value["url"] = json!(url);
+                    value
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({"packs":rows}))
+        }
+        "compilePack" | "compileVerifiedPack" => {
+            let source = Path::new(field(&v, "source")?);
             let destination = Path::new(field(&v, "destination")?);
-            let file = std::fs::File::create(destination).map_err(|e| e.to_string())?;
-            let count =
-                retype_dict::binary::compile(Cursor::new(tsv), &file).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
+            let count = if field(&v, "type")? == "compileVerifiedPack" {
+                retype_resources::packs::compile_source(field(&v, "id")?, source, destination)?
+            } else {
+                retype_resources::packs::compile_local(source, destination)?
+            };
             Ok(json!({"words":count}))
         }
         "syncTest" => {
@@ -184,40 +271,7 @@ fn read<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
         Err(e) => Err(e.to_string()),
     }
 }
-fn validate(s: &Snapshot, id: &str) -> Result<()> {
-    if s.version != 1
-        || s.device != id
-        || !config::valid_id(id)
-        || s.name.len() > 256
-        || s.fields.len() > 2000
-        || !s.learning.valid()
-    {
-        return Err("云端数据无效或版本不兼容".into());
-    }
-    let mut buckets = Vec::new();
-    statistics::merge(&mut buckets, &s.statistics)?;
-    for (key, f) in &s.fields {
-        if key.len() > 256
-            || f.ancestors.len() > 20000
-            || f.stamp.revision == u64::MAX
-            || !config::valid_id(&f.stamp.device)
-            || f.ancestors.iter().any(|s| !config::valid_id(&s.device))
-        {
-            return Err("云端设置版本无效".into());
-        }
-        if key.starts_with("providers/") && !f.value.is_null() {
-            let p: Provider =
-                serde_json::from_value(f.value.clone()).map_err(|_| "云端提供商无效")?;
-            if format!("providers/{}", p.id) != *key
-                || p.base_url.contains(['@', '?', '#'])
-                || p.models.len() > 10000
-            {
-                return Err("云端提供商无效".into());
-            }
-        }
-    }
-    Ok(())
-}
+
 fn sync(v: Value) -> Result<Value> {
     let cfg: Config = serde_json::from_value(v["config"].clone()).map_err(|e| e.to_string())?;
     cfg.validate()?;
@@ -228,17 +282,7 @@ fn sync(v: Value) -> Result<Value> {
     let current: BTreeMap<String, Value> =
         serde_json::from_value(v["values"].clone()).map_err(|e| e.to_string())?;
     if state.initialized {
-        let mut current = current.clone();
-        for k in state
-            .fields
-            .keys()
-            .filter(|k| k.starts_with("providers/") && !current.contains_key(*k))
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            current.insert(k, Value::Null);
-        }
-        state.capture(&cfg.device_id, &current);
+        state.capture_settings(&cfg.device_id, &current);
         config::write_json(&state_file, &state)?;
     }
     if let Some(key) = v["resolveKey"].as_str() {
@@ -257,7 +301,7 @@ fn sync(v: Value) -> Result<Value> {
     let mut remote = Vec::new();
     for id in cloud.devices()? {
         let s: Snapshot = cloud.download_cached(&id, &root.join("cache"))?;
-        validate(&s, &id)?;
+        retype_sync::schema::validate_snapshot(&s, &id)?;
         remote.push(s);
     }
     if !state.initialized && !remote.is_empty() && v["confirm"].as_bool() != Some(true) {
@@ -270,8 +314,9 @@ fn sync(v: Value) -> Result<Value> {
     }
     if !state.initialized {
         let missing = current
-            .into_iter()
-            .filter(|(k, _)| !state.fields.contains_key(k))
+            .iter()
+            .filter(|(k, _)| !state.fields.contains_key(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         state.capture(&cfg.device_id, &missing);
         state.initialized = true;
@@ -313,7 +358,7 @@ fn sync(v: Value) -> Result<Value> {
     cloud.publish(&cfg.device_id, &snapshot)?;
     config::write_json(&root.join("statistics.json"), &imported)?;
     Ok(
-        json!({"awaitingMerge":false,"values":state.values(),"statistics":imported,"conflicts":state.conflicts,"message":if state.conflicts.is_empty(){"同步完成"}else{"数据已同步，有设置冲突需要处理"}}),
+        json!({"awaitingMerge":false,"values":state.values_for(&current),"statistics":imported,"conflicts":state.conflicts,"message":if state.conflicts.is_empty(){"同步完成"}else{"数据已同步，有设置冲突需要处理"}}),
     )
 }
 

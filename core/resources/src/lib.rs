@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+pub mod packs;
 pub type Result<T> = std::result::Result<T, String>;
 pub const BUNDLE_MAGIC: &[u8; 8] = b"RTRES001";
 static NEXT: AtomicU64 = AtomicU64::new(1);

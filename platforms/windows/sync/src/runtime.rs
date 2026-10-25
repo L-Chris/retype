@@ -169,7 +169,7 @@ fn set_registry(name: &str, value: u32) -> Result<()> {
     Ok(())
 }
 fn portable() -> Result<BTreeMap<String, Value>> {
-    let ai = retype_ai::config::Config::load().map_err(|_| "无法读取 AI 设置")?;
+    let ai = retype_ai::config::load().map_err(|_| "无法读取 AI 设置")?;
     let shortcuts = retype_ai::secrets::shortcuts();
     let mut values = BTreeMap::from([
         (
@@ -219,55 +219,9 @@ fn portable() -> Result<BTreeMap<String, Value>> {
     }
     Ok(values)
 }
-fn validate_snapshot(snapshot: &Snapshot) -> Result<()> {
-    if !snapshot.learning.valid() {
-        return Err("云端学习数据无效，本地数据未应用".into());
-    }
-    let mut checked = Vec::new();
-    statistics::merge(&mut checked, &snapshot.statistics)?;
-    if snapshot.version != 1
-        || !config::valid_id(&snapshot.device)
-        || snapshot.name.len() > 256
-        || snapshot.fields.len() > 2000
-    {
-        return Err("云端版本不兼容或数据规模超过限制".into());
-    }
-    for (key, field) in &snapshot.fields {
-        if !known_key(key)
-            || field.ancestors.len() > 20000
-            || field.stamp.revision == u64::MAX
-            || !config::valid_id(&field.stamp.device)
-            || field.ancestors.iter().any(|s| !config::valid_id(&s.device))
-        {
-            return Err("云端设置版本无效".into());
-        }
-    }
-    Ok(())
-}
-fn known_key(key: &str) -> bool {
-    matches!(
-        key,
-        "input.scheme"
-            | "input.english"
-            | "input.english_spelling"
-            | "input.symbol_completion"
-            | "dictionary.enabled"
-            | "updates.auto_check"
-            | "shortcuts"
-            | "translation.model"
-            | "translation.target"
-            | "translation.preview"
-            | "translation.instructions"
-            | "translation.reasoning"
-            | "translation.timeout"
-            | "voice.settings"
-    ) || key
-        .strip_prefix("providers/")
-        .is_some_and(|s| !s.is_empty() && s.len() <= 128 && !s.contains(['/', '\\']))
-}
 
 fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
-    let mut ai = retype_ai::config::Config::load().map_err(|_| "无法读取本机 AI 设置")?;
+    let mut ai = retype_ai::config::load().map_err(|_| "无法读取本机 AI 设置")?;
     let shortcuts: retype_ai::config::Shortcuts =
         serde_json::from_value(values.get("shortcuts").ok_or("缺少快捷键设置")?.clone())
             .map_err(|_| "快捷键格式无效")?;
@@ -368,7 +322,7 @@ fn apply_values(values: &BTreeMap<String, Value>) -> Result<()> {
         ai.voice.microphone = local_microphone;
     }
     // All validation precedes writes; preserve the old portable values for recovery.
-    ai.save().map_err(|_| "无法保存同步后的 AI 设置")?;
+    retype_ai::config::save(&ai).map_err(|_| "无法保存同步后的 AI 设置")?;
     retype_ai::secrets::save_shortcuts(shortcuts).map_err(|_| "无法保存同步后的快捷键")?;
     let previous_mask = registry("EnabledDictionaryPacks")?.unwrap_or(0);
     set_registry("PinyinScheme", scheme)?;
@@ -393,23 +347,14 @@ fn cycle(root: &Path, config: &Config, state: &mut State, status: &mut Status) -
     let current = portable()?;
     let mut base = current.clone();
     if state.initialized {
-        // Explicit tombstones preserve deleted providers across devices.
-        let mut values = current.clone();
-        for key in state
-            .fields
-            .keys()
-            .filter(|k| k.starts_with("providers/") && !current.contains_key(*k))
-        {
-            values.insert(key.clone(), Value::Null);
-        }
-        state.capture(&config.device_id, &values);
+        state.capture_settings(&config.device_id, &current);
         config::write_json(&account.join("state.json"), state)?;
     }
     cloud.ensure_layout()?;
     let mut remote = Vec::<Snapshot>::new();
     for id in cloud.devices()? {
         let snapshot: Snapshot = cloud.download_cached(&id, &account.join("cache"))?;
-        validate_snapshot(&snapshot)?;
+        crate::schema::validate_snapshot(&snapshot, &id)?;
         if snapshot.device != id {
             return Err("云端设备身份不匹配".into());
         }
@@ -428,18 +373,9 @@ fn cycle(root: &Path, config: &Config, state: &mut State, status: &mut Status) -
     }
     if state.initialized {
         // Changes made while downloading are captured before merging.
-        let mut fresh = portable()?;
+        let fresh = portable()?;
         base.clone_from(&fresh);
-        let removed: Vec<_> = state
-            .fields
-            .keys()
-            .filter(|k| k.starts_with("providers/") && !fresh.contains_key(*k))
-            .cloned()
-            .collect();
-        for key in removed {
-            fresh.insert(key, Value::Null);
-        }
-        state.capture(&config.device_id, &fresh);
+        state.capture_settings(&config.device_id, &fresh);
     }
     for snapshot in &remote {
         state.merge(snapshot);
@@ -453,7 +389,7 @@ fn cycle(root: &Path, config: &Config, state: &mut State, status: &mut Status) -
         state.capture(&config.device_id, &missing);
         state.initialized = true;
     }
-    let values = state.values();
+    let values = state.values_for(&base);
     let mut comparable = base.clone();
     for (key, value) in &values {
         if key.starts_with("providers/") && value.is_null() {
@@ -655,11 +591,11 @@ mod compatibility_tests {
             learning: Default::default(),
             statistics: Vec::new(),
         };
-        assert!(validate_snapshot(&snapshot).is_ok());
+        assert!(crate::schema::validate_snapshot(&snapshot, &snapshot.device).is_ok());
         if let Some(field) = snapshot.fields.get_mut("input.english") {
             field.stamp.device = "invalid".into();
         }
-        assert!(validate_snapshot(&snapshot).is_err());
+        assert!(crate::schema::validate_snapshot(&snapshot, &snapshot.device).is_err());
     }
 
     /// Opt-in readback using the saved account. Never applies or publishes settings.
@@ -679,7 +615,7 @@ mod compatibility_tests {
         for id in devices {
             let snapshot: Snapshot =
                 cloud.download_cached(&id, &account_root(&root, &cfg).join("cache"))?;
-            validate_snapshot(&snapshot)?;
+            crate::schema::validate_snapshot(&snapshot, &id)?;
             let different: Vec<_> = local
                 .iter()
                 .filter(|(key, value)| {

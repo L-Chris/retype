@@ -11,7 +11,7 @@ on:
       - 'platforms/macos/**'
       - 'platforms/windows/ai/**'
       - 'platforms/windows/sync/**'
-      - 'apps/settings-egui/dictionary-packs.json'
+      - 'core/resources/dictionary-packs.json'
       - 'core/**'
       - 'Cargo.*'
       - 'assets/logo.png'
@@ -21,7 +21,7 @@ on:
       - 'platforms/macos/**'
       - 'platforms/windows/ai/**'
       - 'platforms/windows/sync/**'
-      - 'apps/settings-egui/dictionary-packs.json'
+      - 'core/resources/dictionary-packs.json'
       - 'core/**'
       - 'Cargo.*'
       - '.github/workflows/macos.yml'
@@ -47,7 +47,7 @@ jobs:
         with:
           shared-key: macos-universal
       - name: Bridge and input engine regression tests
-        run: cargo test --locked -p retype-macos -p retype-engine -p retype-file-map -p retype-resources
+        run: cargo test --locked -p retype-ai-core -p retype-sync-core -p retype-macos -p retype-engine -p retype-file-map -p retype-resources
       - name: Bridge lint
         run: cargo clippy --locked -p retype-macos --all-targets -- -D warnings
       - name: Build and verify universal InputMethodKit bundle

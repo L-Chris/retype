@@ -39,22 +39,12 @@ impl Activity {
         counts
     }
     pub fn commit_counts(&mut self, text: &str) -> Counts {
-        let chinese = text.chars().filter(|c| matches!(*c as u32,0x3400..=0x4dbf|0x4e00..=0x9fff|0xf900..=0xfaff|0x20000..=0x323af)).count() as u64;
-        let english = text.chars().filter(|c| c.is_ascii_alphanumeric()).count() as u64;
-        let english_words = self.words.feed(text) as u64;
-        let elapsed = std::mem::take(&mut self.elapsed);
-        let chinese_ms = elapsed * chinese / (chinese + english).max(1);
-        let english_ms = if english > 0 { elapsed - chinese_ms } else { 0 };
-        Counts {
-            chinese,
-            english,
-            chinese_ms,
-            english_ms,
-            english_words,
-            english_word_ms: english_ms,
-            ..Default::default()
-        }
+        let mut counts =
+            retype_types::statistics::commit_counts(text, std::mem::take(&mut self.elapsed));
+        counts.english_words = self.words.feed(text) as u64;
+        counts
     }
+
     pub fn boundary(&mut self) -> Counts {
         self.last = None;
         self.elapsed = 0;
@@ -266,9 +256,7 @@ pub fn summary(rows: &[Bucket], period: u32, version: Option<&str>) -> Result<Va
         json!({"input":{"chinese":current.input.grouped(true),"english":current.input.grouped(false),"cancelled":current.input.cancelled},"versions":versions,"current":view(&current),"previous":view(&old),"recent":view(&recent),"voice":view(&voice),"bars":bars.iter().map(|(i,c)|json!({"label":match period{0=>format!("{i}"),3=>format!("{}月",i+1),_=>{let d=start+chrono::Duration::days(*i as i64);format!("{}/{}",d.month(),d.day())}},"counts":view(c)})).collect::<Vec<_>>()}),
     )
 }
-fn speed(n: u64, ms: u64, min: u64) -> Option<u64> {
-    (n >= min && ms >= 10000).then(|| (n as f64 * 60000. / ms as f64).round() as u64)
-}
+use retype_types::statistics::speed;
 #[cfg(test)]
 mod tests {
     use super::*;

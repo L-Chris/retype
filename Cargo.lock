@@ -2685,15 +2685,23 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 name = "retype-ai"
 version = "0.8.4"
 dependencies = [
- "base64 0.22.1",
+ "retype-ai-core",
  "retype-learning",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "retype-ai-core"
+version = "0.8.4"
+dependencies = [
+ "base64 0.22.1",
  "retype-types",
  "serde",
  "serde_json",
  "tungstenite",
  "ureq",
  "url",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2702,7 +2710,7 @@ version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "jni 0.21.1",
- "retype-ai",
+ "retype-ai-core",
  "retype-dict",
  "retype-engine",
  "retype-english",
@@ -2710,7 +2718,7 @@ dependencies = [
  "retype-pinyin",
  "retype-resources",
  "retype-services",
- "retype-sync",
+ "retype-sync-core",
  "retype-types",
  "serde",
  "serde_json",
@@ -2911,14 +2919,15 @@ name = "retype-services"
 version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
- "retype-ai",
+ "retype-ai-core",
  "retype-dict",
  "retype-english",
  "retype-learning-store",
  "retype-pinyin",
  "retype-resources",
- "retype-sync",
+ "retype-sync-core",
  "retype-types",
+ "retype-updater",
  "serde",
  "serde_json",
 ]
@@ -2951,24 +2960,37 @@ version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "fs2",
- "hmac",
  "if-addrs",
  "mdns-sd",
  "rcgen",
  "retype-ai",
  "retype-learning",
- "retype-types",
+ "retype-sync-core",
  "rustls",
+ "serde",
+ "serde_json",
+ "socket2",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "retype-sync-core"
+version = "0.8.4"
+dependencies = [
+ "base64 0.22.1",
+ "hmac",
+ "retype-ai-core",
+ "retype-learning-store",
+ "retype-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sha2 0.11.0",
- "socket2",
  "spake2",
  "ureq",
  "url",
  "uuid",
- "windows-sys 0.61.2",
  "xml-rs",
 ]
 
@@ -3005,6 +3027,7 @@ dependencies = [
 name = "retype-updater"
 version = "0.8.4"
 dependencies = [
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.21",

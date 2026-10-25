@@ -12,6 +12,13 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class WordStatisticsTest {
+  @Test fun mixedCommitAndHalfSpeedUseTheSharedDesktopPolicy() {
+    val counts = NativeBridge.statisticsCounts("你a1", 1000)
+    assertArrayEquals(longArrayOf(1, 1, 500, 500), counts)
+    assertEquals(13L, Counts(englishWords = 5, englishWordMs = 24000).speed(false))
+    assertNull(Counts(englishWords = 4, englishWordMs = 24000).speed(false))
+  }
+
   @Test fun englishChosenInChineseModeKeepsEnglishCountsAndSpeed() {
     val clock = ActivityClock()
     clock.tick(true, 1000)
