@@ -1,6 +1,6 @@
 //! Desktop clipboard, process and configuration adapters for shared synchronization.
 pub use retype_sync_core::{
-    clipboard_protocol, hash, model, pairing, schema, statistics, webdav, Result,
+    clipboard_image, clipboard_protocol, hash, model, pairing, schema, statistics, webdav, Result,
 };
 pub mod config;
 #[cfg(any(windows, target_os = "macos"))]

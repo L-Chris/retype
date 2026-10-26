@@ -384,7 +384,7 @@ impl AiPages {
                             }
                             if super::app::icon_button(
                                 ui,
-                                super::app::Icon::Bolt,
+                                super::app::Icon::Test,
                                 "测试接口连接",
                                 true,
                                 false,

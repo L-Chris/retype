@@ -23,7 +23,7 @@ for arch in arm64 x86_64; do
     xcrun clang -arch "$arch" -isysroot "$sdk" -mmacosx-version-min=13.0 \
         -fobjc-arc -fblocks -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations \
         -I platforms/macos/include platforms/macos/src/*.m "$library" \
-        -framework Cocoa -framework Carbon -framework InputMethodKit -framework QuartzCore \
+        -framework Cocoa -framework ImageIO -framework Carbon -framework InputMethodKit -framework QuartzCore \
         -framework UniformTypeIdentifiers -framework Security -framework SystemConfiguration \
         -framework AVFoundation -framework AudioToolbox -framework ApplicationServices \
         -lc++ -liconv -lresolv -o "$stage/retype-$arch"

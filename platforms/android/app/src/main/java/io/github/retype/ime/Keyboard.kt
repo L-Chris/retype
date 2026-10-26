@@ -68,6 +68,7 @@ fun Keyboard(
     onVoiceCancel: () -> Unit = {},
     onRequestCandidates: (Long, Int) -> Unit = { _, _ -> },
     onInstallResources: () -> Unit = onSettings,
+    onPasteImage: (android.net.Uri) -> Unit = {},
 ) {
   val context = LocalContext.current
   val clipboard = remember { LanClipboard.get(context) }
@@ -131,13 +132,14 @@ fun Keyboard(
                 if (state.translating)
                   CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp)
                 if (
-                  status == null && !state.password && state.composition.isEmpty() && lan.text != null
+                  status == null && !state.password && state.composition.isEmpty() && (lan.text != null || lan.image != null)
                 )
                   Text(
-                    lan.text!!.replace('\n', ' '),
+                    if (lan.image != null) "粘贴同步图片" else lan.text.orEmpty().replace('\n', ' '),
                     Modifier.weight(1f)
                       .clickable {
-                        clipboard.pasteText()?.let(onPaste)
+                        if (lan.image != null) clipboard.pasteImage()?.let(onPasteImage)
+                        else clipboard.pasteText()?.let(onPaste)
                       }
                       .padding(vertical = 8.dp),
                     fontSize = 13.sp,

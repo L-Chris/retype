@@ -2,6 +2,9 @@ package io.github.retype.ime
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import java.io.ByteArrayOutputStream
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.*
@@ -39,7 +42,43 @@ class LanClipboardTest {
         clipboard.setPrimaryClip(ClipData.newPlainText("LAN test", "手机文字\nworld 👋"))
       }
       withTimeout(5000) { while (lan.state.value.text != null) delay(50) }
-      delay(500)
+      withTimeout(15_000) { while (lan.state.value.image == null) delay(50) }
+      assertNull(lan.pasteText())
+      val image = lan.pasteImage()
+      assertNotNull(image)
+      context.contentResolver.openInputStream(image!!).use { stream ->
+        val bitmap = BitmapFactory.decodeStream(stream)
+        assertNotNull(bitmap)
+        assertTrue(bitmap.width > 0 && bitmap.height > 0)
+        bitmap.recycle()
+      }
+      val bitmap = Bitmap.createBitmap(2, 1, Bitmap.Config.ARGB_8888)
+      bitmap.setPixels(intArrayOf(0xffff0000.toInt(), 0xff0000ff.toInt()), 0, 2, 0, 0, 2, 1)
+      val out = ByteArrayOutputStream()
+      bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+      bitmap.recycle()
+      val outgoing = ClipboardImageProvider.publish(context, out.toByteArray())
+      instrumentation.runOnMainSync {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        assertEquals(image, clipboard.primaryClip?.getItemAt(0)?.uri)
+        assertTrue(clipboard.primaryClip!!.description.hasMimeType("image/png"))
+        clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "LAN image test", outgoing))
+      }
+      withTimeout(5000) { while (lan.state.value.image != null) delay(50) }
+      for (mime in listOf("image/jpeg", "image/webp")) {
+        withTimeout(15_000) { while (lan.state.value.image == null) delay(50) }
+        val original = lan.pasteImage()!!
+        assertEquals(mime, context.contentResolver.getType(original))
+        val before = context.contentResolver.openInputStream(original)!!.use { it.readBytes() }
+        assertTrue(before.isNotEmpty())
+        instrumentation.runOnMainSync {
+          val clipboard = context.getSystemService(ClipboardManager::class.java)
+          assertTrue(clipboard.primaryClip!!.description.hasMimeType(mime))
+          clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "LAN original test", original))
+        }
+        withTimeout(5000) { while (lan.state.value.image != null) delay(50) }
+      }
+      delay(1000)
       instrumentation.runOnMainSync { lan.enable(false) }
       assertNull(lan.pasteText())
     } finally {

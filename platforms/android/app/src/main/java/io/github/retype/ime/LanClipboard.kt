@@ -1,9 +1,10 @@
 package io.github.retype.ime
 
 import android.content.ClipData
-import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.net.Uri
+import android.util.Base64
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Handler
@@ -40,6 +41,7 @@ data class LanState(
     val expires: Long = 0,
     val nearby: List<NearbyClipboard> = emptyList(),
     val text: String? = null,
+    val image: Uri? = null,
     val addresses: String = "",
     val connection: String = "",
     val target: String = "",
@@ -50,6 +52,8 @@ class LanClipboard private constructor(private val context: Context) {
   companion object {
     private val policy = JSONObject(NativeBridge.feature(JSONObject().put("type", "featurePolicy").toString())).getJSONObject("clipboard")
     private val MAX_TEXT = policy.getInt("maxText")
+    private val MAX_IMAGE = policy.getInt("maxImage")
+    private val IMAGE_FORMATS = policy.getJSONArray("imageFormats")
     private val MAX_FRAME = policy.getInt("maxFrame")
     @Volatile private var instance: LanClipboard? = null
 
@@ -57,6 +61,10 @@ class LanClipboard private constructor(private val context: Context) {
         synchronized(this) {
           instance ?: LanClipboard(context.applicationContext).also { instance = it }
         }
+
+    internal fun imageInfo(encoded: String): JSONObject? = runCatching {
+      JSONObject(NativeBridge.feature(JSONObject().put("type", "clipboardImageInfo").put("image", encoded).toString())).optJSONObject("value")
+    }.getOrNull()
 
     internal fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -94,6 +102,8 @@ class LanClipboard private constructor(private val context: Context) {
   private var sequence = maxOf(prefs.getLong("seq", 0), System.currentTimeMillis())
   private var latest: JSONObject? = null
   private var appliedText: String? = null
+  private var appliedImage: Uri? = null
+  private var captureGeneration = 0L
   private val discoveredAddresses = mutableMapOf<String, List<String>>()
   private var discoveryStop: (() -> Unit)? = null
   private val id =
@@ -122,7 +132,7 @@ class LanClipboard private constructor(private val context: Context) {
   fun enable(value: Boolean) {
     prefs.edit().putBoolean("enabled", value).commit()
     update {
-      it.copy(enabled = value, message = if (value) "连接中…" else "已关闭", text = null, code = null, connection = if(value) it.connection else "")
+      it.copy(enabled = value, message = if (value) "连接中…" else "已关闭", text = null, image = null, code = null, connection = if(value) it.connection else "")
     }
     if (value) resume()
     else {
@@ -263,57 +273,107 @@ class LanClipboard private constructor(private val context: Context) {
     if (ime?.startsWith("${context.packageName}/") != true) return
     try {
       val clip = clipboard.primaryClip ?: return
-      if (clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true)
-          return
-      if (!clip.description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) || clip.itemCount == 0)
-          return
-      val text = clip.getItemAt(0).text?.toString() ?: return
-      if (text.isEmpty() || text.contains('\u0000') || text.toByteArray().size > MAX_TEXT) return
-      synchronized(gate) {
-        if (appliedText == text && clip.description.label?.toString() == "retype") return
-        sequence++
-        val event = protocol("local") { it.put("origin", id).put("seq", sequence).put("text", text) }.optJSONObject("event") ?: return
-        latest = event
-        outgoing.set(event)
-        prefs.edit().putLong("seq", sequence).apply()
+      val sensitive = clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true
+      if (clip.itemCount == 0) return
+      val item = clip.getItemAt(0)
+      val uri = item.uri
+      val image = uri != null && (clip.description.hasMimeType("image/*") || context.contentResolver.getType(uri)?.startsWith("image/") == true)
+      val text = if (image) "" else item.text?.toString().orEmpty()
+      val generation = synchronized(gate) {
+        if (clip.description.label?.toString() == "retype" &&
+            (if (image) appliedImage == uri else appliedText == text)) return
+        captureGeneration++
+        latest = null
+        outgoing.set(null)
+        protocol("clear")
+        captureGeneration
       }
-      update { it.copy(text = null) }
+      update { it.copy(text = null, image = null) }
+      if (sensitive) return
+      scope.launch {
+        val bytes = if (image) readImage(uri!!) ?: return@launch else null
+        if (!image && (text.isEmpty() || text.contains('\u0000') || text.toByteArray().size > MAX_TEXT)) return@launch
+        synchronized(gate) {
+          if (!mutable.value.enabled || captureGeneration != generation) return@synchronized
+          sequence++
+          val event = protocol("local") {
+            it.put("origin", id).put("seq", sequence).put("text", text)
+            if (bytes != null) it.put("image", Base64.encodeToString(bytes, Base64.NO_WRAP))
+          }.optJSONObject("event") ?: return@synchronized
+          latest = event
+          outgoing.set(event)
+          prefs.edit().putLong("seq", sequence).apply()
+        }
+      }
     } catch (_: SecurityException) {
       /* Another IME is active. */
     }
   }
 
+  private fun readImage(uri: Uri): ByteArray? = runCatching {
+    if (uri.scheme != "content") return null
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+      val out = ByteArrayOutputStream()
+      val buffer = ByteArray(8192)
+      while (out.size() <= MAX_IMAGE) {
+        val count = input.read(buffer, 0, minOf(buffer.size, MAX_IMAGE + 1 - out.size()))
+        if (count < 0) break
+        out.write(buffer, 0, count)
+      }
+      out.toByteArray()
+    } ?: return null
+    if (bytes.size > MAX_IMAGE) return null
+    // The shared protocol validates the encoded bytes and pixel bounds without re-encoding.
+    bytes
+  }.getOrNull()
+
   private fun accept(event: JSONObject) {
     val now = System.currentTimeMillis()
-    val text = event.getString("text")
     val lifetime = protocol("valid", now) { it.put("event", event) }
+    if (!lifetime.optBoolean("valid")) return
+    val bytes = if (!event.isNull("image")) Base64.decode(event.getString("image"), Base64.NO_WRAP) else null
+    val text = if (bytes == null) event.getString("text") else null
+    val mime = if (bytes != null) imageInfo(event.getString("image"))?.getString("mime") ?: return else null
     synchronized(gate) {
       if (!protocol("accept", now) { it.put("event", event) }.getBoolean("accepted")) return
+      captureGeneration++ // A pending local image conversion must not overtake this event.
       latest = event
     }
     main.post {
       synchronized(gate) {
         if (!mutable.value.enabled || latest !== event) return@post
-        appliedText = text
         try {
-          clipboard.setPrimaryClip(ClipData.newPlainText("retype", text))
+          if (bytes != null) {
+            val uri = ClipboardImageProvider.publish(context, bytes, mime!!)
+            appliedImage = uri
+            appliedText = null
+            clipboard.setPrimaryClip(ClipData.newUri(context.contentResolver, "retype", uri))
+          } else {
+            appliedImage = null
+            appliedText = text
+            clipboard.setPrimaryClip(ClipData.newPlainText("retype", text))
+          }
         } catch (_: SecurityException) {}
       }
-      update { it.copy(text = text) }
+      update { it.copy(text = text, image = if (bytes != null) appliedImage else null) }
     }
     scope.launch {
       delay(lifetime.getLong("remaining"))
-      synchronized(gate) { if (latest === event) update { it.copy(text = null) } }
+      synchronized(gate) { if (latest === event) update { it.copy(text = null, image = null) } }
     }
   }
 
-  fun pasteText(): String? =
-      synchronized(gate) {
-        val event = latest ?: return null
-        if (!mutable.value.enabled || !protocol("valid") { it.put("event", event) }.getBoolean("valid"))
-            null
-        else event.getString("text")
-      }
+  fun pasteText(): String? = synchronized(gate) {
+    val event = latest ?: return null
+    if (!mutable.value.enabled || !event.isNull("image") || !protocol("valid") { it.put("event", event) }.getBoolean("valid")) null
+    else event.getString("text")
+  }
+
+  fun pasteImage(): Uri? = synchronized(gate) {
+    val event = latest ?: return null
+    if (!mutable.value.enabled || event.isNull("image") || !protocol("valid") { it.put("event", event) }.getBoolean("valid")) null
+    else appliedImage
+  }
 
   // TLS close can write close_notify, so UI actions must never close on the main thread.
   // Detach first: a delayed close must only affect the old connection.
@@ -412,7 +472,7 @@ class LanClipboard private constructor(private val context: Context) {
       val cert = connection.session.peerCertificates[0].encoded
       val sessionCode = pairingPin
       val sessionMode = pairingMode
-      val input = connection.inputStream
+      val input = connection.inputStream.buffered(8192)
       val output = connection.outputStream
       fun send(message: JSONObject) {
         output.write((message.toString() + "\n").toByteArray())
@@ -422,12 +482,15 @@ class LanClipboard private constructor(private val context: Context) {
           JSONObject()
               .put("type", "hello")
               .put("version", 2)
+              .put("images", true)
+              .put("imageFormats", IMAGE_FORMATS)
               .put("id", id)
               .put("name", android.os.Build.MODEL)
               .put("mode", if (pairing) sessionMode else "")
               .put("token", if (pairing) "" else vault.get("lan-token"))
       )
       var ready = false
+      var imageFormats = emptySet<String>()
       var expectedProof = ""
       var pairingPeer = ""
       var pairedToken = ""
@@ -442,7 +505,7 @@ class LanClipboard private constructor(private val context: Context) {
         if (System.currentTimeMillis() - lastRead > 45_000) error("连接已断开")
         if (ready) {
           outgoing.getAndSet(null)?.let { event ->
-            if (protocol("valid") { it.put("event", event) }.getBoolean("valid"))
+            if ((event.isNull("image") || imageInfo(event.getString("image"))?.optString("mime") in imageFormats) && protocol("valid") { it.put("event", event) }.getBoolean("valid"))
                 send(JSONObject().put("type", "clip").put("clip", event))
           }
           if (System.currentTimeMillis() - heartbeat >= 15_000) {
@@ -525,6 +588,10 @@ class LanClipboard private constructor(private val context: Context) {
                 .commit()
           }
           "ready" -> {
+            imageFormats = if (!message.optBoolean("images", false)) emptySet() else {
+              val formats = message.optJSONArray("imageFormats")
+              if (formats == null) setOf("image/png") else (0 until formats.length()).map { formats.optString(it) }.toSet()
+            }
             if (pairing) {
               require(pairedToken.isNotEmpty() && message.getString("id")==pairingPeer)
               prefs

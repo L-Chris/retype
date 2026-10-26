@@ -20,7 +20,7 @@ char *rt_runtime_reload(const RtRuntime *runtime, const char *root, uint32_t pac
 char *rt_runtime_voice(const RtRuntime *runtime, const char *text);
 // Returns {"saved":true} after the learning/statistics barrier, or {"error":...}.
 char *rt_runtime_flush(const RtRuntime *runtime);
-void rt_macos_hooks(intptr_t (*read)(const char *,uint8_t *,size_t),bool (*save)(const char *,const char *),intptr_t (*clipboard_read)(uint8_t *,size_t,uint64_t *),bool (*clipboard_write)(const char *,uint64_t,uint64_t *));
+void rt_macos_hooks(intptr_t (*read)(const char *,uint8_t *,size_t),bool (*save)(const char *,const char *),intptr_t (*clipboard_read)(uint8_t *,size_t,uint64_t *,bool *),bool (*clipboard_write)(const uint8_t *,size_t,bool,uint64_t,uint64_t *));
 RtResources *rt_resources_new(const char *root);
 void rt_resources_begin(const RtResources *resources);
 char *rt_resources_run(const RtResources *resources, int32_t action, const char *source);

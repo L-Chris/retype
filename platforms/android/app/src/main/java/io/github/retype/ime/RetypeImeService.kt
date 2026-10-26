@@ -141,6 +141,15 @@ class RetypeImeService :
               ::cancelVoice,
               ::requestCandidates,
               { startActivity(Intent(this, SettingsActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("dictionaries", true).putExtra("downloadResources", true)) },
+              onPasteImage = { uri ->
+                val info = currentInputEditorInfo
+                val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+                val accepts = !state.password && info?.contentMimeTypes?.any { android.content.ClipDescription.compareMimeTypes(mime, it) } == true
+                val content = android.view.inputmethod.InputContentInfo(uri, android.content.ClipDescription("retype", arrayOf(mime)), null)
+                if (!accepts || currentInputConnection?.commitContent(content, android.view.inputmethod.InputConnection.INPUT_CONTENT_GRANT_READ_URI_PERMISSION, null) != true) {
+                  android.widget.Toast.makeText(this, "此应用不支持键盘图片输入，可尝试长按输入框粘贴", android.widget.Toast.LENGTH_SHORT).show()
+                }
+              },
           )
         }
       }

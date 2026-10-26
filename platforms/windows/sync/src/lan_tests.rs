@@ -219,6 +219,22 @@ impl Fixture {
         }
         Err("no clipboard event".into())
     }
+    fn publish_image(&self) -> Result<String> {
+        self.publish_image_bytes(include_bytes!("../../../../assets/logo.png"))
+    }
+    fn publish_image_bytes(&self, bytes: &[u8]) -> Result<String> {
+        let mut s = self.state.lock().map_err(|_| "lock")?;
+        s.seq += 1;
+        let seq = s.seq;
+        let id = s.config.id.clone();
+        let clip = s
+            .journal
+            .local_image(&id, seq, bytes, now())
+            .ok_or("invalid image")?;
+        let encoded = clip.image.clone().ok_or("missing PNG")?;
+        broadcast(&mut s, &clip);
+        Ok(encoded)
+    }
     fn publish(&self, text: &str) -> Result<()> {
         let mut s = self.state.lock().map_err(|_| "lock")?;
         s.seq += 1;
@@ -288,6 +304,16 @@ fn desktop_client_pairs_with_certificate_proofs_and_synchronizes_both_directions
         client.receive(Duration::from_secs(3))?.text,
         "desktop → Mac 👋"
     );
+    let image = client.publish_image()?;
+    assert_eq!(
+        server.receive(Duration::from_secs(3))?.image.as_deref(),
+        Some(image.as_str())
+    );
+    let image = server.publish_image()?;
+    assert_eq!(
+        client.receive(Duration::from_secs(3))?.image.as_deref(),
+        Some(image.as_str())
+    );
     let saved = retype_ai::secrets::cloud_password(&format!("lan-client-{remote}"))
         .map_err(|e| e.to_string())?;
     let identity: Value = serde_json::from_str(&saved).map_err(|e| e.to_string())?;
@@ -335,6 +361,9 @@ fn tls_pairing_bidirectional_copy_deduplication_and_reconnect() -> Result<()> {
     proof.verify("server", paired["proof"].as_str().ok_or("proof")?)?;
     let secret = paired["token"].as_str().ok_or("token")?.to_string();
     assert_eq!(read(&mut client)?["type"], "ready");
+    // This legacy client did not advertise images. It must keep its text session.
+    fixture.publish_image()?;
+    std::thread::sleep(Duration::from_millis(300));
     fixture.publish("电脑\nHello 👋")?;
     let from_pc = read(&mut client)?;
     assert_eq!(from_pc["clip"]["text"], "电脑\nHello 👋");
@@ -344,6 +373,7 @@ fn tls_pairing_bidirectional_copy_deduplication_and_reconnect() -> Result<()> {
         clock: now() + 100,
         created: now(),
         text: "手机\nworld".into(),
+        image: None,
     };
     write(&mut client, json!({"type":"clip", "clip":clip}))?;
     assert_eq!(fixture.receive(Duration::from_secs(3))?.text, "手机\nworld");
@@ -404,6 +434,16 @@ fn android_emulator_bidirectional_clipboard() -> Result<()> {
     );
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut published = false;
+    let mut text_received = false;
+    let mut originals = Vec::new();
+    for bytes in [
+        include_bytes!("../../../../core/sync/tests/images/sample.jpg").as_slice(),
+        include_bytes!("../../../../core/sync/tests/images/sample.webp").as_slice(),
+    ] {
+        originals.push(bytes.to_vec());
+    }
+    let mut original_index = 0;
+    let mut expected_original: Option<String> = None;
     while Instant::now() < deadline {
         if !published
             && !fixture
@@ -417,11 +457,37 @@ fn android_emulator_bidirectional_clipboard() -> Result<()> {
             fixture.publish("电脑文字\nHello 👋")?;
             published = true;
         }
-        if let Some(clip) = fixture.incoming.lock().map_err(|_| "lock")?.take() {
-            assert_eq!(clip.text, "手机文字\nworld 👋");
-            let _ = std::fs::remove_file(path);
-            println!("Android → Windows and Windows → Android text verified");
-            return Ok(());
+        let incoming = fixture.incoming.lock().map_err(|_| "lock")?.take();
+        if let Some(clip) = incoming {
+            if !text_received {
+                assert_eq!(clip.text, "手机文字\nworld 👋");
+                text_received = true;
+                fixture.publish_image()?;
+            } else {
+                if let Some(expected) = expected_original.take() {
+                    assert_eq!(
+                        clip.image.as_deref(),
+                        Some(expected.as_str()),
+                        "Original image bytes changed in Android clipboard roundtrip"
+                    );
+                } else {
+                    let png = crate::clipboard_image::decode(
+                        clip.image.as_deref().ok_or("phone sent no image")?,
+                    )
+                    .ok_or("invalid phone PNG")?;
+                    let dib = crate::clipboard_image::to_dib(&png).ok_or("PNG decode")?;
+                    assert_eq!(&dib[124..], &[0, 0, 255, 255, 255, 0, 0, 255]);
+                }
+                if original_index < originals.len() {
+                    expected_original =
+                        Some(fixture.publish_image_bytes(&originals[original_index])?);
+                    original_index += 1;
+                } else {
+                    let _ = std::fs::remove_file(path);
+                    println!("Android ↔ desktop text, PNG, JPEG and WebP originals verified");
+                    return Ok(());
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(30));
     }

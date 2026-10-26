@@ -269,9 +269,9 @@ fn macos_start() -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 pub mod macos {
-    use std::{ffi::c_char, sync::OnceLock};
-    pub type Read = unsafe extern "C" fn(*mut u8, usize, *mut u64) -> isize;
-    pub type Write = unsafe extern "C" fn(*const c_char, u64, *mut u64) -> bool;
+    use std::sync::OnceLock;
+    pub type Read = unsafe extern "C" fn(*mut u8, usize, *mut u64, *mut bool) -> isize;
+    pub type Write = unsafe extern "C" fn(*const u8, usize, bool, u64, *mut u64) -> bool;
     pub static CLIPBOARD: OnceLock<(Read, Write)> = OnceLock::new();
     pub fn register(read: Read, write: Write) {
         let _ = CLIPBOARD.set((read, write));
@@ -285,14 +285,15 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
     };
     let mut last = 0;
     let mut own = 0;
-    let mut buffer = vec![0u8; crate::clipboard_protocol::MAX_TEXT + 1];
+    let mut buffer = vec![0u8; crate::clipboard_protocol::MAX_IMAGE];
+    let mut image = false;
     // Seed the sequence without sending clipboard contents copied before enabling sync.
     unsafe {
-        read(buffer.as_mut_ptr(), buffer.len(), &mut last);
+        read(buffer.as_mut_ptr(), buffer.len(), &mut last, &mut image);
     }
     while !stop.load(Ordering::Relaxed) {
         let mut sequence = last;
-        let count = unsafe { read(buffer.as_mut_ptr(), buffer.len(), &mut sequence) };
+        let count = unsafe { read(buffer.as_mut_ptr(), buffer.len(), &mut sequence, &mut image) };
         let enabled = shared.lock().is_ok_and(|s| s.config.enabled);
         if sequence != last && sequence != own {
             if let Ok(mut pending) = incoming.lock() {
@@ -301,15 +302,21 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
             if let Ok(mut state) = shared.lock() {
                 state.journal.latest = None;
             }
-            if enabled && count > 0 && (count as usize) <= crate::clipboard_protocol::MAX_TEXT {
-                if let Ok(text) = std::str::from_utf8(&buffer[..count as usize]) {
-                    if let Ok(mut state) = shared.lock() {
-                        state.seq = state.seq.saturating_add(1);
-                        let seq = state.seq;
-                        let id = state.config.id.clone();
-                        if let Some(clip) = state.journal.local(&id, seq, text.into(), now()) {
-                            broadcast(&mut state, &clip);
-                        }
+            if enabled && count > 0 && (count as usize) <= buffer.len() {
+                let bytes = &buffer[..count as usize];
+                if let Ok(mut state) = shared.lock() {
+                    state.seq = state.seq.saturating_add(1);
+                    let seq = state.seq;
+                    let id = state.config.id.clone();
+                    let clip = if image {
+                        state.journal.local_image(&id, seq, bytes, now())
+                    } else {
+                        std::str::from_utf8(bytes)
+                            .ok()
+                            .and_then(|text| state.journal.local(&id, seq, text.into(), now()))
+                    };
+                    if let Some(clip) = clip {
+                        broadcast(&mut state, &clip);
                     }
                 }
             }
@@ -317,10 +324,27 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
         last = sequence;
         let clip = incoming.lock().ok().and_then(|mut p| p.take());
         if let Some(clip) = clip {
-            if enabled {
-                if let Ok(text) = std::ffi::CString::new(clip.text) {
+            if enabled
+                && clip.valid(now())
+                && shared
+                    .lock()
+                    .is_ok_and(|s| s.journal.latest.as_ref() == Some(&clip))
+            {
+                let bytes = match &clip.image {
+                    Some(image) => crate::clipboard_image::decode(image),
+                    None => Some(clip.text.as_bytes().to_vec()),
+                };
+                if let Some(bytes) = bytes {
                     let mut new = last;
-                    if unsafe { write(text.as_ptr(), last, &mut new) } {
+                    if unsafe {
+                        write(
+                            bytes.as_ptr(),
+                            bytes.len(),
+                            clip.image.is_some(),
+                            last,
+                            &mut new,
+                        )
+                    } {
                         own = new;
                         last = new;
                     }
@@ -476,6 +500,7 @@ fn session(
     let mut name = String::new();
     let mut client_confirmed = false;
     let mut authenticated = false;
+    let mut image_formats = Vec::new();
     let mut pairing = false;
     let mut exchange = None;
     let mut resume = None;
@@ -517,6 +542,7 @@ fn session(
         for message in decoder.feed(&buffer[..count])? {
             match message["type"].as_str().unwrap_or_default() {
                 "hello" if peer.is_empty() => {
+                    image_formats = crate::clipboard_image::peer_formats(&message);
                     peer = message["id"].as_str().unwrap_or_default().into();
                     name = message["name"]
                         .as_str()
@@ -622,9 +648,9 @@ fn session(
                 }
                 "clip" if authenticated => {
                     let clip: Clip = serde_json::from_value(message["clip"].clone())
-                        .map_err(|_| "无效的文字消息")?;
+                        .map_err(|_| "无效的剪贴板消息")?;
                     if clip.origin != peer {
-                        return Err("文字来源无效".into());
+                        return Err("剪贴板来源无效".into());
                     }
                     let mut state = shared.lock().map_err(|_| "设备状态不可用")?;
                     if state.journal.accept(clip.clone(), now()) {
@@ -712,10 +738,10 @@ fn session(
                 state.senders.push((peer.clone(), Arc::clone(&pending)));
                 send(
                     &mut stream,
-                    json!({"type":"ready", "id":state.config.id, "name":state.config.name,"addresses":local_addresses(state.status.port)}),
+                    json!({"type":"ready", "images":true,"imageFormats":crate::clipboard_image::MIME_TYPES, "id":state.config.id, "name":state.config.name,"addresses":local_addresses(state.status.port)}),
                 )?;
                 if let Some(clip) = &state.journal.latest {
-                    if clip.valid(now()) {
+                    if clip.valid(now()) && clip.supported_by(&image_formats) {
                         send(&mut stream, json!({"type":"clip", "clip":clip}))?;
                     }
                 }
@@ -723,7 +749,7 @@ fn session(
             drop(state);
             let latest = pending.lock().map_err(|_| "设备消息不可用")?.take();
             if let Some(clip) = latest {
-                if clip.valid(now()) {
+                if clip.valid(now()) && clip.supported_by(&image_formats) {
                     send(&mut stream, json!({"type":"clip", "clip":clip}))?;
                 }
             }
@@ -1171,6 +1197,31 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
             DestroyWindow(hwnd);
             return;
         }
+        // Prefer encoded originals over bitmap/PNG representations offered alongside them.
+        let encoded_formats: Vec<_> = [
+            ("WebP", "image/webp"),
+            ("WEBP", "image/webp"),
+            ("image/webp", "image/webp"),
+            ("JPEG", "image/jpeg"),
+            ("JFIF", "image/jpeg"),
+            ("image/jpeg", "image/jpeg"),
+            ("GIF", "image/gif"),
+            ("image/gif", "image/gif"),
+            ("PNG", "image/png"),
+            ("image/png", "image/png"),
+            ("BMP", "image/bmp"),
+            ("image/bmp", "image/bmp"),
+            ("TIFF", "image/tiff"),
+            ("image/tiff", "image/tiff"),
+        ]
+        .into_iter()
+        .map(|(name, mime)| {
+            (
+                RegisterClipboardFormatW(retype_learning::transport::wide(name).as_ptr()),
+                mime,
+            )
+        })
+        .collect();
         let excluded = RegisterClipboardFormatW(
             retype_learning::transport::wide("ExcludeClipboardContentFromMonitorProcessing")
                 .as_ptr(),
@@ -1209,36 +1260,79 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
                     if sequence == GetClipboardSequenceNumber()
                         && IsClipboardFormatAvailable(excluded) == 0
                     {
-                        let data = GetClipboardData(13);
-                        if !data.is_null() {
+                        let mut encoded_image = None;
+                        // Encoded formats keep their bytes; raw screenshots fall back to PNG.
+                        for format in encoded_formats
+                            .iter()
+                            .map(|(format, _)| *format)
+                            .chain([17, 8])
+                        {
+                            let data = GetClipboardData(format);
+                            if data.is_null() {
+                                continue;
+                            }
                             let size = GlobalSize(data);
-                            if size <= 2 * crate::clipboard_protocol::MAX_TEXT + 2 {
-                                let ptr = GlobalLock(data).cast::<u16>();
-                                if !ptr.is_null() {
-                                    let slice = std::slice::from_raw_parts(ptr, size / 2);
-                                    let end =
-                                        slice.iter().position(|v| *v == 0).unwrap_or(slice.len());
-                                    let text = String::from_utf16_lossy(&slice[..end]);
-                                    if let Ok(mut state) = shared.lock() {
-                                        if state.config.enabled {
-                                            state.seq += 1;
-                                            let seq = state.seq;
-                                            let id = state.config.id.clone();
-                                            if let Some(clip) =
-                                                state.journal.local(&id, seq, text, now())
-                                            {
-                                                broadcast(&mut state, &clip);
-                                            }
-                                        }
+                            let limit = if format != 17 && format != 8 {
+                                crate::clipboard_protocol::MAX_IMAGE
+                            } else {
+                                crate::clipboard_protocol::MAX_PIXELS as usize * 4 + 124
+                            };
+                            if size == 0 || size > limit {
+                                continue;
+                            }
+                            let ptr = GlobalLock(data).cast::<u8>();
+                            if ptr.is_null() {
+                                continue;
+                            }
+                            let bytes = std::slice::from_raw_parts(ptr, size);
+                            encoded_image = if format != 17 && format != 8 {
+                                crate::clipboard_image::dimensions(bytes).map(|_| bytes.to_vec())
+                            } else {
+                                crate::clipboard_image::from_dib(bytes)
+                            };
+                            GlobalUnlock(data);
+                            if encoded_image.is_some() {
+                                break;
+                            }
+                        }
+                        let mut text = None;
+                        if encoded_image.is_none() {
+                            let data = GetClipboardData(13);
+                            if !data.is_null() {
+                                let size = GlobalSize(data);
+                                if size <= 2 * crate::clipboard_protocol::MAX_TEXT + 2 {
+                                    let ptr = GlobalLock(data).cast::<u16>();
+                                    if !ptr.is_null() {
+                                        let slice = std::slice::from_raw_parts(ptr, size / 2);
+                                        let end = slice
+                                            .iter()
+                                            .position(|v| *v == 0)
+                                            .unwrap_or(slice.len());
+                                        text = Some(String::from_utf16_lossy(&slice[..end]));
+                                        GlobalUnlock(data);
                                     }
-                                    GlobalUnlock(data);
+                                }
+                            }
+                        }
+                        if let Ok(mut state) = shared.lock() {
+                            if state.config.enabled {
+                                state.seq = state.seq.saturating_add(1);
+                                let seq = state.seq;
+                                let id = state.config.id.clone();
+                                let clip = if let Some(bytes) = encoded_image {
+                                    state.journal.local_image(&id, seq, &bytes, now())
+                                } else {
+                                    text.and_then(|text| state.journal.local(&id, seq, text, now()))
+                                };
+                                if let Some(clip) = clip {
+                                    broadcast(&mut state, &clip);
                                 }
                             }
                         }
                     }
                     CloseClipboard();
                     pending_read = None;
-                    // Any local copy, including a non-text copy, takes precedence
+                    // Any local copy takes precedence
                     // over a remote write that was waiting for this clipboard.
                     pending_write = None;
                 }
@@ -1259,24 +1353,54 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
                     && GetClipboardSequenceNumber() == last_sequence
                     && OpenClipboard(hwnd) != 0
                 {
-                    let wide: Vec<u16> = clip.text.encode_utf16().chain(Some(0)).collect();
-                    let data = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
-                    let ptr = if data.is_null() {
-                        std::ptr::null_mut()
+                    let formats = if let Some(image) = &clip.image {
+                        crate::clipboard_image::decode(image).and_then(|bytes| {
+                            let mime = crate::clipboard_image::mime_type(&bytes)?;
+                            let dib = crate::clipboard_image::to_dib(&bytes)?;
+                            let mut formats: Vec<_> = encoded_formats
+                                .iter()
+                                .filter(|(_, supported)| *supported == mime)
+                                .map(|(format, _)| (*format, bytes.clone()))
+                                .collect();
+                            formats.push((17, dib));
+                            Some(formats)
+                        })
                     } else {
-                        GlobalLock(data).cast::<u16>()
+                        Some(vec![(
+                            13,
+                            clip.text
+                                .encode_utf16()
+                                .chain(Some(0))
+                                .flat_map(u16::to_le_bytes)
+                                .collect(),
+                        )])
                     };
                     let mut applied = false;
-                    if !ptr.is_null() {
-                        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-                        GlobalUnlock(data);
-                        if EmptyClipboard() != 0 && !SetClipboardData(13, data).is_null() {
-                            applied = true;
-                        } else {
-                            GlobalFree(data);
+                    // Allocate before clearing so malformed images never erase a local copy.
+                    if let Some(formats) = formats {
+                        let mut allocations = Vec::new();
+                        for (format, bytes) in &formats {
+                            let data = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+                            if data.is_null() {
+                                break;
+                            }
+                            let ptr = GlobalLock(data).cast::<u8>();
+                            if ptr.is_null() {
+                                GlobalFree(data);
+                                break;
+                            }
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                            GlobalUnlock(data);
+                            allocations.push((*format, data));
                         }
-                    } else if !data.is_null() {
-                        GlobalFree(data);
+                        let ready = allocations.len() == formats.len() && EmptyClipboard() != 0;
+                        for (format, data) in allocations {
+                            if ready && !SetClipboardData(format, data).is_null() {
+                                applied = true; // The clipboard owns this allocation.
+                            } else {
+                                GlobalFree(data);
+                            }
+                        }
                     }
                     CloseClipboard();
                     if applied {

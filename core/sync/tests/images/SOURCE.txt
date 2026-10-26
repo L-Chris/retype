@@ -1,0 +1,3 @@
+Synthetic 3x2 RGB samples generated for the original-format clipboard tests.
+Colors: (20,80,160) with pixel (1,1) set to (230,30,50).
+JPEG quality 85; WebP quality 80. No external image sources.

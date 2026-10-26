@@ -1,4 +1,5 @@
 #import "App.h"
+#import "Lucide.h"
 #import <objc/runtime.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <QuartzCore/QuartzCore.h>
@@ -36,6 +37,8 @@ static NSImage *RTLogoImage(void) {
 }
 static NSImage *RTSymbolImage(NSString *name, CGFloat pointSize, NSFontWeight weight, NSColor *tint) {
     if (!name.length) return nil;
+    NSImage *shared = RTLucideImage(name, pointSize, tint);
+    if (shared) return shared;
     NSImage *base = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
     if (!base) return nil;
     NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:pointSize weight:weight];
@@ -145,8 +148,8 @@ static void RTUpdateSecretFields(NSView *view,NSString *path,NSString *value) {
         [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:10 yRadius:10] fill];
     }
     NSColor *color = self.activeItem ? RTAccent() : RTInk();
-    // Fixed symbol configuration (14pt Medium) guarantees identical icon bounds in all states.
-    NSImage *icon = RTSymbolImage(self.symbolName, 14.0, NSFontWeightMedium, color);
+    // Shared 24-unit Lucide geometry uses a fixed 20pt navigation size in all states.
+    NSImage *icon = RTSymbolImage(self.symbolName, 20.0, NSFontWeightMedium, color);
     if (icon) {
         NSSize iconSize = icon.size;
         NSRect iconRect = NSMakeRect(round(21.0 - iconSize.width / 2.0), round(NSMidY(self.bounds) - iconSize.height / 2.0), iconSize.width, iconSize.height);
@@ -211,7 +214,7 @@ typedef NS_ENUM(NSInteger, RTButtonStyle) {
     [fill setFill]; [path fill];
     if (stroke) { path.lineWidth = 1; [stroke setStroke]; [path stroke]; }
 
-    NSImage *icon = RTSymbolImage(self.symbolName, 13.0, NSFontWeightMedium, text);
+    NSImage *icon = RTSymbolImage(self.symbolName, 18.0, NSFontWeightMedium, text);
     BOOL hasTitle = self.title.length > 0;
     if (icon && !hasTitle) {
         NSSize iconSize = icon.size;
@@ -414,7 +417,7 @@ static RTSettings *RTLoadedSettings;
 + (instancetype)shared {
     static RTSettings *controller; static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,840,660)
+        NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,800,600)
             styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskFullSizeContentView
             backing:NSBackingStoreBuffered defer:NO];
         window.title = @"retype 设置"; window.titleVisibility = NSWindowTitleHidden; window.titlebarAppearsTransparent = YES;
@@ -430,19 +433,19 @@ static RTSettings *RTLoadedSettings;
     self.secretQueue=RTSecretQueue();
     NSView *root = self.window.contentView; root.wantsLayer = YES;
     root.layer.backgroundColor = [NSColor colorWithCalibratedRed:246/255. green:249/255. blue:250/255. alpha:1].CGColor;
-    NSView *sidebar = [[NSView alloc] initWithFrame:NSMakeRect(0,0,190,660)]; sidebar.wantsLayer = YES;
+    NSView *sidebar = [[NSView alloc] initWithFrame:NSMakeRect(0,0,190,600)]; sidebar.wantsLayer = YES;
     sidebar.layer.backgroundColor = [NSColor colorWithCalibratedRed:222/255. green:246/255. blue:248/255. alpha:1].CGColor;
     [root addSubview:sidebar];
-    NSView *sidebarBorder = [[NSView alloc] initWithFrame:NSMakeRect(189,0,1,660)]; sidebarBorder.wantsLayer = YES;
+    NSView *sidebarBorder = [[NSView alloc] initWithFrame:NSMakeRect(189,0,1,600)]; sidebarBorder.wantsLayer = YES;
     sidebarBorder.layer.backgroundColor = [NSColor colorWithCalibratedRed:206/255. green:233/255. blue:236/255. alpha:1].CGColor;
     [sidebar addSubview:sidebarBorder];
-    NSImageView *logo = [[NSImageView alloc] initWithFrame:NSMakeRect(20,588,34,34)];
+    NSImageView *logo = [[NSImageView alloc] initWithFrame:NSMakeRect(20,528,34,34)];
     logo.image = RTLogoImage(); logo.wantsLayer = YES; logo.layer.cornerRadius = 8; logo.layer.masksToBounds = YES;
     [sidebar addSubview:logo];
-    NSTextField *brand = RTBoldLabel(@"retype",16); brand.frame = NSMakeRect(62,594,118,22); [sidebar addSubview:brand];
+    NSTextField *brand = RTBoldLabel(@"retype",16); brand.frame = NSMakeRect(62,534,118,22); [sidebar addSubview:brand];
     NSArray *titles = @[@"输入",@"词库",@"AI 提供商",@"翻译",@"语音输入",@"快捷键",@"统计",@"云同步",@"跨设备",@"关于"];
-    NSArray *icons = @[@"keyboard",@"books.vertical",@"cpu",@"character.bubble",@"mic",@"command",@"chart.bar",@"cloud",@"laptopcomputer.and.iphone",@"info.circle"];
-    self.navigation = [[NSStackView alloc] initWithFrame:NSMakeRect(12,76,166,484)];
+    NSArray *icons = @[@"keyboard",@"book-open",@"cpu",@"languages",@"mic",@"command",@"chart-no-axes-column",@"cloud",@"monitor-smartphone",@"info"];
+    self.navigation = [[NSStackView alloc] initWithFrame:NSMakeRect(12,58,166,440)];
     self.navigation.orientation = NSUserInterfaceLayoutOrientationVertical; self.navigation.spacing = 4; self.navigation.distribution = NSStackViewDistributionFillEqually;
     self.navigation.alignment = NSLayoutAttributeLeading;
     [sidebar addSubview:self.navigation];
@@ -450,7 +453,7 @@ static RTSettings *RTLoadedSettings;
         RTNavButton *button = [RTNavButton new]; button.cell = [RTNavigationCell new];
         button.title = titles[i];
         NSString *sym = icons[i];
-        if (![NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil] && i == 8) sym = @"doc.on.clipboard";
+        if (!RTLucideImage(sym, 20, RTInk()) && ![NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil] && i == 8) sym = @"doc.on.clipboard";
         button.symbolName = sym;
         button.image = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:titles[i]];
         button.target = self; button.action = @selector(navigate:);
@@ -460,12 +463,12 @@ static RTSettings *RTLoadedSettings;
         button.translatesAutoresizingMaskIntoConstraints = NO;
         [button.widthAnchor constraintEqualToAnchor:self.navigation.widthAnchor].active = YES;
     }
-    self.titleLabel = RTBoldLabel(@"输入",24); self.titleLabel.frame = NSMakeRect(222,585,560,36); [root addSubview:self.titleLabel];
-    self.scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(212,52,608,516)];
+    self.titleLabel = RTBoldLabel(@"输入",24); self.titleLabel.frame = NSMakeRect(222,525,556,36); [root addSubview:self.titleLabel];
+    self.scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(212,36,580,472)];
     self.scroll.hasVerticalScroller = YES; self.scroll.autohidesScrollers = YES; self.scroll.scrollerStyle = NSScrollerStyleOverlay;
     self.scroll.verticalScroller = [RTLightScroller new]; self.scroll.drawsBackground = NO;
-    self.body = [[RTFlipped alloc] initWithFrame:NSMakeRect(0,0,580,516)]; self.scroll.documentView = self.body; [root addSubview:self.scroll];
-    self.messageLabel = RTLabel(@"",12); self.messageLabel.textColor = RTMuted(); self.messageLabel.frame = NSMakeRect(224,14,576,28);
+    self.body = [[RTFlipped alloc] initWithFrame:NSMakeRect(0,0,580,472)]; self.scroll.documentView = self.body; [root addSubview:self.scroll];
+    self.messageLabel = RTLabel(@"",12); self.messageLabel.textColor = RTMuted(); self.messageLabel.frame = NSMakeRect(224,4,554,28);
     self.messageLabel.maximumNumberOfLines = 2; self.messageLabel.lineBreakMode = NSLineBreakByWordWrapping; [root addSubview:self.messageLabel];
     self.presets = RTFeature(@{@"type":@"providerPresets"})[@"value"];
     self.packs = RTFeature(@{@"type":@"packCatalog"})[@"value"];
@@ -722,7 +725,7 @@ static RTSettings *RTLoadedSettings;
             }
 
             RTButton *cancel = [[RTButton alloc] initWithFrame:NSMakeRect(470, 11, 34, 34)];
-            cancel.symbolName = @"xmark"; cancel.toolTip = @"关闭匹配码"; cancel.accessibilityLabel = @"关闭匹配码";
+            cancel.symbolName = @"x"; cancel.toolTip = @"关闭匹配码"; cancel.accessibilityLabel = @"关闭匹配码";
             cancel.target = self; cancel.action = @selector(cancelPair:);
             [box addSubview:cancel];
             self.row += 64;
@@ -732,8 +735,8 @@ static RTSettings *RTLoadedSettings;
             [self divider];
             [self rowLabel:@"匹配码"];
             [self textFieldAtX:140 width:312 path:@"lan.joinCode" placeholder:@"输入 6 位数字" secure:NO];
-            [self iconButton:@"checkmark" tooltip:@"确认关联" style:RTButtonStylePrimary action:@selector(submitJoin:) x:460];
-            [self iconButton:@"xmark" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelJoin:) x:502];
+            [self iconButton:@"check" tooltip:@"确认关联" style:RTButtonStylePrimary action:@selector(submitJoin:) x:460];
+            [self iconButton:@"x" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelJoin:) x:502];
             self.row += 44;
             [self rowLabel:@"指定地址"];
             [self textFieldAtX:140 width:396 path:@"lan.joinAddress" placeholder:@"选填，如 100.64.0.1:50206（局域网留空）" secure:NO];
@@ -790,7 +793,7 @@ static RTSettings *RTLoadedSettings;
                 addrLabel.frame = NSMakeRect(34, self.row + 21, 410, 18);
                 [self.card addSubview:addrLabel];
 
-                RTButton *addrBtn = [self iconButton:@"slider.horizontal.3" tooltip:@"连接地址" style:[self.editingPeerID isEqual:peerId] ? RTButtonStylePrimary : RTButtonStyleSecondary action:@selector(peerAddress:) x:460];
+                RTButton *addrBtn = [self iconButton:@"sliders-horizontal" tooltip:@"连接地址" style:[self.editingPeerID isEqual:peerId] ? RTButtonStylePrimary : RTButtonStyleSecondary action:@selector(peerAddress:) x:460];
                 addrBtn.identifier = peerId;
                 RTButton *removeBtn = [self iconButton:@"trash" tooltip:@"解除关联" style:RTButtonStyleDanger action:@selector(removePeer:) x:502];
                 removeBtn.identifier = peerId;
@@ -798,9 +801,9 @@ static RTSettings *RTLoadedSettings;
 
                 if ([self.editingPeerID isEqual:peerId]) {
                     [self textFieldAtX:34 width:418 path:@"lan.peerAddress" placeholder:@"IP 或域名:端口，多个用逗号分隔" secure:NO];
-                    RTButton *saveAddr = [self iconButton:@"checkmark" tooltip:@"保存地址" style:RTButtonStylePrimary action:@selector(savePeerAddress:) x:460];
+                    RTButton *saveAddr = [self iconButton:@"check" tooltip:@"保存地址" style:RTButtonStylePrimary action:@selector(savePeerAddress:) x:460];
                     saveAddr.identifier = peerId;
-                    [self iconButton:@"xmark" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelPeerAddress:) x:502];
+                    [self iconButton:@"x" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelPeerAddress:) x:502];
                     self.row += 42;
                 }
             }
@@ -816,8 +819,8 @@ static RTSettings *RTLoadedSettings;
         NSString *portText = portNum.unsignedIntegerValue ? portNum.stringValue : @"50206";
         if (self.editingLanPort) {
             [self textFieldAtX:140 width:120 path:@"lan.port" placeholder:@"50206" secure:NO];
-            [self iconButton:@"checkmark" tooltip:@"应用端口" style:RTButtonStylePrimary action:@selector(saveLanPort:) x:268];
-            [self iconButton:@"xmark" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelLanPort:) x:310];
+            [self iconButton:@"check" tooltip:@"应用端口" style:RTButtonStylePrimary action:@selector(saveLanPort:) x:268];
+            [self iconButton:@"x" tooltip:@"取消" style:RTButtonStyleSecondary action:@selector(cancelLanPort:) x:310];
         } else {
             NSTextField *portLabel = RTLabel(portText, 13);
             portLabel.font = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightRegular];
@@ -838,7 +841,7 @@ static RTSettings *RTLoadedSettings;
                 addrItem.textColor = RTMuted();
                 addrItem.frame = NSMakeRect(140, self.row + 8, 350, 20);
                 [self.card addSubview:addrItem];
-                RTButton *copyBtn = [self iconButton:@"doc.on.doc" tooltip:@"复制地址" style:RTButtonStyleSecondary action:@selector(copyAddress:) x:502];
+                RTButton *copyBtn = [self iconButton:@"copy" tooltip:@"复制地址" style:RTButtonStyleSecondary action:@selector(copyAddress:) x:502];
                 copyBtn.identifier = address;
                 self.row += 38;
             }
@@ -888,7 +891,7 @@ static RTSettings *RTLoadedSettings;
             NSTextField *baseTitle = RTBoldLabel(@"基础词库", 15);
             baseTitle.frame = NSMakeRect(20, self.row + 6, 220, 22); [self.card addSubview:baseTitle];
             if (app.resourceBusy) {
-                [self iconButton:@"xmark" tooltip:@"取消下载" style:RTButtonStyleSecondary action:@selector(cancelResources:) x:502];
+                [self iconButton:@"x" tooltip:@"取消下载" style:RTButtonStyleSecondary action:@selector(cancelResources:) x:502];
             } else {
                 [self styledButton:@"下载" symbol:@"arrow.down.circle" tooltip:@"在线下载基础词库" style:RTButtonStylePrimary action:@selector(downloadResources:) x:344 width:92];
                 [self styledButton:@"导入" symbol:@"folder" tooltip:@"从本地文件导入词库包" style:RTButtonStyleSecondary action:@selector(importResources:) x:444 width:92];
@@ -950,8 +953,8 @@ static RTSettings *RTLoadedSettings;
             [model addItemsWithObjectValues:[self provider][@"models"]];
             model.stringValue = self.testModel ?: [[self provider][@"models"] firstObject] ?: @""; [self.card addSubview:model];
             BOOL busy = [app.jobs containsObject:@"provider"];
-            [self iconButton:@"arrow.clockwise" tooltip:@"刷新模型列表" style:RTButtonStyleSecondary action:@selector(refreshModels:) x:460].enabled = !busy;
-            [self iconButton:@"bolt.horizontal.fill" tooltip:@"测试接口连接" style:RTButtonStylePrimary action:@selector(testProvider:) x:502].enabled = !busy;
+            [self iconButton:@"refresh-cw" tooltip:@"刷新模型列表" style:RTButtonStyleSecondary action:@selector(refreshModels:) x:460].enabled = !busy;
+            [self iconButton:@"flask-conical" tooltip:@"测试接口连接" style:RTButtonStylePrimary action:@selector(testProvider:) x:502].enabled = !busy;
             self.row += 42; [self finishCard];
         }
     } else if (self.page == 3) {
@@ -980,11 +983,11 @@ static RTSettings *RTLoadedSettings;
         NSTextField *testTitle = RTBoldLabel(@"录音测试", 14);
         testTitle.frame = NSMakeRect(20, self.row + 7, 160, 22); [self.card addSubview:testTitle];
         if (RTVoice.shared.running) {
-            RTButton *stop = [self styledButton:RTVoice.shared.recording ? @"停止" : @"识别中" symbol:RTVoice.shared.recording ? @"stop.fill" : @"waveform" tooltip:@"结束录音并开始识别" style:RTButtonStylePrimary action:@selector(testVoice:) x:404 width:90];
+            RTButton *stop = [self styledButton:RTVoice.shared.recording ? @"停止" : @"识别中" symbol:RTVoice.shared.recording ? @"square" : @"audio-lines" tooltip:@"结束录音并开始识别" style:RTButtonStylePrimary action:@selector(testVoice:) x:404 width:90];
             stop.enabled = RTVoice.shared.recording;
-            [self iconButton:@"xmark" tooltip:@"取消录音" style:RTButtonStyleSecondary action:@selector(cancelVoice:) x:502];
+            [self iconButton:@"x" tooltip:@"取消录音" style:RTButtonStyleSecondary action:@selector(cancelVoice:) x:502];
         } else {
-            [self styledButton:@"录音" symbol:@"mic.fill" tooltip:@"开始录音测试" style:RTButtonStylePrimary action:@selector(testVoice:) x:452 width:84];
+            [self styledButton:@"录音" symbol:@"mic" tooltip:@"开始录音测试" style:RTButtonStylePrimary action:@selector(testVoice:) x:452 width:84];
         }
         self.row += 42;
         if (RTVoice.shared.preview.length) {
@@ -1062,8 +1065,8 @@ static RTSettings *RTLoadedSettings;
         [self field:@"应用密码" path:@"secret:cloud" secure:YES];
         [self field:@"设备名称" path:@"cloud.device_name" secure:NO];
         BOOL busy = [app.jobs containsObject:@"cloud"];
-        [self styledButton:@"测试" symbol:@"bolt.horizontal" tooltip:@"测试 WebDAV 连接" style:RTButtonStyleSecondary action:@selector(testCloud:) x:140 width:88].enabled = !busy;
-        [self styledButton:[app.syncStatus[@"awaitingMerge"] boolValue] ? @"合并" : @"同步" symbol:@"arrow.triangle.2.circlepath" tooltip:@"立即执行云同步" style:RTButtonStylePrimary action:@selector(syncCloud:) x:236 width:96].enabled = !busy;
+        [self styledButton:@"测试" symbol:@"flask-conical" tooltip:@"测试 WebDAV 连接" style:RTButtonStyleSecondary action:@selector(testCloud:) x:140 width:88].enabled = !busy;
+        [self styledButton:[app.syncStatus[@"awaitingMerge"] boolValue] ? @"合并" : @"同步" symbol:@"refresh-cw" tooltip:@"立即执行云同步" style:RTButtonStylePrimary action:@selector(syncCloud:) x:236 width:96].enabled = !busy;
         self.row += 42; [self finishCard];
 
         for (NSDictionary *conflict in app.syncStatus[@"conflicts"]) {
@@ -1095,9 +1098,9 @@ static RTSettings *RTLoadedSettings;
         if (app.update[@"version"]) {
             [self styledButton:@"更新" symbol:@"arrow.down.circle.fill" tooltip:@"下载并安装新版本" style:RTButtonStylePrimary action:@selector(installUpdate:) x:368 width:82].enabled = !updateBusy;
             [self iconButton:@"forward.end" tooltip:@"跳过此版本" style:RTButtonStyleSecondary action:@selector(skipUpdate:) x:458];
-            [self iconButton:@"arrow.clockwise" tooltip:@"重新检查更新" style:RTButtonStyleSecondary action:@selector(checkUpdate:) x:500].enabled = !updateBusy;
+            [self iconButton:@"refresh-cw" tooltip:@"重新检查更新" style:RTButtonStyleSecondary action:@selector(checkUpdate:) x:500].enabled = !updateBusy;
         } else {
-            [self iconButton:@"arrow.clockwise" tooltip:@"检查更新" style:RTButtonStyleSecondary action:@selector(checkUpdate:) x:502].enabled = !updateBusy;
+            [self iconButton:@"refresh-cw" tooltip:@"检查更新" style:RTButtonStyleSecondary action:@selector(checkUpdate:) x:502].enabled = !updateBusy;
         }
         self.row += 52;
         [self divider];
@@ -1112,7 +1115,7 @@ static RTSettings *RTLoadedSettings;
         [self styledButton:@"目录" symbol:@"folder" tooltip:@"打开本地应用数据目录" style:RTButtonStyleSecondary action:@selector(dataFolder:) x:456 width:80];
         self.row += 42; [self finishCard];
     }
-    self.body.frame = NSMakeRect(0,0,580,MAX(516,self.y));
+    self.body.frame = NSMakeRect(0,0,580,MAX(NSHeight(self.scroll.contentView.bounds),self.y));
     if (app.resourceBusy && self.page == 1 && !self.progressTimer) {
         __weak RTSettings *weakSelf = self;
         self.progressTimer = [NSTimer scheduledTimerWithTimeInterval:.25 repeats:YES block:^(NSTimer *t){(void)t;weakSelf.progress.doubleValue=rt_resources_progress(app.resources)/10.;}];

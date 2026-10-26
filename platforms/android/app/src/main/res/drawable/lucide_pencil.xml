@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from assets/icons; Lucide ISC/MIT, see assets/icons/LICENSE. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+  <path android:pathData="M 21.174,6.812 A 2.8188812053720893,2.8188812053720893 0.0 0,0 17.188,2.825 L 3.842,16.174 A 2.0,2.0 0.0 0,0 3.342,17.003999999999998 L 2.021,21.355999999999998 A 0.5,0.5 0.0 0,0 2.644,21.977999999999998 L 6.997,20.657999999999998 A 2.0,2.0 0.0 0,0 7.827,20.160999999999998 L 21.174,6.812" android:fillColor="@android:color/transparent" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+  <path android:pathData="M 15.0,5.0 L 19.0,9.0" android:fillColor="@android:color/transparent" android:strokeColor="#FF000000" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>

@@ -147,7 +147,7 @@ pub(super) fn connect(
     let fingerprint = crate::hash(cert.as_ref());
     send(
         &mut stream,
-        json!({"type":"hello","version":2,"id":id,"name":name,"mode":if pairing{&mode}else{""},"token":if pairing || resuming {""}else{&secret},"resume":if resuming {Some(&nonce)}else{None},"addresses":local_addresses(shared.lock().map_err(|_| "设备状态不可用")?.status.port)}),
+        json!({"type":"hello","version":2,"images":true,"imageFormats":crate::clipboard_image::MIME_TYPES,"id":id,"name":name,"mode":if pairing{&mode}else{""},"token":if pairing || resuming {""}else{&secret},"resume":if resuming {Some(&nonce)}else{None},"addresses":local_addresses(shared.lock().map_err(|_| "设备状态不可用")?.status.port)}),
     )?;
     let mut decoder = Decoder::default();
     let mut buffer = [0u8; 8192];
@@ -155,6 +155,7 @@ pub(super) fn connect(
     let mut resumed = false;
     let mut paired = false;
     let mut ready = false;
+    let mut image_formats = Vec::new();
     let mut last_read = Instant::now();
     let mut heartbeat = Instant::now();
     let outgoing = Arc::new(Mutex::new(None::<Clip>));
@@ -178,7 +179,7 @@ pub(super) fn connect(
         }
         if ready {
             if let Some(clip) = outgoing.lock().map_err(|_| "消息状态无效")?.take() {
-                if clip.origin == id && clip.valid(now()) {
+                if clip.origin == id && clip.valid(now()) && clip.supported_by(&image_formats) {
                     send(&mut stream, json!({"type":"clip","clip":clip}))?;
                 }
             }
@@ -293,6 +294,7 @@ pub(super) fn connect(
                     paired = true;
                 }
                 "ready" => {
+                    image_formats = crate::clipboard_image::peer_formats(&message);
                     if message["id"] != remote || (pairing && !paired) || (resuming && !resumed) {
                         return Err("设备未通过验证".into());
                     }
@@ -327,14 +329,17 @@ pub(super) fn connect(
                     s.senders.push((remote.clone(), Arc::clone(&outgoing)));
                     s.status.message = "已连接".into();
                     if let Some(clip) = &s.journal.latest {
-                        if clip.origin == id && clip.valid(now()) {
+                        if clip.origin == id
+                            && clip.valid(now())
+                            && clip.supported_by(&image_formats)
+                        {
                             send(&mut stream, json!({"type":"clip","clip":clip}))?;
                         }
                     }
                 }
                 "clip" if ready => {
                     let clip: Clip = serde_json::from_value(message["clip"].clone())
-                        .map_err(|_| "文字消息无效")?;
+                        .map_err(|_| "剪贴板消息无效")?;
                     let mut s = shared.lock().map_err(|_| "设备状态不可用")?;
                     if s.journal.accept(clip.clone(), now()) {
                         if let Ok(mut incoming) = clipboard.lock() {

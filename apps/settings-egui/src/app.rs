@@ -849,7 +849,7 @@ impl SettingsApp {
     fn about_page(&mut self, ui: &mut egui::Ui) {
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(38.0)));
+                ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(34.0)));
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     ui.label(RichText::new("retype 输入法").size(16.0).strong());
@@ -1165,9 +1165,11 @@ fn heading(ui: &mut egui::Ui, title: &str) {
     ui.label(RichText::new(title).size(26.0).strong());
     ui.add_space(18.0);
 }
-fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), egui::Sense::click());
+fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool, height: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), height),
+        egui::Sense::click(),
+    );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title)
     });
@@ -1198,151 +1200,20 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
         );
     }
     let color = if selected { ACCENT } else { INK };
-    let stroke = Stroke::new(1.7_f32, color);
     let origin = rect.left_center() + Vec2::new(26.0, 0.0);
-    match page {
-        Page::Input => {
-            painter.rect_stroke(
-                egui::Rect::from_center_size(origin, Vec2::new(18.0, 12.0)),
-                2,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            for row in 0..2 {
-                for column in 0..4 {
-                    painter.circle_filled(
-                        origin + Vec2::new(-5.0 + column as f32 * 3.5, -2.5 + row as f32 * 3.0),
-                        0.8,
-                        color,
-                    );
-                }
-            }
-            painter.line_segment(
-                [origin + Vec2::new(-4.0, 3.5), origin + Vec2::new(4.0, 3.5)],
-                stroke,
-            );
-        }
-        Page::Dictionary => {
-            painter.rect_stroke(
-                egui::Rect::from_center_size(origin, Vec2::new(17.0, 17.0)),
-                2,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.line_segment(
-                [
-                    origin + Vec2::new(-3.5, -7.0),
-                    origin + Vec2::new(-3.5, 7.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [origin + Vec2::new(0.0, -3.0), origin + Vec2::new(5.0, -3.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [origin + Vec2::new(0.0, 1.0), origin + Vec2::new(5.0, 1.0)],
-                stroke,
-            );
-        }
-        Page::Statistics => {
-            for (i, height) in [7.0, 13.0, 18.0].into_iter().enumerate() {
-                painter.rect_filled(
-                    egui::Rect::from_min_size(
-                        origin + Vec2::new(-8.0 + i as f32 * 6.0, 9.0 - height),
-                        Vec2::new(4.0, height),
-                    ),
-                    1,
-                    color,
-                );
-            }
-        }
-        Page::Providers => {
-            for y in [-6.0, 0.0, 6.0] {
-                painter.rect_stroke(
-                    egui::Rect::from_center_size(origin + Vec2::new(0.0, y), Vec2::new(18.0, 5.0)),
-                    1,
-                    stroke,
-                    egui::StrokeKind::Inside,
-                );
-                painter.circle_filled(origin + Vec2::new(-5.5, y), 0.8, color);
-            }
-        }
-        Page::Translation => {
-            // A language mark and the letter A, drawn with the same stroke as other icons.
-            let point = |x: f32, y: f32| origin + Vec2::new(x, y);
-            for (a, b) in [
-                ((-9.0, -5.0), (3.0, -5.0)),
-                ((-3.0, -9.0), (-3.0, -5.0)),
-                ((0.0, -5.0), (-2.0, 0.0)),
-                ((-2.0, 0.0), (-8.0, 5.0)),
-                ((-6.0, -3.0), (-2.0, 2.0)),
-                ((-2.0, 2.0), (0.0, 3.0)),
-                ((1.0, 9.0), (5.0, -1.0)),
-                ((5.0, -1.0), (9.0, 9.0)),
-                ((2.5, 5.0), (7.5, 5.0)),
-            ] {
-                painter.line_segment([point(a.0, a.1), point(b.0, b.1)], stroke);
-            }
-        }
-        Page::Voice => {
-            painter.rect_stroke(
-                egui::Rect::from_center_size(origin, egui::vec2(7.0, 12.0)),
-                4.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.line_segment(
-                [
-                    origin + egui::vec2(0.0, 6.0),
-                    origin + egui::vec2(0.0, 11.0),
-                ],
-                stroke,
-            );
-        }
-        Page::Shortcuts => {
-            painter.text(
-                origin,
-                egui::Align2::CENTER_CENTER,
-                "⌘",
-                egui::FontId::proportional(20.0),
-                color,
-            );
-        }
-        Page::Lan => {
-            painter.rect_stroke(
-                egui::Rect::from_center_size(origin + Vec2::new(-3.0, -2.0), Vec2::new(15.0, 12.0)),
-                2.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.rect_stroke(
-                egui::Rect::from_center_size(origin + Vec2::new(6.0, 4.0), Vec2::new(7.0, 12.0)),
-                2.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        Page::Cloud => {
-            for (x, y, radius) in [(-5.0, 1.0, 5.0), (0.0, -3.0, 6.0), (6.0, 1.0, 4.0)] {
-                painter.circle_stroke(origin + Vec2::new(x, y), radius, stroke);
-            }
-            painter.line_segment(
-                [origin + Vec2::new(-7.0, 6.0), origin + Vec2::new(8.0, 6.0)],
-                stroke,
-            );
-        }
-        Page::About => {
-            painter.circle_stroke(origin, 8.5, stroke);
-            painter.text(
-                origin,
-                egui::Align2::CENTER_CENTER,
-                "i",
-                egui::FontId::proportional(14.0),
-                color,
-            );
-        }
-    }
+    let name = match page {
+        Page::Input => "keyboard",
+        Page::Dictionary => "book-open",
+        Page::Statistics => "chart-no-axes-column",
+        Page::Providers => "cpu",
+        Page::Translation => "languages",
+        Page::Voice => "mic",
+        Page::Shortcuts => "command",
+        Page::Lan => "monitor-smartphone",
+        Page::Cloud => "cloud",
+        Page::About => "info",
+    };
+    crate::icons::draw(painter, origin, name, 20.0, color);
     painter.text(
         rect.left_center() + Vec2::new(52.0, 0.0),
         egui::Align2::LEFT_CENTER,
@@ -1357,7 +1228,7 @@ pub(crate) enum Icon {
     Plus,
     Trash,
     Refresh,
-    Bolt,
+    Test,
     Check,
     Close,
     Sliders,
@@ -1367,80 +1238,19 @@ pub(crate) enum Icon {
 }
 
 fn draw_icon(painter: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
-    let stroke = Stroke::new(1.6_f32, color);
-    let pt = |x: f32, y: f32| c + Vec2::new(x, y);
-    match icon {
-        Icon::Plus => {
-            painter.line_segment([pt(-5.0, 0.0), pt(5.0, 0.0)], stroke);
-            painter.line_segment([pt(0.0, -5.0), pt(0.0, 5.0)], stroke);
-        }
-        Icon::Trash => {
-            painter.line_segment([pt(-5.5, -4.0), pt(5.5, -4.0)], stroke);
-            painter.line_segment([pt(-2.0, -5.5), pt(2.0, -5.5)], stroke);
-            painter.rect_stroke(
-                egui::Rect::from_min_max(pt(-4.0, -4.0), pt(4.0, 5.5)),
-                1.5,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.line_segment([pt(-1.4, -1.5), pt(-1.4, 3.0)], stroke);
-            painter.line_segment([pt(1.4, -1.5), pt(1.4, 3.0)], stroke);
-        }
-        Icon::Refresh => {
-            painter.circle_stroke(c, 5.0, stroke);
-            painter.line_segment([pt(2.0, -5.5), pt(5.5, -5.0)], stroke);
-            painter.line_segment([pt(5.5, -5.0), pt(4.8, -1.5)], stroke);
-        }
-        Icon::Bolt => {
-            painter.line_segment([pt(-5.5, 1.5), pt(-1.8, -3.5)], stroke);
-            painter.line_segment([pt(-1.8, -3.5), pt(1.8, 2.5)], stroke);
-            painter.line_segment([pt(1.8, 2.5), pt(5.5, -2.5)], stroke);
-        }
-        Icon::Check => {
-            painter.line_segment([pt(-5.0, 0.5), pt(-1.5, 4.0)], stroke);
-            painter.line_segment([pt(-1.5, 4.0), pt(5.5, -3.5)], stroke);
-        }
-        Icon::Close => {
-            painter.line_segment([pt(-4.5, -4.5), pt(4.5, 4.5)], stroke);
-            painter.line_segment([pt(-4.5, 4.5), pt(4.5, -4.5)], stroke);
-        }
-        Icon::Sliders => {
-            painter.line_segment([pt(-5.5, -3.0), pt(5.5, -3.0)], stroke);
-            painter.line_segment([pt(-5.5, 3.0), pt(5.5, 3.0)], stroke);
-            painter.circle_filled(pt(-2.0, -3.0), 2.2, color);
-            painter.circle_filled(pt(2.0, 3.0), 2.2, color);
-        }
-        Icon::Edit => {
-            painter.line_segment([pt(-4.5, 4.5), pt(4.0, -4.0)], stroke);
-            painter.line_segment([pt(-5.0, 5.0), pt(-2.0, 4.5)], stroke);
-            painter.line_segment([pt(-5.0, 5.0), pt(-4.5, 2.0)], stroke);
-        }
-        Icon::Copy => {
-            painter.rect_stroke(
-                egui::Rect::from_min_max(pt(-5.0, -5.5), pt(2.0, 2.5)),
-                1.5,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.rect_stroke(
-                egui::Rect::from_min_max(pt(-2.0, -2.5), pt(5.0, 5.5)),
-                1.5,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-        Icon::ExternalLink => {
-            painter.rect_stroke(
-                egui::Rect::from_min_max(pt(-5.0, -2.0), pt(2.5, 5.0)),
-                1.5,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            painter.line_segment([pt(-1.0, 1.0), pt(5.0, -5.0)], stroke);
-            painter.line_segment([pt(1.5, -5.0), pt(5.0, -5.0)], stroke);
-            painter.line_segment([pt(5.0, -5.0), pt(5.0, -1.5)], stroke);
-        }
-    }
+    let name = match icon {
+        Icon::Plus => "plus",
+        Icon::Trash => "trash",
+        Icon::Refresh => "refresh-cw",
+        Icon::Test => "flask-conical",
+        Icon::Check => "check",
+        Icon::Close => "x",
+        Icon::Sliders => "sliders-horizontal",
+        Icon::Edit => "pencil",
+        Icon::Copy => "copy",
+        Icon::ExternalLink => "external-link",
+    };
+    crate::icons::draw(painter, c, name, 18.0, color);
 }
 
 pub(crate) fn icon_button(
@@ -1682,23 +1492,26 @@ impl eframe::App for SettingsApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root.ctx().clone();
         egui::Panel::left("sidebar")
-            .exact_size(238.0)
+            .exact_size(200.0)
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(221, 246, 248))
-                    .inner_margin(20),
+                    .inner_margin(16),
             )
             .show(root, |ui| {
-                ui.add_space(12.0);
+                ui.add_space(8.0);
                 let brand = ui.horizontal(|ui| {
-                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(38.0)));
+                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(34.0)));
                     ui.label(RichText::new("retype").size(18.0).strong());
                 });
                 if brand.response.interact(egui::Sense::drag()).drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-                ui.add_space(24.0);
+                ui.add_space(20.0);
+                // Fit all ten destinations at normal/minimum window heights. Very
+                // short displays retain wheel scrolling as a fallback.
+                let row_height = ((ui.available_height() - 9.0 * 4.0) / 10.0).clamp(30.0, 40.0);
                 egui::ScrollArea::vertical()
                     .id_salt("sidebar-pages")
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -1717,7 +1530,7 @@ impl eframe::App for SettingsApp {
                             (Page::Lan, "跨设备"),
                             (Page::About, "关于"),
                         ] {
-                            if navigation(ui, page, title, self.page == page) {
+                            if navigation(ui, page, title, self.page == page, row_height) {
                                 self.select_page(page);
                             }
                         }
@@ -1948,7 +1761,7 @@ pub fn run() -> AppResult<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("retype 设置")
             .with_decorations(false)
-            .with_inner_size([960.0, 640.0])
+            .with_inner_size([840.0, 600.0])
             .with_min_inner_size([760.0, 520.0]),
         ..Default::default()
     };

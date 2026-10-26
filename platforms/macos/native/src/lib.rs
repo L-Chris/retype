@@ -579,8 +579,8 @@ pub unsafe extern "C" fn rt_runtime_flush(runtime: *const RtRuntime) -> *mut c_c
 pub unsafe extern "C" fn rt_macos_hooks(
     read: unsafe extern "C" fn(*const c_char, *mut u8, usize) -> isize,
     save: unsafe extern "C" fn(*const c_char, *const c_char) -> bool,
-    clipboard_read: unsafe extern "C" fn(*mut u8, usize, *mut u64) -> isize,
-    clipboard_write: unsafe extern "C" fn(*const c_char, u64, *mut u64) -> bool,
+    clipboard_read: unsafe extern "C" fn(*mut u8, usize, *mut u64, *mut bool) -> isize,
+    clipboard_write: unsafe extern "C" fn(*const u8, usize, bool, u64, *mut u64) -> bool,
 ) {
     #[cfg(target_os = "macos")]
     {

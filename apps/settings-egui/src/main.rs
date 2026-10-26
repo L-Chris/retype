@@ -9,6 +9,8 @@ mod backend;
 #[cfg(windows)]
 mod cloud;
 #[cfg(windows)]
+mod icons;
+#[cfg(windows)]
 mod input_chart;
 #[cfg(windows)]
 mod instance;

@@ -21,7 +21,7 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 pub fn perform(v: Value) -> Result<Value> {
     match field(&v, "type")? {
         "featurePolicy" => Ok(
-            json!({"clipboard":{"maxText":retype_sync::clipboard_protocol::MAX_TEXT,"maxFrame":retype_sync::clipboard_protocol::MAX_FRAME,"ttl":retype_sync::clipboard_protocol::TTL_MS,"port":retype_sync::lan_address::DEFAULT_PORT},"statistics":{"lengthLabels":retype_types::statistics::LENGTH_LABELS,"lengthBuckets":retype_types::statistics::LENGTH_BUCKETS}}),
+            json!({"clipboard":{"maxText":retype_sync::clipboard_protocol::MAX_TEXT,"maxImage":retype_sync::clipboard_protocol::MAX_IMAGE,"imageFormats":retype_sync::clipboard_image::MIME_TYPES,"maxPixels":retype_sync::clipboard_protocol::MAX_PIXELS,"maxFrame":retype_sync::clipboard_protocol::MAX_FRAME,"ttl":retype_sync::clipboard_protocol::TTL_MS,"port":retype_sync::lan_address::DEFAULT_PORT},"statistics":{"lengthLabels":retype_types::statistics::LENGTH_LABELS,"lengthBuckets":retype_types::statistics::LENGTH_BUCKETS}}),
         ),
         "resourceCatalog" => {
             let catalog = retype_resources::Catalog::builtin()?;
@@ -183,6 +183,13 @@ pub fn perform(v: Value) -> Result<Value> {
                 _ => Err("设备地址操作无效".into()),
             }
         }
+        "clipboardImageInfo" => {
+            let bytes = retype_sync::clipboard_image::decode(field(&v, "image")?)
+                .ok_or("图片格式或大小无效")?;
+            Ok(
+                json!({"value":retype_sync::clipboard_image::information(&bytes).ok_or("图片无效")?}),
+            )
+        }
         "clipboard" => {
             use retype_sync::clipboard_protocol::{Clip, Journal};
             use std::sync::{Mutex, OnceLock};
@@ -194,7 +201,7 @@ pub fn perform(v: Value) -> Result<Value> {
             let now = v["now"].as_u64().ok_or("剪贴板时间无效")?;
             match field(&v, "operation")? {
                 "local" => Ok(
-                    json!({"event":journal.local(field(&v,"origin")?,v["seq"].as_u64().ok_or("剪贴板序号无效")?,field(&v,"text")?.into(),now)}),
+                    json!({"event":journal.local_content(field(&v,"origin")?,v["seq"].as_u64().ok_or("剪贴板序号无效")?,v["text"].as_str().unwrap_or_default().into(),v["image"].as_str().map(str::to_owned),now)}),
                 ),
                 "accept" => {
                     let clip: Clip =

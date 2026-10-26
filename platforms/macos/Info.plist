@@ -15,7 +15,7 @@
     <key>LSUIElement</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSMicrophoneUsageDescription</key><string>录制语音并发送给你选择的 AI 模型进行转写。</string>
-    <key>NSLocalNetworkUsageDescription</key><string>发现并连接同一局域网中已关联的 retype 设备，同步文字剪贴板。</string>
+    <key>NSLocalNetworkUsageDescription</key><string>发现并连接同一局域网中已关联的 retype 设备，同步文字和图片剪贴板。</string>
     <key>NSBonjourServices</key><array><string>_retype-clip._tcp</string></array>
     <key>InputMethodConnectionName</key><string>io.github.retype.inputmethod.Retype_Connection</string>
     <key>InputMethodServerControllerClass</key><string>RetypeInputController</string>

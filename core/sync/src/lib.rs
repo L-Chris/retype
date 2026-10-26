@@ -1,4 +1,5 @@
 //! Shared synchronization schema, merge policy, clipboard protocol and pairing.
+pub mod clipboard_image;
 pub mod clipboard_protocol;
 pub mod config;
 pub mod lan_address;
