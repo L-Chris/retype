@@ -8,6 +8,26 @@ const BAR: Color32 = Color32::from_rgb(19, 143, 150);
 const LINE: Color32 = Color32::from_rgb(218, 123, 47);
 const MUTED: Color32 = Color32::from_rgb(101, 119, 129);
 
+/// Draw the information icon without relying on a font's optional symbol glyphs.
+pub fn info(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let size = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let center = rect.center();
+        let radius = size * 0.35;
+        let color = ui.visuals().weak_text_color();
+        let stroke = Stroke::new(1.25, color);
+        let painter = ui.painter();
+        painter.circle_stroke(center, radius, stroke);
+        painter.circle_filled(center - Vec2::new(0.0, radius * 0.45), 0.9, color);
+        painter.line_segment([center, center + Vec2::new(0.0, radius * 0.5)], stroke);
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), "统计说明")
+    });
+    response.on_hover_text(text)
+}
+
 fn rate(row: LengthCounts) -> String {
     if row.inputs == 0 {
         "—".into()

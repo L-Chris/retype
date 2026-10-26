@@ -794,7 +794,7 @@ impl SettingsApp {
         let input = history.last().map(|(_, c)| c.input).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(RichText::new("回改与上屏长度").strong());
-            ui.label("ⓘ").on_hover_text(format!("当前时间与版本范围内取消输入 {} 次。取消没有最终长度，不分配到图中。\n仅包含新口径启用后采集的样本。",input.cancelled));
+            crate::input_chart::info(ui, format!("当前时间与版本范围内取消输入 {} 次。取消没有最终长度，不分配到图中。\n仅包含新口径启用后采集的样本。",input.cancelled));
         });
         for (i, chinese, title) in [
             (0, true, "中文输入 · 字/次"),
@@ -803,18 +803,21 @@ impl SettingsApp {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(title).strong());
-                    ui.label("ⓘ").on_hover_text(crate::input_chart::summary(
-                        &input,
-                        chinese,
-                        &format!(
-                            "本{} · {}",
-                            self.period.label(),
-                            self.statistics_version
-                                .as_deref()
-                                .map(version_label)
-                                .unwrap_or("全部版本")
+                    crate::input_chart::info(
+                        ui,
+                        crate::input_chart::summary(
+                            &input,
+                            chinese,
+                            &format!(
+                                "本{} · {}",
+                                self.period.label(),
+                                self.statistics_version
+                                    .as_deref()
+                                    .map(version_label)
+                                    .unwrap_or("全部版本")
+                            ),
                         ),
-                    ));
+                    );
                 });
                 crate::input_chart::draw(ui, &input, chinese, &mut self.input_selection[i]);
             });
