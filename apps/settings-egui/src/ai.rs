@@ -216,7 +216,7 @@ impl AiPages {
             let available = self.models.get(&id).cloned().unwrap_or_default();
             let message = self.messages.get(&id).cloned();
             super::app::card(ui, |ui| {
-                let field_width = (ui.available_width() - 190.0).clamp(120.0, 280.0);
+                let field_width = (ui.available_width() - 210.0).clamp(110.0, 280.0);
                 configure_form(ui);
                 let p = &mut self.config.providers[index];
                 egui::Grid::new(("provider", &id))
@@ -253,7 +253,14 @@ impl AiPages {
                                         }
                                     }
                                 });
-                            if ui.button("删除").clicked() {
+                            if super::app::icon_button(
+                                ui,
+                                super::app::Icon::Trash,
+                                "删除当前提供商",
+                                false,
+                                true,
+                                true,
+                            ) {
                                 remove = Some(index);
                             }
                         });
@@ -344,8 +351,14 @@ impl AiPages {
                                                 .desired_width(200.0)
                                                 .hint_text("模型 ID"),
                                         );
-                                        if ui.button("添加").clicked() && !manual.trim().is_empty()
-                                        {
+                                        if super::app::icon_button(
+                                            ui,
+                                            super::app::Icon::Plus,
+                                            "添加模型",
+                                            true,
+                                            false,
+                                            !manual.trim().is_empty(),
+                                        ) {
                                             let model = manual.trim().to_owned();
                                             if !p.models.contains(&model) {
                                                 p.models.push(model);
@@ -354,14 +367,34 @@ impl AiPages {
                                         }
                                     });
                                 });
-                            if ui
-                                .add_enabled(!loading, egui::Button::new("刷新"))
-                                .clicked()
-                            {
+                            if super::app::icon_button(
+                                ui,
+                                super::app::Icon::Refresh,
+                                "刷新模型列表",
+                                false,
+                                false,
+                                !loading,
+                            ) {
                                 action = Some((
                                     id.clone(),
                                     Operation::Models {
                                         provider: p.clone(),
+                                    },
+                                ));
+                            }
+                            if super::app::icon_button(
+                                ui,
+                                super::app::Icon::Bolt,
+                                "测试接口连接",
+                                true,
+                                false,
+                                !loading && !p.models.is_empty(),
+                            ) {
+                                action = Some((
+                                    id.clone(),
+                                    Operation::Test {
+                                        provider: p.clone(),
+                                        model: p.models.first().cloned().unwrap_or_default(),
                                     },
                                 ));
                             }
@@ -370,26 +403,9 @@ impl AiPages {
                             }
                         });
                         ui.end_row();
-                        provider_label(ui, "连接测试");
-                        if ui
-                            .add_enabled(
-                                !loading && !p.models.is_empty(),
-                                egui::Button::new("测试连接"),
-                            )
-                            .clicked()
-                        {
-                            action = Some((
-                                id.clone(),
-                                Operation::Test {
-                                    provider: p.clone(),
-                                    model: p.models.first().cloned().unwrap_or_default(),
-                                },
-                            ));
-                        }
-                        ui.end_row();
                     });
                 if let Some(message) = &message {
-                    ui.label(message);
+                    ui.label(RichText::new(message).size(13.0).color(super::app::MUTED));
                 }
             });
             let key = self.keys.get(&id).cloned().unwrap_or_default();
@@ -423,7 +439,11 @@ impl AiPages {
                 self.config.model.clear();
             }
         }
-        if ui.button("添加提供商").clicked() {
+        if ui
+            .button("+ 添加提供商")
+            .on_hover_text("添加新的 AI 提供商")
+            .clicked()
+        {
             let p = Provider::default();
             self.keys.insert(p.id.clone(), String::new());
             self.config.providers.push(p);
@@ -711,8 +731,8 @@ impl AiPages {
                             }
                         });
                     ui.end_row();
-                    provider_label(ui, "文字整理");
-                    ui.checkbox(&mut self.config.voice.tidy, "整理口头语与段落");
+                    provider_label(ui, "整理口语");
+                    super::app::toggle(ui, &mut self.config.voice.tidy, "整理口语");
                     ui.end_row();
                     provider_label(ui, "麦克风");
                     let devices = retype_ai::voice::microphones();
@@ -735,24 +755,30 @@ impl AiPages {
         });
         ui.add_space(12.0);
         super::app::card(ui, |ui| {
-            ui.label("麦克风测试");
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("录音测试").strong());
+                if self.voice_test.is_none() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if super::app::primary_button(
+                            ui,
+                            "录音",
+                            self.config.voice.selected(&self.config).is_ok(),
+                        ) {
+                            match self.flush() {
+                                Ok(()) => {
+                                    self.voice_test =
+                                        Some(crate::voice::Test::start(self.config.voice.clone()))
+                                }
+                                Err(e) => self.error = Some(e),
+                            }
+                        }
+                    });
+                }
+            });
             if let Some(test) = &mut self.voice_test {
                 test.ui(ui);
-                if ui.button("重新测试").clicked() {
+                if ui.button("重测").clicked() {
                     self.voice_test = None;
-                }
-            } else if ui
-                .add_enabled(
-                    self.config.voice.selected(&self.config).is_ok(),
-                    egui::Button::new("开始录音测试"),
-                )
-                .clicked()
-            {
-                match self.flush() {
-                    Ok(()) => {
-                        self.voice_test = Some(crate::voice::Test::start(self.config.voice.clone()))
-                    }
-                    Err(e) => self.error = Some(e),
                 }
             }
         });
@@ -891,7 +917,14 @@ impl AiPages {
                                 self.capture = if capturing { None } else { Some(mode) };
                                 self.tap = 0;
                             }
-                            if ui.button("清除").clicked() {
+                            if super::app::icon_button(
+                                ui,
+                                super::app::Icon::Close,
+                                "清除快捷键",
+                                false,
+                                false,
+                                true,
+                            ) {
                                 let mut candidate = self.shortcuts;
                                 match mode {
                                     0 => candidate.mode = Shortcut::DISABLED,

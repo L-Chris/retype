@@ -81,6 +81,7 @@ static NSDictionary *RTInstallState(void){NSData *data=[NSData dataWithContentsO
     // editing a key must use the newly saved value without blocking AppKit.
     dispatch_async(RTSecretQueue(),^{
         NSString *secret=RTSecret(account);
+        if(!secret.length && [account hasPrefix:@"sync/"]) secret=RTSecret(@"sync/") ?: secret;
         if(secret)execute(secret);
         else dispatch_async(dispatch_get_main_queue(),^{if(completion)completion(@{@"error":@"无法读取钥匙串"});});
     });

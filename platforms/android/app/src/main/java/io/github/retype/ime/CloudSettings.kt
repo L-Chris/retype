@@ -11,6 +11,19 @@ import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
 
+private fun conflictFieldLabel(key: String): String =
+    when {
+        key == "input.scheme" -> "拼音方案"
+        key == "dictionary.enabled" -> "扩展词库"
+        key == "updates.auto_check" -> "自动检查更新"
+        key == "shortcuts" -> "快捷键"
+        key == "translation.model" -> "翻译模型"
+        key == "translation.target" -> "翻译语言"
+        key == "translation.reasoning" -> "思考等级"
+        key.startsWith("providers/") -> "AI 提供商"
+        else -> "同步设置"
+    }
+
 @Composable
 fun CloudPage(store: AppStore, busy: Boolean, work: (suspend () -> String) -> Unit) {
     val context = LocalContext.current
@@ -139,28 +152,30 @@ fun CloudPage(store: AppStore, busy: Boolean, work: (suspend () -> String) -> Un
                     }
                 },
             ) {
-                Text("保存并同步")
+                Text("同步")
             }
         }
-        Text("同步设置、个人词库和统计数据；API Key 与云盘密码仅保存在本机。", style = MaterialTheme.typography.bodySmall)
         if (error != null) Text(error!!, style = MaterialTheme.typography.bodySmall)
     }
     if (status.optBoolean("awaitingMerge"))
-        Button(
-            enabled = !busy,
-            onClick = {
-                work {
-                    CloudSync.run(context, confirm = true).also { status = it }.getString("message")
-                }
-            },
-        ) {
-            Text("确认首次合并")
+        SettingsCard {
+            Text("首次合并确认", style = MaterialTheme.typography.titleMedium)
+            Button(
+                enabled = !busy,
+                onClick = {
+                    work {
+                        CloudSync.run(context, confirm = true).also { status = it }.getString("message")
+                    }
+                },
+            ) {
+                Text("合并并同步")
+            }
         }
     val conflicts = status.optJSONArray("conflicts") ?: JSONArray()
     for (i in 0 until conflicts.length()) {
         val c = conflicts.getJSONObject(i)
         SettingsCard {
-            Text(c.getString("key"))
+            Text("设置冲突 · ${conflictFieldLabel(c.getString("key"))}", style = MaterialTheme.typography.titleMedium)
             Text("来自 ${c.getString("device_name")}", style = MaterialTheme.typography.bodySmall)
             Row {
                 listOf(false to "保留本机", true to "使用云端").forEach { (remote, label) ->

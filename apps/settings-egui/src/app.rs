@@ -18,9 +18,12 @@ use std::{
 
 pub(crate) const INK: Color32 = Color32::from_rgb(20, 43, 59);
 pub(crate) const ACCENT: Color32 = Color32::from_rgb(19, 143, 150);
-const MUTED: Color32 = Color32::from_rgb(101, 119, 129);
+pub(crate) const ACCENT_SOFT: Color32 = Color32::from_rgb(232, 246, 246);
+pub(crate) const ONLINE: Color32 = Color32::from_rgb(31, 168, 102);
+pub(crate) const DANGER: Color32 = Color32::from_rgb(209, 61, 61);
+pub(crate) const MUTED: Color32 = Color32::from_rgb(101, 119, 129);
 const BACKGROUND: Color32 = Color32::from_rgb(246, 249, 250);
-const BORDER: Color32 = Color32::from_rgb(227, 233, 236);
+pub(crate) const BORDER: Color32 = Color32::from_rgb(227, 233, 236);
 const PREFERENCES: &str = "Software\\retype";
 
 type AppResult<T> = backend::Result<T>;
@@ -484,42 +487,43 @@ impl SettingsApp {
         let title = if status.base.is_some() {
             "补全基础词库"
         } else {
-            "下载基础词库"
+            "基础词库"
         };
-        egui::Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0, BORDER))
-            .corner_radius(14)
-            .inner_margin(20)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
                 ui.label(RichText::new(title).strong());
-                ui.label(RichText::new("下载一次后即可离线输入中英文。").color(MUTED));
-                ui.add_space(8.0);
-                if self.base_busy {
-                    ui.add(egui::ProgressBar::new(self.base_progress).show_percentage());
-                    if ui.button("取消").clicked() {
-                        self.cancel_download.store(true, Ordering::Relaxed);
-                    }
-                } else {
-                    ui.horizontal(|ui| {
-                        if ui.button(format!("下载 · {size:.1} MB")).clicked() {
-                            self.install_base(None);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.base_busy {
+                        if icon_button(ui, Icon::Close, "取消下载", false, false, true) {
+                            self.cancel_download.store(true, Ordering::Relaxed);
                         }
-                        if ui.button("从文件导入").clicked() {
+                    } else {
+                        if ui
+                            .button("导入")
+                            .on_hover_text("从本地文件导入词库包")
+                            .clicked()
+                        {
                             match backend::choose_resource_bundle() {
                                 Ok(Some(path)) => self.install_base(Some(path)),
                                 Ok(None) => {}
                                 Err(e) => self.base_message = e.to_string(),
                             }
                         }
-                    });
-                }
-                if !self.base_message.is_empty() {
-                    ui.label(RichText::new(&self.base_message).color(MUTED));
-                }
+                        if primary_button(ui, &format!("下载 · {size:.1} MB"), true) {
+                            self.install_base(None);
+                        }
+                    }
+                });
             });
-        ui.add_space(16.0);
+            if self.base_busy {
+                ui.add_space(6.0);
+                ui.add(egui::ProgressBar::new(self.base_progress).show_percentage());
+            }
+            if !self.base_message.is_empty() {
+                ui.label(RichText::new(&self.base_message).size(13.0).color(MUTED));
+            }
+        });
+        ui.add_space(14.0);
     }
     fn install_base(&mut self, source: Option<PathBuf>) {
         if self.busy_pack.is_some() {
@@ -843,102 +847,92 @@ impl SettingsApp {
     }
 
     fn about_page(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(48.0)));
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.label(RichText::new("retype 输入法").size(20.0).strong());
-                ui.label(
-                    RichText::new(&self.preferences.version)
-                        .size(13.0)
-                        .color(MUTED),
-                );
-            });
-        });
-        ui.add_space(12.0);
         card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(38.0)));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new("retype 输入法").size(16.0).strong());
+                    ui.label(
+                        RichText::new(&self.preferences.version)
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icon_button(
+                        ui,
+                        Icon::Refresh,
+                        "检查更新",
+                        false,
+                        false,
+                        !self.updating && !self.installing,
+                    ) {
+                        self.check_update();
+                    }
+                    if self.updating || self.installing {
+                        ui.spinner();
+                    }
+                });
+            });
+            ui.separator();
             let mut enabled = self.preferences.auto_check;
-            if switch_row(ui, &mut enabled, "每天自动检查并提醒") && self.save("AutoCheck", enabled)
+            if switch_row(ui, &mut enabled, "自动检查更新") && self.save("AutoCheck", enabled)
             {
                 self.preferences.auto_check = enabled;
             }
-            ui.label(
-                RichText::new("发现新版本时提醒，不会自动下载安装。")
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.separator();
-            ui.label(RichText::new(&self.update_message).size(14.0).color(MUTED));
-            if self.updating || self.installing {
-                ui.spinner();
+            if !self.update_message.is_empty() && self.update_message != "检查是否有新版本。"
+            {
+                ui.label(RichText::new(&self.update_message).size(13.0).color(MUTED));
             }
-            let offer = self.offer.clone();
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        !self.updating && !self.installing,
-                        egui::Button::new("检查更新"),
-                    )
-                    .clicked()
-                {
-                    self.check_update();
-                }
-                if let Some(offer) = offer {
-                    if offer.available
-                        && offer.installable
-                        && ui
-                            .add_enabled(
-                                !self.installing,
-                                egui::Button::new("下载并安装").fill(ACCENT),
-                            )
+            if let Some(offer) = self.offer.clone() {
+                if offer.available {
+                    ui.horizontal_wrapped(|ui| {
+                        if offer.installable && primary_button(ui, "下载并安装", !self.installing)
+                        {
+                            if let Some(version) = &offer.version {
+                                self.installing = true;
+                                self.update_message = "正在准备下载…".into();
+                                let _ = self.tasks.send(Task::Install(version.clone()));
+                            }
+                        }
+                        if let Some(url) = offer.url.filter(|url| {
+                            url.starts_with("https://github.com/L-Chris/retype/releases/")
+                        }) {
+                            if ui.button("版本说明").clicked() {
+                                self.open(&url);
+                            }
+                        }
+                        if ui
+                            .add_enabled(!self.installing, egui::Button::new("跳过"))
+                            .on_hover_text("跳过此版本的自动提醒")
                             .clicked()
-                    {
-                        if let Some(version) = &offer.version {
-                            self.installing = true;
-                            self.update_message = "正在准备下载…".into();
-                            let _ = self.tasks.send(Task::Install(version.clone()));
+                        {
+                            if let Some(version) = &offer.version {
+                                let _ = self.tasks.send(Task::Skip(version.clone()));
+                            }
                         }
-                    }
-                    if let Some(url) = offer.url.filter(|url| {
-                        url.starts_with("https://github.com/L-Chris/retype/releases/")
-                    }) {
-                        if ui.button("版本说明").clicked() {
-                            self.open(&url);
-                        }
-                    }
-                    if offer.available
-                        && ui
-                            .add_enabled(!self.installing, egui::Button::new("跳过此版本"))
-                            .clicked()
-                    {
-                        if let Some(version) = &offer.version {
-                            let _ = self.tasks.send(Task::Skip(version.clone()));
-                        }
-                    }
+                    });
                 }
-            });
-            ui.separator();
-            if ui.button("反馈问题  ›").clicked() {
-                self.open("https://github.com/L-Chris/retype/issues");
             }
         });
         ui.add_space(12.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 6.0;
-            ui.label(
-                RichText::new("© 2026 retype · MIT License")
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (title, file) in [("开源许可", "LICENSE"), ("第三方署名", "NOTICE.txt")]
-                {
-                    if ui.link(title).clicked() {
-                        self.open(&self.preferences.directory.join(file).to_string_lossy());
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("关于与支持").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("反馈").on_hover_text("提交问题反馈").clicked() {
+                        self.open("https://github.com/L-Chris/retype/issues");
                     }
-                }
-                ui.hyperlink_to("项目主页", "https://github.com/L-Chris/retype");
+                    for (title, file) in [("署名", "NOTICE.txt"), ("许可", "LICENSE")] {
+                        if ui.button(title).clicked() {
+                            self.open(&self.preferences.directory.join(file).to_string_lossy());
+                        }
+                    }
+                    if ui.button("主页").clicked() {
+                        self.open("https://github.com/L-Chris/retype");
+                    }
+                });
             });
         });
     }
@@ -1096,55 +1090,41 @@ impl SettingsApp {
 
     fn input_page(&mut self, ui: &mut egui::Ui) {
         self.base_resources_ui(ui);
-        ui.label(RichText::new("拼音方案").strong());
-        ui.add_space(4.0);
-        egui::Frame::new()
-            .fill(Color32::WHITE)
-            .stroke(Stroke::new(1.0_f32, BORDER))
-            .corner_radius(14)
-            .inner_margin(20)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                for (scheme, title, hint) in [
-                    (PinyinScheme::Full, "全拼", "输入 nihao，空格上屏“你好”"),
-                    (PinyinScheme::Flypy, "小鹤双拼", "输入 nihc，空格上屏“你好”"),
-                ] {
-                    let selected = self.scheme == scheme;
-                    let response = ui.add_sized(
-                        [ui.available_width(), 42.0],
-                        egui::Button::new(RichText::new(title).strong().color(if selected {
-                            ACCENT
-                        } else {
-                            INK
-                        }))
-                        .fill(if selected {
-                            Color32::from_rgb(229, 247, 247)
-                        } else {
-                            Color32::WHITE
+        card(ui, |ui| {
+            crate::ai::configure_form(ui);
+            let field_width = (ui.available_width() - 120.0).clamp(140.0, 320.0);
+            egui::Grid::new("input-scheme-grid")
+                .num_columns(2)
+                .min_row_height(36.0)
+                .spacing([20.0, 12.0])
+                .show(ui, |ui| {
+                    crate::ai::form_label(ui, "拼音方案", 96.0);
+                    let mut current = self.scheme;
+                    egui::ComboBox::from_id_salt("input-scheme-combo")
+                        .width(field_width)
+                        .selected_text(match current {
+                            PinyinScheme::Full => "全拼",
+                            PinyinScheme::Flypy => "小鹤双拼",
                         })
-                        .stroke(Stroke::NONE)
-                        .corner_radius(8),
-                    );
-                    if response.clicked() && !selected {
-                        match write_scheme_at(PREFERENCES, scheme) {
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut current, PinyinScheme::Full, "全拼");
+                            ui.selectable_value(&mut current, PinyinScheme::Flypy, "小鹤双拼");
+                        });
+                    if current != self.scheme {
+                        match write_scheme_at(PREFERENCES, current) {
                             Ok(()) => {
-                                self.scheme = scheme;
+                                self.scheme = current;
                                 self.error = None;
                             }
                             Err(error) => self.error = Some(format!("保存设置失败：{error}")),
                         }
                     }
-                    ui.label(RichText::new(hint).size(13.0).color(MUTED));
-                    if scheme == PinyinScheme::Full {
-                        ui.separator();
-                    }
-                }
-            });
-        ui.add_space(24.0);
-        ui.label(RichText::new("英文输入").strong());
-        ui.add_space(4.0);
+                    ui.end_row();
+                });
+        });
+        ui.add_space(14.0);
         card(ui, |ui| {
-            if switch_row(ui, &mut self.preferences.english.0, "智能英文输入") {
+            if switch_row(ui, &mut self.preferences.english.0, "英文单词补全") {
                 if let Err(error) =
                     backend::set("EnglishDisabled", u32::from(!self.preferences.english.0))
                 {
@@ -1154,7 +1134,7 @@ impl SettingsApp {
             }
             ui.separator();
             ui.add_enabled_ui(self.preferences.english.0, |ui| {
-                if switch_row(ui, &mut self.preferences.english.1, "拼写建议") {
+                if switch_row(ui, &mut self.preferences.english.1, "英文拼写建议") {
                     if let Err(error) = backend::set(
                         "EnglishSpellingDisabled",
                         u32::from(!self.preferences.english.1),
@@ -1164,9 +1144,7 @@ impl SettingsApp {
                     }
                 }
             });
-        });
-        ui.add_space(24.0);
-        card(ui, |ui| {
+            ui.separator();
             if switch_row(ui, &mut self.preferences.symbol_completion, "符号自动补全") {
                 if let Err(error) = backend::set(
                     "SymbolCompletionDisabled",
@@ -1184,23 +1162,37 @@ impl SettingsApp {
 }
 
 fn heading(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).size(28.0).strong());
-    ui.add_space(24.0);
+    ui.label(RichText::new(title).size(26.0).strong());
+    ui.add_space(18.0);
 }
 fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> bool {
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), egui::Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title)
     });
     let painter = ui.painter();
-    if selected || response.hovered() {
-        painter.rect_filled(rect, 12, Color32::WHITE);
+    if selected {
+        painter.rect_filled(rect, 10, Color32::WHITE);
+        painter.rect_filled(
+            egui::Rect::from_center_size(
+                egui::pos2(rect.left() + 5.5, rect.center().y),
+                Vec2::new(3.0, 16.0),
+            ),
+            2,
+            ACCENT,
+        );
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect,
+            10,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 140),
+        );
     }
     if response.has_focus() {
         painter.rect_stroke(
             rect,
-            12,
+            10,
             Stroke::new(1.0_f32, ACCENT),
             egui::StrokeKind::Inside,
         );
@@ -1360,12 +1352,174 @@ fn navigation(ui: &mut egui::Ui, page: Page, title: &str, selected: bool) -> boo
     );
     response.clicked()
 }
+#[derive(Clone, Copy)]
+pub(crate) enum Icon {
+    Plus,
+    Trash,
+    Refresh,
+    Bolt,
+    Check,
+    Close,
+    Sliders,
+    Edit,
+    Copy,
+    ExternalLink,
+}
+
+fn draw_icon(painter: &egui::Painter, c: egui::Pos2, icon: Icon, color: Color32) {
+    let stroke = Stroke::new(1.6_f32, color);
+    let pt = |x: f32, y: f32| c + Vec2::new(x, y);
+    match icon {
+        Icon::Plus => {
+            painter.line_segment([pt(-5.0, 0.0), pt(5.0, 0.0)], stroke);
+            painter.line_segment([pt(0.0, -5.0), pt(0.0, 5.0)], stroke);
+        }
+        Icon::Trash => {
+            painter.line_segment([pt(-5.5, -4.0), pt(5.5, -4.0)], stroke);
+            painter.line_segment([pt(-2.0, -5.5), pt(2.0, -5.5)], stroke);
+            painter.rect_stroke(
+                egui::Rect::from_min_max(pt(-4.0, -4.0), pt(4.0, 5.5)),
+                1.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([pt(-1.4, -1.5), pt(-1.4, 3.0)], stroke);
+            painter.line_segment([pt(1.4, -1.5), pt(1.4, 3.0)], stroke);
+        }
+        Icon::Refresh => {
+            painter.circle_stroke(c, 5.0, stroke);
+            painter.line_segment([pt(2.0, -5.5), pt(5.5, -5.0)], stroke);
+            painter.line_segment([pt(5.5, -5.0), pt(4.8, -1.5)], stroke);
+        }
+        Icon::Bolt => {
+            painter.line_segment([pt(-5.5, 1.5), pt(-1.8, -3.5)], stroke);
+            painter.line_segment([pt(-1.8, -3.5), pt(1.8, 2.5)], stroke);
+            painter.line_segment([pt(1.8, 2.5), pt(5.5, -2.5)], stroke);
+        }
+        Icon::Check => {
+            painter.line_segment([pt(-5.0, 0.5), pt(-1.5, 4.0)], stroke);
+            painter.line_segment([pt(-1.5, 4.0), pt(5.5, -3.5)], stroke);
+        }
+        Icon::Close => {
+            painter.line_segment([pt(-4.5, -4.5), pt(4.5, 4.5)], stroke);
+            painter.line_segment([pt(-4.5, 4.5), pt(4.5, -4.5)], stroke);
+        }
+        Icon::Sliders => {
+            painter.line_segment([pt(-5.5, -3.0), pt(5.5, -3.0)], stroke);
+            painter.line_segment([pt(-5.5, 3.0), pt(5.5, 3.0)], stroke);
+            painter.circle_filled(pt(-2.0, -3.0), 2.2, color);
+            painter.circle_filled(pt(2.0, 3.0), 2.2, color);
+        }
+        Icon::Edit => {
+            painter.line_segment([pt(-4.5, 4.5), pt(4.0, -4.0)], stroke);
+            painter.line_segment([pt(-5.0, 5.0), pt(-2.0, 4.5)], stroke);
+            painter.line_segment([pt(-5.0, 5.0), pt(-4.5, 2.0)], stroke);
+        }
+        Icon::Copy => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(pt(-5.0, -5.5), pt(2.0, 2.5)),
+                1.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                egui::Rect::from_min_max(pt(-2.0, -2.5), pt(5.0, 5.5)),
+                1.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        Icon::ExternalLink => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(pt(-5.0, -2.0), pt(2.5, 5.0)),
+                1.5,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([pt(-1.0, 1.0), pt(5.0, -5.0)], stroke);
+            painter.line_segment([pt(1.5, -5.0), pt(5.0, -5.0)], stroke);
+            painter.line_segment([pt(5.0, -5.0), pt(5.0, -1.5)], stroke);
+        }
+    }
+}
+
+pub(crate) fn icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    tooltip: &str,
+    primary: bool,
+    danger: bool,
+    enabled: bool,
+) -> bool {
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), sense);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tooltip));
+    let hovered = enabled && response.hovered();
+    let painter = ui.painter();
+    let (fill, border, fg) = if primary {
+        (
+            if hovered {
+                Color32::from_rgb(15, 122, 128)
+            } else {
+                ACCENT
+            },
+            None,
+            Color32::WHITE,
+        )
+    } else if danger {
+        (
+            if hovered {
+                Color32::from_rgb(253, 240, 240)
+            } else {
+                Color32::WHITE
+            },
+            Some(Color32::from_rgb(238, 205, 205)),
+            DANGER,
+        )
+    } else {
+        (
+            if hovered { ACCENT_SOFT } else { Color32::WHITE },
+            Some(if hovered { ACCENT } else { BORDER }),
+            if hovered { ACCENT } else { INK },
+        )
+    };
+    let alpha = if enabled { 1.0 } else { 0.45 };
+    painter.rect_filled(rect, 8, fill.gamma_multiply(alpha));
+    if let Some(stroke_color) = border {
+        painter.rect_stroke(
+            rect,
+            8,
+            Stroke::new(1.0_f32, stroke_color.gamma_multiply(alpha)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    draw_icon(painter, rect.center(), icon, fg.gamma_multiply(alpha));
+    let clicked = enabled && response.clicked();
+    response.on_hover_text(tooltip);
+    clicked
+}
+
+pub(crate) fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(RichText::new(label).color(Color32::WHITE))
+            .fill(ACCENT)
+            .stroke(Stroke::NONE)
+            .corner_radius(8),
+    )
+    .clicked()
+}
+
 pub(crate) fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(Color32::WHITE)
         .stroke(Stroke::new(1.0_f32, BORDER))
-        .corner_radius(14)
-        .inner_margin(20)
+        .corner_radius(12)
+        .inner_margin(18)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             contents(ui);
@@ -1539,16 +1693,18 @@ impl eframe::App for SettingsApp {
                 ui.add_space(12.0);
                 let brand = ui.horizontal(|ui| {
                     ui.add(egui::Image::new(&self.logo).fit_to_exact_size(Vec2::splat(38.0)));
-                    ui.label(RichText::new("retype 输入法").size(18.0).strong());
+                    ui.label(RichText::new("retype").size(18.0).strong());
                 });
                 if brand.response.interact(egui::Sense::drag()).drag_started() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-                ui.add_space(42.0);
+                ui.add_space(24.0);
                 egui::ScrollArea::vertical()
                     .id_salt("sidebar-pages")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 4.0;
                         for (page, title) in [
                             (Page::Input, "输入"),
                             (Page::Dictionary, "词库"),

@@ -174,7 +174,7 @@ impl CloudPage {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         super::app::card(ui, |ui| {
             super::app::switch_row(ui, &mut self.config.enabled, "云同步");
-            ui.add_space(12.0);
+            ui.separator();
             super::ai::configure_form(ui);
             let width = (ui.available_width() - 140.0).clamp(120.0, 360.0);
             egui::Grid::new("cloud-connection")
@@ -182,11 +182,11 @@ impl CloudPage {
                 .min_row_height(36.0)
                 .spacing([20.0, 12.0])
                 .show(ui, |ui| {
-                    super::ai::form_label(ui, "提供商", 100.0);
+                    super::ai::form_label(ui, "云盘", 100.0);
                     ui.horizontal(|ui| {
                         let old = self.config.provider.clone();
                         egui::ComboBox::from_id_salt("cloud-provider")
-                            .width((width - 36.0).max(120.0))
+                            .width((width - 44.0).max(112.0))
                             .selected_text(&self.config.provider)
                             .show_ui(ui, |ui| {
                                 for (name, _, _) in PROVIDERS {
@@ -209,11 +209,14 @@ impl CloudPage {
                             .iter()
                             .find(|p| p.0 == self.config.provider)
                             .map_or(PROVIDERS[0].2, |p| p.2);
-                        if ui
-                            .small_button("↗")
-                            .on_hover_text("打开云盘配置说明")
-                            .clicked()
-                        {
+                        if super::app::icon_button(
+                            ui,
+                            super::app::Icon::ExternalLink,
+                            "打开云盘配置说明",
+                            false,
+                            false,
+                            true,
+                        ) {
                             ui.ctx().open_url(egui::OpenUrl::new_tab(help));
                         }
                     });
@@ -228,99 +231,110 @@ impl CloudPage {
                         super::ai::provider_text(ui, value, width, password);
                         ui.end_row();
                     }
+                    super::ai::form_label(ui, "", 100.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(self.job.is_none(), egui::Button::new("测试"))
+                            .on_hover_text("测试 WebDAV 连接")
+                            .clicked()
+                        {
+                            self.start(ui.ctx(), 1, None);
+                        }
+                        if super::app::primary_button(
+                            ui,
+                            "同步",
+                            self.config.enabled && self.job.is_none() && !self.status.busy,
+                        ) {
+                            self.start(ui.ctx(), 0, Some(Command::Sync));
+                        }
+                        if self.status.busy || self.job.is_some() {
+                            ui.spinner();
+                        }
+                    });
+                    ui.end_row();
                 });
-            ui.add_space(12.0);
-            if ui
-                .add_enabled(self.job.is_none(), egui::Button::new("测试连接"))
-                .clicked()
-            {
-                self.start(ui.ctx(), 1, None);
-            }
-        });
-        ui.add_space(12.0);
-        super::app::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("同步状态").strong());
-                if self.status.busy || self.job.is_some() {
-                    ui.spinner();
+            if self.config.enabled {
+                let mut meta = Vec::new();
+                if !self.status.message.is_empty() {
+                    meta.push(self.status.message.clone());
                 }
-            });
-            if !self.config.enabled {
-                ui.label("未启用");
-            } else if !self.status.message.is_empty() {
-                ui.label(&self.status.message);
-            } else {
-                ui.label("等待首次同步");
-            }
-            if self.status.last_success > 0 {
-                use chrono::TimeZone;
-                if let Some(time) = chrono::Local
-                    .timestamp_opt(self.status.last_success as i64, 0)
-                    .single()
-                {
+                if self.status.last_success > 0 {
+                    use chrono::TimeZone;
+                    if let Some(time) = chrono::Local
+                        .timestamp_opt(self.status.last_success as i64, 0)
+                        .single()
+                    {
+                        meta.push(format!("上次同步 {}", time.format("%Y-%m-%d %H:%M")));
+                    }
+                }
+                if !meta.is_empty() {
+                    ui.add_space(4.0);
                     ui.label(
-                        RichText::new(format!("最近同步：{}", time.format("%Y-%m-%d %H:%M")))
-                            .size(13.0),
+                        RichText::new(meta.join(" · "))
+                            .size(12.0)
+                            .color(super::app::MUTED),
                     );
                 }
             }
-            if self.status.awaiting_merge {
-                ui.label(format!(
-                    "云端有 {} 台设备、{} 条学习记录、{} 条统计记录",
-                    self.status.devices, self.status.words, self.status.statistics
-                ));
-                ui.label("首次合并采用云端设置，保留并合并本地词库和统计。");
-            }
-            let label = if self.status.awaiting_merge {
-                "合并并同步"
-            } else {
-                "立即同步"
-            };
-            if ui
-                .add_enabled(
-                    self.config.enabled && self.job.is_none() && !self.status.busy,
-                    egui::Button::new(label),
-                )
-                .clicked()
-            {
-                self.start(
-                    ui.ctx(),
-                    0,
-                    Some(if self.status.awaiting_merge {
-                        Command::Confirm
-                    } else {
-                        Command::Sync
-                    }),
-                );
-            }
         });
+        if self.status.awaiting_merge {
+            ui.add_space(12.0);
+            super::app::card(ui, |ui| {
+                ui.label(RichText::new("首次合并确认").strong());
+                ui.label(
+                    RichText::new(format!(
+                        "云端含 {} 台设备、{} 条词库记录、{} 条统计记录",
+                        self.status.devices, self.status.words, self.status.statistics
+                    ))
+                    .size(13.0)
+                    .color(super::app::MUTED),
+                );
+                if super::app::primary_button(
+                    ui,
+                    "合并并同步",
+                    self.config.enabled && self.job.is_none() && !self.status.busy,
+                ) {
+                    self.start(ui.ctx(), 0, Some(Command::Confirm));
+                }
+            });
+        }
         for conflict in self.status.conflicts.clone() {
             ui.add_space(12.0);
             super::app::card(ui, |ui| {
                 ui.label(
                     RichText::new(format!("设置冲突 · {}", field_label(&conflict.key))).strong(),
                 );
-                ui.label(format!("本机与“{}”修改了同一项设置", conflict.device_name));
+                ui.label(
+                    RichText::new(format!("来自 {}", conflict.device_name))
+                        .size(12.0)
+                        .color(super::app::MUTED),
+                );
                 ui.horizontal(|ui| {
-                    for (label, remote, value) in [
-                        ("保留本机", false, &conflict.local.value),
-                        ("采用云端", true, &conflict.remote.value),
-                    ] {
-                        if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new(label))
-                            .on_hover_text(value.to_string())
-                            .clicked()
-                        {
-                            self.start(
-                                ui.ctx(),
-                                0,
-                                Some(Command::Resolve {
-                                    key: conflict.key.clone(),
-                                    remote,
-                                    stamp: conflict.remote.stamp.clone(),
-                                }),
-                            );
-                        }
+                    if ui
+                        .add_enabled(self.job.is_none(), egui::Button::new("保留本机"))
+                        .on_hover_text(conflict.local.value.to_string())
+                        .clicked()
+                    {
+                        self.start(
+                            ui.ctx(),
+                            0,
+                            Some(Command::Resolve {
+                                key: conflict.key.clone(),
+                                remote: false,
+                                stamp: conflict.remote.stamp.clone(),
+                            }),
+                        );
+                    }
+                    if super::app::primary_button(ui, "采用云端", self.job.is_none()) {
+                        self.start(
+                            ui.ctx(),
+                            0,
+                            Some(Command::Resolve {
+                                key: conflict.key.clone(),
+                                remote: true,
+                                stamp: conflict.remote.stamp.clone(),
+                            }),
+                        );
                     }
                 });
             });

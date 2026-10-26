@@ -1,16 +1,28 @@
 package io.github.retype.ime
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+
+private fun formatMatchingCode(code: String): String {
+  if (code.length != 6) return code
+  return "${code[0]} ${code[1]} ${code[2]}   ${code[3]} ${code[4]} ${code[5]}"
+}
 
 @Composable
 fun LanPage() {
@@ -34,100 +46,191 @@ fun LanPage() {
     val stop = clipboard.discover()
     onDispose { stop() }
   }
-  Card {
-    Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        Text("文字剪贴板同步", Modifier.weight(1f))
-        Switch(state.enabled, clipboard::enable)
-      }
-      Text(state.message, style = MaterialTheme.typography.bodySmall)
-      Text("支持物理局域网和 Tailscale，连接后自动重连。",style=MaterialTheme.typography.bodySmall)
-      Text("手机主动连接电脑，无需开放手机端口。", style = MaterialTheme.typography.bodySmall)
-      val endpoint = state.connection.ifEmpty { state.target }
-      if (state.enabled && endpoint.isNotEmpty()) {
-        SelectionContainer {
-          Text("${if (state.connection.isNotEmpty()) "当前连接" else "连接目标"}：$endpoint", style = MaterialTheme.typography.bodySmall)
-        }
-      }
-      if (state.enabled && endpoint.isEmpty()) {
-        Text("请在电脑端查看连接地址与端口，或通过同一局域网自动发现。", style = MaterialTheme.typography.bodySmall)
-      }
-      if (state.name.isNotEmpty()) {
-        Text(state.name)
-        TextButton(onClick={editAddress=!editAddress}) {Text("连接地址…")}
-        if(editAddress) {
-          OutlinedTextField(savedAddresses,{savedAddresses=it},label={Text("IP 或域名，可附带端口")},supportingText={Text("多个地址用逗号分隔；补充 Tailscale 地址无需重新关联")},modifier=Modifier.fillMaxWidth())
-          TextButton(onClick={clipboard.setAddresses(savedAddresses)}) {Text("保存地址")}
-        }
-        TextButton(onClick = clipboard::unlink) { Text("解除关联") }
-      }
-      if (state.enabled) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+
+  // Card 1: Master Switch & Pairing
+  SettingsCard {
+    ToggleRow("剪贴板同步", state.enabled, onChange = clipboard::enable)
+    if (state.enabled) {
+      HorizontalDivider(color = Color(0xFFEDF1F3))
+      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(8.dp)
+                .background(
+                    if (state.connection.isNotEmpty()) Color(0xFF1FA866) else Color(0xFF138F96),
+                    CircleShape,
+                )
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            state.message.ifEmpty { "等待连接" },
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color(0xFF657781),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
           OutlinedButton(
               onClick = {
                 showJoin = false
                 clipboard.showCode()
               }
           ) {
-            Text("查看匹配码")
+            Text("匹配码")
           }
           Button(
               onClick = {
                 clipboard.cancelPair()
-                showJoin = true
+                showJoin = !showJoin
               }
-          ) {
-            Text("关联设备")
-          }
-        }
-      }
-    }
-  }
-  state.code?.let { matchingCode ->
-    Card {
-      Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(matchingCode, style = MaterialTheme.typography.headlineLarge)
-        Text("请在另一台设备输入此码 · ${maxOf(0, (state.expires - now) / 1000)} 秒后失效")
-        Row {
-          TextButton(onClick = clipboard::showCode) { Text("刷新") }
-          TextButton(onClick = { clipboard.cancelPair() }) { Text("取消") }
-        }
-      }
-    }
-  }
-  if (showJoin && state.enabled) {
-    Card {
-      Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("输入另一台设备的匹配码")
-        OutlinedTextField(address,{address=it},label={Text("设备地址（可选）")},supportingText={Text("例如 home:50206；留空自动发现局域网设备")},singleLine=true,modifier=Modifier.fillMaxWidth())
-        OutlinedTextField(
-            code,
-            { code = it.filter { c -> c in '0'..'9' }.take(6) },
-            label = { Text("6 位匹配码") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row {
-          Button(
-              onClick = {
-                if(clipboard.join(code,address)) {
-                  code = ""
-                  showJoin = false
-                }
-              },
-              enabled = code.matches(Regex("[0-9]{6}")),
           ) {
             Text("关联")
           }
-          TextButton(
-              onClick = {
-                showJoin = false
-                code = ""
-                clipboard.cancelPair()
-              }
+        }
+      }
+
+      state.code?.let { matchingCode ->
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = Color(0xFFE8F6F6),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+          Row(
+              Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+              verticalAlignment = Alignment.CenterVertically,
           ) {
-            Text("取消")
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text(
+                  formatMatchingCode(matchingCode),
+                  fontSize = 22.sp,
+                  fontWeight = FontWeight.Bold,
+                  fontFamily = FontFamily.Monospace,
+                  color = Color(0xFF138F96),
+              )
+              Text(
+                  "${maxOf(0, (state.expires - now) / 1000)}s 后失效",
+                  style = MaterialTheme.typography.bodySmall,
+                  color = Color(0xFF657781),
+              )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              ActionIconButton(ActionIcon.Refresh, "刷新匹配码", onClick = clipboard::showCode)
+              ActionIconButton(ActionIcon.Close, "关闭匹配码", onClick = clipboard::cancelPair)
+            }
+          }
+        }
+      }
+
+      if (showJoin) {
+        HorizontalDivider(color = Color(0xFFEDF1F3))
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+          Row(
+              Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            OutlinedTextField(
+                code,
+                { code = it.filter { c -> c in '0'..'9' }.take(6) },
+                label = { Text("6 位匹配码") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.weight(1f),
+            )
+            ActionIconButton(
+                ActionIcon.Check,
+                "确认关联",
+                enabled = code.matches(Regex("[0-9]{6}")),
+                primary = true,
+            ) {
+              if (clipboard.join(code, address)) {
+                code = ""
+                showJoin = false
+              }
+            }
+            ActionIconButton(ActionIcon.Close, "取消") {
+              showJoin = false
+              code = ""
+              clipboard.cancelPair()
+            }
+          }
+          OutlinedTextField(
+              address,
+              { address = it },
+              label = { Text("指定地址（选填，局域网留空）") },
+              placeholder = { Text("如 100.64.0.1:50206") },
+              singleLine = true,
+              modifier = Modifier.fillMaxWidth(),
+          )
+        }
+      }
+    }
+  }
+
+  // Card 2: Associated Peer
+  if (state.name.isNotEmpty()) {
+    SettingsCard {
+      Text("已关联设备", style = MaterialTheme.typography.labelLarge, color = Color(0xFF657781))
+      HorizontalDivider(color = Color(0xFFEDF1F3))
+      val online = state.connection.isNotEmpty()
+      val endpoint = state.connection.ifEmpty { state.target.ifEmpty { "自动发现" } }
+      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Row(
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Box(
+                Modifier.size(8.dp)
+                    .background(
+                        if (online) Color(0xFF1FA866) else Color(0xFFBEC8CE),
+                        CircleShape,
+                    )
+            )
+            Text(state.name, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (online) "已连接" else "离线",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (online) Color(0xFF138F96) else Color(0xFF657781),
+            )
+          }
+          SelectionContainer {
+            Text(
+                endpoint,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF657781),
+            )
+          }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          ActionIconButton(
+              ActionIcon.Sliders,
+              "连接地址",
+              primary = editAddress,
+              onClick = { editAddress = !editAddress },
+          )
+          ActionIconButton(ActionIcon.Trash, "解除关联", danger = true, onClick = clipboard::unlink)
+        }
+      }
+      if (editAddress) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          OutlinedTextField(
+              savedAddresses,
+              { savedAddresses = it },
+              label = { Text("连接地址（多个用逗号分隔）") },
+              singleLine = true,
+              modifier = Modifier.weight(1f),
+          )
+          ActionIconButton(ActionIcon.Check, "保存地址", primary = true) {
+            clipboard.setAddresses(savedAddresses)
+            editAddress = false
+          }
+          ActionIconButton(ActionIcon.Close, "取消") {
+            savedAddresses = state.addresses
+            editAddress = false
           }
         }
       }

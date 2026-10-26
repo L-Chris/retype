@@ -33,17 +33,49 @@ fun ProvidersPage(store: AppStore, busy: Boolean, work: (suspend () -> String) -
     val array = store.ai().getJSONArray("providers")
     for (i in 0 until array.length()) {
         val p = array.getJSONObject(i)
+        val pid = p.getString("id")
         SettingsCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(p.getString("name"))
+                    Text(p.getString("name"), style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "${p.getJSONArray("models").length()} 个模型",
+                        "${p.getJSONArray("models").length()} 个模型 · ${p.optString("base_url").ifEmpty { "未填写地址" }}",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                TextButton(enabled = !busy, onClick = { editing = JSONObject(p.toString()) }) {
-                    Text("编辑")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ActionIconButton(
+                        ActionIcon.Edit,
+                        "编辑提供商",
+                        enabled = !busy,
+                        onClick = { editing = JSONObject(p.toString()) },
+                    )
+                    if (array.length() > 1) {
+                        ActionIconButton(
+                            ActionIcon.Trash,
+                            "删除提供商",
+                            enabled = !busy,
+                            danger = true,
+                            onClick = {
+                                work {
+                                    withContext(Dispatchers.IO) {
+                                        SecretVault(context).save("ai:$pid", "")
+                                        val ai = store.ai()
+                                        val old = ai.getJSONArray("providers")
+                                        val next = JSONArray()
+                                        for (idx in 0 until old.length()) {
+                                            if (old.getJSONObject(idx).getString("id") != pid) {
+                                                next.put(old.getJSONObject(idx))
+                                            }
+                                        }
+                                        ai.put("providers", next)
+                                        store.saveAi(ai)
+                                    }
+                                    "已删除提供商"
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -196,67 +228,89 @@ private fun ProviderDialog(
                     label = { Text("模型 ID（每行一个）") },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedButton(
-                    enabled = !busy,
-                    onClick = {
-                        busy = true
-                        error = null
-                        scope.launch {
-                            try {
-                                val p = draft()
-                                val secret = key
-                                val result =
-                                    withContext(Dispatchers.IO) {
-                                        JSONArray(
-                                            NativeBridge.feature(
-                                                JSONObject()
-                                                    .put("type", "models")
-                                                    .put("provider", p)
-                                                    .put("key", secret)
-                                                    .toString()
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            busy = true
+                            error = null
+                            scope.launch {
+                                try {
+                                    val p = draft()
+                                    val secret = key
+                                    val result =
+                                        withContext(Dispatchers.IO) {
+                                            JSONArray(
+                                                NativeBridge.feature(
+                                                    JSONObject()
+                                                        .put("type", "models")
+                                                        .put("provider", p)
+                                                        .put("key", secret)
+                                                        .toString()
+                                                )
                                             )
+                                        }
+                                    check(draft().toString() == p.toString() && key == secret) {
+                                        "配置已变化，请重新获取模型"
+                                    }
+                                    models =
+                                        (0 until result.length()).joinToString("\n") {
+                                            result.getString(it)
+                                        }
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    error = e.message
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                    ) {
+                        Text(if (busy) "获取中…" else "获取模型")
+                    }
+                    Button(
+                        enabled = !busy && models.isNotBlank(),
+                        modifier = Modifier.weight(1f),
+                        onClick = {
+                            busy = true
+                            error = null
+                            scope.launch {
+                                try {
+                                    val p = draft()
+                                    val secret = key
+                                    val model = p.getJSONArray("models").getString(0)
+                                    withContext(Dispatchers.IO) {
+                                        NativeBridge.feature(
+                                            JSONObject()
+                                                .put("type", "testProvider")
+                                                .put("provider", p)
+                                                .put("model", model)
+                                                .put("key", secret)
+                                                .toString()
                                         )
                                     }
-                                check(draft().toString() == p.toString() && key == secret) {
-                                    "配置已变化，请重新获取模型"
-                                }
-                                models =
-                                    (0 until result.length()).joinToString("\n") {
-                                        result.getString(it)
+                                    check(draft().toString() == p.toString() && key == secret) {
+                                        "配置已变化，请重新测试"
                                     }
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                error = e.message
-                            } finally {
-                                busy = false
-                            }
-                        }
-                    },
-                ) {
-                    Text(if (busy) "获取中…" else "获取模型")
-                }
-                OutlinedButton(
-                    enabled = !busy && models.isNotBlank(),
-                    onClick = {
-                        busy = true; error = null
-                        scope.launch {
-                            try {
-                                val p = draft()
-                                val secret = key
-                                val model = p.getJSONArray("models").getString(0)
-                                withContext(Dispatchers.IO) {
-                                    NativeBridge.feature(JSONObject().put("type", "testProvider")
-                                        .put("provider", p).put("model", model).put("key", secret).toString())
+                                    error = "连接成功"
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    error = e.message
+                                } finally {
+                                    busy = false
                                 }
-                                check(draft().toString() == p.toString() && key == secret) { "配置已变化，请重新测试" }
-                                error = "连接成功"
-                            } catch (e: CancellationException) { throw e
-                            } catch (e: Exception) { error = e.message
-                            } finally { busy = false }
-                        }
-                    },
-                ) { Text("测试连接") }
+                            }
+                        },
+                    ) {
+                        Text("测试连接")
+                    }
+                }
                 if (error != null) Text(error!!, style = MaterialTheme.typography.bodySmall)
             }
         },
@@ -279,10 +333,9 @@ private fun ProviderDialog(
 @Composable
 fun TranslationPage(store: AppStore) {
     var ai by remember { mutableStateOf(store.ai()) }
-    var saved by remember { mutableStateOf(false) }
     fun change(name: String, value: Any) {
         ai = JSONObject(ai.toString()).put(name, value)
-        saved = false
+        store.saveAi(ai)
     }
     val providers = ai.getJSONArray("providers")
     val options =
@@ -339,16 +392,8 @@ fun TranslationPage(store: AppStore) {
         OutlinedTextField(
             ai.getString("instructions"),
             { change("instructions", it) },
-            label = { Text("附加要求") },
+            label = { Text("补充要求") },
             modifier = Modifier.fillMaxWidth(),
         )
-        Button(
-            onClick = {
-                store.saveAi(ai)
-                saved = true
-            }
-        ) {
-            Text(if (saved) "已保存" else "保存")
-        }
     }
 }

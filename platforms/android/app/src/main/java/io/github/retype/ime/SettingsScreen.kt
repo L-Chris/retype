@@ -303,6 +303,110 @@ internal fun SettingsGlyph(index: Int, modifier: Modifier = Modifier.size(30.dp)
   }
 }
 
+enum class ActionIcon {
+  Plus,
+  Trash,
+  Refresh,
+  Bolt,
+  Check,
+  Close,
+  Sliders,
+  Edit,
+}
+
+@Composable
+internal fun ActionIconButton(
+    icon: ActionIcon,
+    description: String,
+    enabled: Boolean = true,
+    primary: Boolean = false,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+  val bg =
+      when {
+        primary -> Color(0xFF138F96)
+        danger -> Color(0xFFFDF0F0)
+        else -> Color(0xFFF4F7F8)
+      }
+  val fg =
+      when {
+        primary -> Color.White
+        danger -> Color(0xFFD13D3D)
+        else -> Color(0xFF142B3B)
+      }
+  Surface(
+      onClick = onClick,
+      enabled = enabled,
+      shape = RoundedCornerShape(10.dp),
+      color = if (enabled) bg else bg.copy(alpha = 0.45f),
+      border =
+          if (primary) null
+          else
+              BorderStroke(
+                  1.dp,
+                  if (danger) Color(0xFFEECECE) else Color(0xFFE3E9EC),
+              ),
+      modifier = Modifier.size(38.dp).semantics { contentDescription = description },
+  ) {
+    Box(contentAlignment = Alignment.Center) {
+      Canvas(Modifier.size(16.dp)) {
+        val color = if (enabled) fg else fg.copy(alpha = 0.45f)
+        val stroke = 1.8.dp.toPx()
+        fun pt(x: Float, y: Float) = Offset(size.width * x / 16f, size.height * y / 16f)
+        fun seg(x1: Float, y1: Float, x2: Float, y2: Float) =
+            drawLine(color, pt(x1, y1), pt(x2, y2), stroke, StrokeCap.Round)
+        when (icon) {
+          ActionIcon.Plus -> {
+            seg(3f, 8f, 13f, 8f)
+            seg(8f, 3f, 8f, 13f)
+          }
+          ActionIcon.Trash -> {
+            seg(2.5f, 4f, 13.5f, 4f)
+            seg(6f, 2.2f, 10f, 2.2f)
+            drawRoundRect(
+                color,
+                pt(4f, 4f),
+                androidx.compose.ui.geometry.Size(size.width * 8f / 16f, size.height * 9.5f / 16f),
+                androidx.compose.ui.geometry.CornerRadius(1.5.dp.toPx()),
+                style = Stroke(stroke),
+            )
+          }
+          ActionIcon.Refresh -> {
+            drawCircle(color, size.width * 5f / 16f, style = Stroke(stroke))
+            seg(10f, 2.5f, 13.5f, 3f)
+            seg(13.5f, 3f, 12.8f, 6.5f)
+          }
+          ActionIcon.Bolt -> {
+            seg(2.5f, 9.5f, 6.2f, 4.5f)
+            seg(6.2f, 4.5f, 9.8f, 10.5f)
+            seg(9.8f, 10.5f, 13.5f, 5.5f)
+          }
+          ActionIcon.Check -> {
+            seg(3f, 8.5f, 6.5f, 12f)
+            seg(6.5f, 12f, 13.5f, 4.5f)
+          }
+          ActionIcon.Close -> {
+            seg(3.5f, 3.5f, 12.5f, 12.5f)
+            seg(3.5f, 12.5f, 12.5f, 3.5f)
+          }
+          ActionIcon.Sliders -> {
+            seg(2.5f, 5f, 13.5f, 5f)
+            seg(2.5f, 11f, 13.5f, 11f)
+            drawCircle(color, 2.2.dp.toPx(), pt(6f, 5f))
+            drawCircle(color, 2.2.dp.toPx(), pt(10f, 11f))
+          }
+          ActionIcon.Edit -> {
+            seg(3.5f, 12.5f, 12f, 4f)
+            seg(3f, 13f, 6f, 12.5f)
+            seg(3f, 13f, 3.5f, 10f)
+          }
+        }
+      }
+    }
+  }
+}
+
 @Composable
 fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
   Card(
@@ -367,12 +471,6 @@ fun Choice(
 @Composable
 private fun InputPage(store: AppStore) {
   var symbols by remember { mutableStateOf(store.prefs.getBoolean("symbolCompletion", true)) }
-  SettingsCard {
-    ToggleRow("符号自动补全", symbols) {
-      symbols = it
-      store.prefs.edit().putBoolean("symbolCompletion", it).apply()
-    }
-  }
   var flypy by remember { mutableStateOf(store.prefs.getBoolean("flypy", false)) }
   var english by remember { mutableStateOf(store.prefs.getBoolean("english", true)) }
   var spelling by remember { mutableStateOf(store.prefs.getBoolean("spelling", true)) }
@@ -398,14 +496,17 @@ private fun InputPage(store: AppStore) {
     }
   }
   SettingsCard {
-    Text("英文输入", style = MaterialTheme.typography.titleMedium)
-    ToggleRow("英文补全", english) {
+    ToggleRow("英文单词补全", english) {
       english = it
       store.prefs.edit().putBoolean("english", it).apply()
     }
     ToggleRow("英文拼写建议", spelling, english) {
       spelling = it
       store.prefs.edit().putBoolean("spelling", it).apply()
+    }
+    ToggleRow("符号自动补全", symbols) {
+      symbols = it
+      store.prefs.edit().putBoolean("symbolCompletion", it).apply()
     }
   }
 }
@@ -445,18 +546,30 @@ private fun BaseResourceSection() {
     }
   }
   if (resources.checked && !resources.ready) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-      Text(if (resources.base == null) "下载基础词库后即可离线输入" else "补充基础词库资源", style = MaterialTheme.typography.titleSmall)
+    SettingsCard {
+      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (resources.base == null) "基础词库" else "补全基础词库",
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        if (resources.busy) {
+          ActionIconButton(ActionIcon.Close, "取消") { BaseResources.cancel(context) }
+        } else {
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { BaseResources.start(context) }) {
+              Text("下载 · %.1f MB".format(resources.bytes / 1048576.0))
+            }
+            OutlinedButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("导入") }
+          }
+        }
+      }
       if (resources.busy) {
         LinearProgressIndicator(progress = { resources.progress }, modifier = Modifier.fillMaxWidth())
+        if (resources.message.isNotEmpty())
+            Text(resources.message, style = MaterialTheme.typography.bodySmall)
+      } else if (resources.message.isNotEmpty()) {
         Text(resources.message, style = MaterialTheme.typography.bodySmall)
-        TextButton(onClick = { BaseResources.cancel(context) }) { Text("取消") }
-      } else {
-        if (resources.message.isNotEmpty()) Text(resources.message, style = MaterialTheme.typography.bodySmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          Button(onClick = { BaseResources.start(context) }) { Text("下载词库 · %.1f MiB".format(resources.bytes / 1048576.0)) }
-          TextButton(onClick = { picker.launch(arrayOf("*/*")) }) { Text("本地导入") }
-        }
       }
     }
   }
@@ -466,6 +579,7 @@ private fun BaseResourceSection() {
 private fun AboutPage() {
   val context = LocalContext.current
   var notice by remember { mutableStateOf("") }
+  var showNotice by remember { mutableStateOf(false) }
   LaunchedEffect(Unit) {
     notice =
         withContext(Dispatchers.IO) {
@@ -473,19 +587,38 @@ private fun AboutPage() {
         }
   }
   SettingsCard {
-    Text("retype · ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleLarge)
-    Text(if (BuildConfig.DEBUG) "Android 预览版" else "Android")
-    TextButton(
-        onClick = {
-          context.startActivity(
-              Intent(
-                  Intent.ACTION_VIEW,
-                  android.net.Uri.parse("https://github.com/L-Chris/retype"),
-              ))
-        }) {
-          Text("项目主页")
-        }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+      Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("retype · ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleLarge)
+        Text(
+            if (BuildConfig.DEBUG) "Android 预览版" else "Android",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color(0xFF697271),
+        )
+      }
+      OutlinedButton(
+          onClick = {
+            context.startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    android.net.Uri.parse("https://github.com/L-Chris/retype"),
+                ))
+          }) {
+            Text("主页")
+          }
+    }
   }
   UpdateCard()
-  Text(notice, style = MaterialTheme.typography.bodySmall)
+  SettingsCard {
+    Row(
+        Modifier.fillMaxWidth().clickable { showNotice = !showNotice },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text("开源许可与第三方署名", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+      Chevron(down = showNotice)
+    }
+    if (showNotice && notice.isNotEmpty()) {
+      Text(notice, style = MaterialTheme.typography.bodySmall)
+    }
+  }
 }

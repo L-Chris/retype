@@ -46,7 +46,11 @@ xcrun clang -isysroot "$sdk" -mmacosx-version-min=13.0 -fobjc-arc -O2 -Wall -Wex
     platforms/macos/tools/MenuIcon.m -framework Foundation -framework CoreGraphics -o "$stage/menu-icon"
 "$stage/menu-icon" "$bundle/Contents/Resources/menuTemplate.pdf"
 # Ad-hoc signing supports local development. Public distribution needs a Developer ID and notarization.
-codesign --force --options runtime --entitlements platforms/macos/entitlements.plist --sign "${RETYPE_MACOS_SIGN_IDENTITY:--}" "$bundle"
+sign_identity="${RETYPE_MACOS_SIGN_IDENTITY:-}"
+if [[ -z "$sign_identity" ]]; then
+    sign_identity="$(security find-identity -v -p codesigning 2>/dev/null | sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) ".*"/\1/p' | head -1)"
+fi
+codesign --force --options runtime --entitlements platforms/macos/entitlements.plist --sign "${sign_identity:--}" "$bundle"
 codesign --verify --strict --verbose=2 "$bundle"
 archive="$output/retype-$version-macos-universal.zip"
 package="$stage/retype-macos"

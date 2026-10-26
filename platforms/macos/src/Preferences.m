@@ -14,36 +14,203 @@ NSDictionary *RTFeature(NSDictionary *command) {
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     return RTJSON(rt_feature(json.UTF8String));
 }
+#ifndef RT_UI_SMOKE
+static NSString *const RTKeychainService = @"io.github.retype.inputmethod.Retype";
+static NSString *const RTVaultAccount = @"vault-v1";
+static NSMutableDictionary<NSString *, NSString *> *RTVaultCache(void) {
+    static NSMutableDictionary<NSString *, NSString *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary new]; });
+    return cache;
+}
+static NSMutableSet<NSString *> *RTVaultCheckedAccounts(void) {
+    static NSMutableSet<NSString *> *checked;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ checked = [NSMutableSet new]; });
+    return checked;
+}
+static NSLock *RTVaultLock(void) {
+    static NSLock *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSLock new]; });
+    return lock;
+}
+static SecAccessRef RTVaultCreateAccess(void) {
+    SecAccessRef access = NULL;
+    if (SecAccessCreate(CFSTR("retype"), NULL, &access) != errSecSuccess || !access) return NULL;
+    CFArrayRef acls = NULL;
+    if (SecAccessCopyACLList(access, &acls) == errSecSuccess && acls) {
+        CFIndex count = CFArrayGetCount(acls);
+        for (CFIndex i = 0; i < count; i++) {
+            SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, i);
+            CFArrayRef apps = NULL;
+            CFStringRef desc = NULL;
+            SecKeychainPromptSelector prompt = 0;
+            if (SecACLCopyContents(acl, &apps, &desc, &prompt) == errSecSuccess) {
+                if (apps) {
+                    CFRelease(apps);
+                    SecACLSetContents(acl, NULL, desc ?: CFSTR("retype"), 0);
+                }
+                if (desc) CFRelease(desc);
+            }
+        }
+        CFRelease(acls);
+    }
+    return access;
+}
+static BOOL RTVaultFlushLocked(void) {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:RTVaultCache() options:0 error:NULL];
+    if (!data) return NO;
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: RTKeychainService,
+        (__bridge id)kSecAttrAccount: RTVaultAccount,
+    };
+    NSDictionary *attributes = @{(__bridge id)kSecValueData: data};
+    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attributes);
+    if (status == errSecSuccess) return YES;
+    SecItemDelete((__bridge CFDictionaryRef)query);
+    NSMutableDictionary *item = [query mutableCopy];
+    [item addEntriesFromDictionary:attributes];
+    item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+    SecAccessRef access = RTVaultCreateAccess();
+    if (access) {
+        item[(__bridge id)kSecAttrAccess] = (__bridge id)access;
+        CFRelease(access);
+    }
+    status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+    if (status != errSecSuccess && item[(__bridge id)kSecAttrAccess]) {
+        [item removeObjectForKey:(__bridge id)kSecAttrAccess];
+        status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+    }
+    return status == errSecSuccess;
+}
+static BOOL RTVaultEnsureLoadedLocked(BOOL *authFailed) {
+    static BOOL loaded = NO;
+    static CFAbsoluteTime backoffUntil = 0;
+    if (loaded) return YES;
+    if (CFAbsoluteTimeGetCurrent() < backoffUntil) {
+        if (authFailed) *authFailed = YES;
+        return NO;
+    }
+    NSDictionary *query = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: RTKeychainService,
+        (__bridge id)kSecAttrAccount: RTVaultAccount,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
+    };
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status == errSecItemNotFound) {
+        loaded = YES;
+        return YES;
+    }
+    if (status != errSecSuccess) {
+        backoffUntil = CFAbsoluteTimeGetCurrent() + 60.0;
+        if (authFailed) *authFailed = YES;
+        return NO;
+    }
+    NSData *data = CFBridgingRelease(result);
+    id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    if ([json isKindOfClass:NSDictionary.class]) {
+        for (id k in (NSDictionary *)json) {
+            id v = ((NSDictionary *)json)[k];
+            if ([k isKindOfClass:NSString.class] && [v isKindOfClass:NSString.class]) {
+                RTVaultCache()[k] = v;
+            }
+        }
+    }
+    loaded = YES;
+    // Re-save once if needed so existing vaults acquire the version-independent ACL.
+    if (![RTVaultCache()[@"_acl_v1"] isEqual:@"1"]) {
+        RTVaultCache()[@"_acl_v1"] = @"1";
+        NSDictionary *delQuery = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: RTKeychainService,
+            (__bridge id)kSecAttrAccount: RTVaultAccount,
+        };
+        SecItemDelete((__bridge CFDictionaryRef)delQuery);
+        RTVaultFlushLocked();
+    }
+    return YES;
+}
+#endif
+
 NSString *RTSecret(NSString *account) {
     #ifdef RT_UI_SMOKE
     return RTTestSecretRead?RTTestSecretRead(account):@"";
     #else
-    NSDictionary *query = @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService:@"io.github.retype.inputmethod.Retype", (__bridge id)kSecAttrAccount:account,
-        (__bridge id)kSecReturnData:@YES, (__bridge id)kSecMatchLimit:(__bridge id)kSecMatchLimitOne};
+    if (!account.length) return @"";
+    [RTVaultLock() lock];
+    BOOL authFailed = NO;
+    if (!RTVaultEnsureLoadedLocked(&authFailed)) {
+        [RTVaultLock() unlock];
+        return authFailed ? nil : @"";
+    }
+    NSString *cached = RTVaultCache()[account];
+    if (cached != nil) {
+        [RTVaultLock() unlock];
+        return cached;
+    }
+    if ([RTVaultCheckedAccounts() containsObject:account]) {
+        [RTVaultLock() unlock];
+        return @"";
+    }
+    [RTVaultCheckedAccounts() addObject:account];
+    NSDictionary *legacyQuery = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: RTKeychainService,
+        (__bridge id)kSecAttrAccount: account,
+        (__bridge id)kSecReturnData: @YES,
+        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
+    };
     CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-    if (status == errSecItemNotFound) return @"";
-    if (status != errSecSuccess) return nil;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)legacyQuery, &result);
+    if (status == errSecItemNotFound) {
+        RTVaultCache()[account] = @"";
+        [RTVaultLock() unlock];
+        return @"";
+    }
+    if (status != errSecSuccess) {
+        [RTVaultLock() unlock];
+        return nil;
+    }
     NSData *data = CFBridgingRelease(result);
-    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSString *value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+    RTVaultCache()[account] = value;
+    RTVaultCache()[@"_acl_v1"] = @"1";
+    if (RTVaultFlushLocked()) {
+        NSDictionary *delLegacy = @{
+            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+            (__bridge id)kSecAttrService: RTKeychainService,
+            (__bridge id)kSecAttrAccount: account,
+        };
+        SecItemDelete((__bridge CFDictionaryRef)delLegacy);
+    }
+    [RTVaultLock() unlock];
+    return value;
     #endif
 }
 BOOL RTSaveSecret(NSString *account, NSString *value) {
     #ifdef RT_UI_SMOKE
     return RTTestSecretSave?RTTestSecretSave(account,value):YES;
     #else
-    NSDictionary *query = @{(__bridge id)kSecClass:(__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService:@"io.github.retype.inputmethod.Retype", (__bridge id)kSecAttrAccount:account};
-    if (!value.length) { OSStatus s = SecItemDelete((__bridge CFDictionaryRef)query); return s == errSecSuccess || s == errSecItemNotFound; }
-    NSDictionary *attributes = @{(__bridge id)kSecValueData:[value dataUsingEncoding:NSUTF8StringEncoding]};
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attributes);
-    if (status == errSecItemNotFound) {
-        NSMutableDictionary *item = query.mutableCopy; [item addEntriesFromDictionary:attributes];
-        item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-        status = SecItemAdd((__bridge CFDictionaryRef)item, NULL);
-    }
-    return status == errSecSuccess;
+    if (!account.length) return NO;
+    [RTVaultLock() lock];
+    RTVaultEnsureLoadedLocked(NULL);
+    [RTVaultCheckedAccounts() addObject:account];
+    RTVaultCache()[account] = value ?: @"";
+    RTVaultCache()[@"_acl_v1"] = @"1";
+    BOOL ok = RTVaultFlushLocked();
+    NSDictionary *delLegacy = @{
+        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: RTKeychainService,
+        (__bridge id)kSecAttrAccount: account,
+    };
+    SecItemDelete((__bridge CFDictionaryRef)delLegacy);
+    [RTVaultLock() unlock];
+    return ok;
     #endif
 }
 static NSUserDefaults *RTDefaults(void){
@@ -74,6 +241,12 @@ static bool RTClipboardWrite(const char *text,uint64_t expected,uint64_t *sequen
     if(NSThread.isMainThread)write();else dispatch_sync(dispatch_get_main_queue(),write);return written;
 }
 void RTRegisterHooks(void){rt_macos_hooks(RTCredentialRead,RTCredentialSave,RTClipboardRead,RTClipboardWrite);}
+static void RTNormalizeBooleans(NSMutableDictionary *root) {
+    for (NSString *path in @[@"input.english",@"input.spelling",@"input.symbols",@"autoCheck",@"cloud.enabled",@"ai.preview",@"ai.voice.tidy",@"shortcuts.mode.tap",@"shortcuts.translate.tap",@"shortcuts.voice.tap"]) {
+        id val = [root valueForKeyPath:path];
+        if (val && val != NSNull.null) [root setValue:([val boolValue] ? @YES : @NO) forKeyPath:path];
+    }
+}
 @implementation RTPreferences
 + (instancetype)shared {
     static RTPreferences *preferences; static dispatch_once_t once;
@@ -88,10 +261,11 @@ void RTRegisterHooks(void){rt_macos_hooks(RTCredentialRead,RTCredentialSave,RTCl
         if ([loaded isKindOfClass:NSDictionary.class]) [preferences.value addEntriesFromDictionary:loaded];
         else {
             NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
-            preferences.value[@"input"][@"scheme"] = @([d boolForKey:@"flypy"]);
-            preferences.value[@"input"][@"english"] = @(![d boolForKey:@"englishDisabled"]);
-            preferences.value[@"input"][@"spelling"] = @(![d boolForKey:@"spellingDisabled"]);
+            preferences.value[@"input"][@"scheme"] = @([d boolForKey:@"flypy"] ? 1 : 0);
+            preferences.value[@"input"][@"english"] = [d boolForKey:@"englishDisabled"] ? @NO : @YES;
+            preferences.value[@"input"][@"spelling"] = [d boolForKey:@"spellingDisabled"] ? @NO : @YES;
         }
+        RTNormalizeBooleans(preferences.value);
         preferences.value[@"cloud"][@"device_name"] = NSHost.currentHost.localizedName ?: @"Mac";
         [preferences save];
     });
@@ -99,6 +273,7 @@ void RTRegisterHooks(void){rt_macos_hooks(RTCredentialRead,RTCredentialSave,RTCl
 }
 - (void)save {
     self.revision++;
+    RTNormalizeBooleans(self.value);
     NSData *data = [NSJSONSerialization dataWithJSONObject:self.value options:0 error:NULL];
     if (data) [RTDefaults() setObject:data forKey:@"preferences-v1"];
     [[NSNotificationCenter defaultCenter] postNotificationName:@"RTPreferencesChanged" object:nil];
