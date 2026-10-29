@@ -26,6 +26,7 @@ struct Data {
     hidden: bool,
     no_text_extent: bool,
     input_scope: Option<InputScope>,
+    scope_after_end: Option<InputScope>,
     requested_scope: bool,
     deferred_flags: Option<u32>,
     chromium: bool,
@@ -68,7 +69,15 @@ impl ITfInputScope_Impl for DeclaredScope_Impl {
 
 #[test]
 fn declared_password_private_and_pin_scopes_never_learn() -> Result<()> {
-    for scope in [IS_DEFAULT, IS_PASSWORD, IS_PRIVATE, IS_NUMERIC_PIN] {
+    for scope in [
+        IS_DEFAULT,
+        IS_PASSWORD,
+        IS_PRIVATE,
+        IS_NUMERIC_PASSWORD,
+        IS_NUMERIC_PIN,
+        IS_ALPHANUMERIC_PIN,
+        IS_ALPHANUMERIC_PIN_SET,
+    ] {
         let object: ITfInputScope = DeclaredScope(scope).into();
         let value = VARIANT::from(object.cast::<windows_core::IUnknown>()?);
         assert_eq!(safe_input_scope(&value), scope == IS_DEFAULT);
@@ -488,6 +497,9 @@ impl ITfContextOwnerCompositionSink_Impl for Store_Impl {
     fn OnEndComposition(&self, _: Ref<'_, ITfCompositionView>) -> Result<()> {
         let mut data = lock(&self.data);
         data.composition_count = data.composition_count.saturating_sub(1);
+        if let Some(scope) = data.scope_after_end.take() {
+            data.input_scope = Some(scope);
+        }
         Ok(())
     }
 }
@@ -538,6 +550,145 @@ fn real_tsf_composition_commit_cancel_and_passthrough() -> Result<()> {
         CoUninitialize();
         result
     }
+}
+
+#[test]
+fn whole_word_selections_learn_in_normal_fields_with_or_without_hidden_text_support() -> Result<()>
+{
+    std::thread::spawn(|| -> Result<()> {
+        // SAFETY: Isolated COM apartment and text store; no real input or user database.
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let result = (|| -> Result<()> {
+                let manager: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let tid = manager.Activate()?;
+                let document = manager.CreateDocumentMgr()?;
+                let data = Arc::new(Mutex::new(Data::default()));
+                let store: ITextStoreACP = Store {
+                    data: Arc::clone(&data),
+                }
+                .into();
+                let mut context = None;
+                let mut cookie = 0;
+                document.CreateContext(tid, 0, &store, &mut context, &mut cookie)?;
+                let context = context.ok_or(E_FAIL)?;
+                document.Push(&context)?;
+                let state = TipState::new();
+                state.tid.store(tid, Ordering::SeqCst);
+                state.activated.store(true, Ordering::SeqCst);
+                *lock(&state.thread_mgr) = Some(manager.clone());
+                let session = crate::session::Session::start_with("Z:/retype-test/no-dict".into());
+                let deadline = Instant::now() + std::time::Duration::from_secs(10);
+                while !session.dict_ready() && Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let (dict, _) = retype_dict::from_pairs([
+                    ("啦去", "la qu", 10000.),
+                    ("拉取", "la qu", 1347.),
+                    ("拉", "la", 100.),
+                    ("取", "qu", 100.),
+                ]);
+                session.dict.install(Arc::new(dict));
+                session
+                    .packs
+                    .install(Arc::new(retype_dict::LayeredDict::new()));
+                session.submit(InputEvent::SetPinyinScheme(
+                    retype_types::PinyinScheme::Full,
+                ));
+                session.submit(InputEvent::SetEnglishOptions {
+                    enabled: false,
+                    spelling: false,
+                });
+                if !session.backend.with_kernel(|k| k.is_chinese()) {
+                    session.submit(InputEvent::ToggleChinese);
+                }
+                *lock(&state.session) = Some(Arc::clone(&session));
+                let choose = |number_key: bool| -> Result<()> {
+                    for ch in "laqu".chars() {
+                        request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+                    }
+                    let render = session.backend.with_kernel(|k| k.render_state());
+                    let index = render
+                        .candidates
+                        .iter()
+                        .position(|c| c.text == "拉取")
+                        .expect("whole word available");
+                    assert!(index < 8);
+                    let work = if number_key {
+                        Work::Key(Key::Char((b'1' + index as u8) as char), Modifiers::NONE)
+                    } else {
+                        Work::Choose(index, render.gen)
+                    };
+                    request(&state, &context, work)?;
+                    assert!(lock(&state.composition).is_none());
+                    assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("拉取"));
+                    Ok(())
+                };
+                let count = || {
+                    session
+                        .user
+                        .usage_snapshot()
+                        .records
+                        .iter()
+                        .filter(|r| r.text == "拉取")
+                        .map(|r| r.count)
+                        .sum::<u64>()
+                };
+                // The host's capability flag is independent of this field's privacy.
+                let mut expected = 0;
+                for supports_hidden in [false, true] {
+                    for scope in [Some(IS_DEFAULT), None] {
+                        lock(&data).hidden = supports_hidden;
+                        for choice in 0..5 {
+                            lock(&data).input_scope = scope;
+                            // Ending a composition can expose the next field's scope.
+                            lock(&data).scope_after_end = Some(IS_PRIVATE);
+                            choose(choice % 2 == 0)?;
+                        }
+                        expected += 5;
+                        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+                        while count() < expected && Instant::now() < deadline {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        assert_eq!(
+                            count(),
+                            expected,
+                            "supports_hidden={supports_hidden}, scope={scope:?}"
+                        );
+                        assert_eq!(session.user.usage_snapshot().tick, expected);
+                    }
+                }
+                for scope in [
+                    IS_PASSWORD,
+                    IS_PRIVATE,
+                    IS_NUMERIC_PASSWORD,
+                    IS_NUMERIC_PIN,
+                    IS_ALPHANUMERIC_PIN,
+                    IS_ALPHANUMERIC_PIN_SET,
+                ] {
+                    lock(&data).input_scope = Some(scope);
+                    // A normal caret after commit must not authorize a private source.
+                    lock(&data).scope_after_end = Some(IS_DEFAULT);
+                    choose(false)?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                assert_eq!(
+                    count(),
+                    expected,
+                    "private fields must never add learning events"
+                );
+                state.hide();
+                document.Pop(TF_POPF_ALL)?;
+                manager.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            result
+        }
+    })
+    .join()
+    .map_err(|_| E_FAIL)?
 }
 
 type TranslationReadResult = std::result::Result<Vec<u16>, String>;
@@ -990,6 +1141,7 @@ fn run_host() -> Result<()> {
             learned_before.iter().any(|entry| entry.1 == "你好"),
             "normal TSF text fields must learn successful commits"
         );
+        lock(&data).input_scope = Some(IS_PRIVATE);
         for ch in "nihao".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
@@ -998,9 +1150,10 @@ fn run_host() -> Result<()> {
         assert_eq!(
             session.user.snapshot(),
             learned_before,
-            "hidden TSF contexts must not learn"
+            "private TSF contexts must not learn"
         );
         lock(&data).hidden = false;
+        lock(&data).input_scope = Some(IS_DEFAULT);
         for ch in "nihao".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }

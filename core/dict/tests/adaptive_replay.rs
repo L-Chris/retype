@@ -35,6 +35,37 @@ fn decode(input: &str, lex: &dyn Lexicon) -> Vec<Candidate> {
 }
 
 #[test]
+fn learning_a_composition_does_not_inherit_its_sentence_bonus_as_word_frequency() {
+    // Same frequency scale as the installed dictionary: 啦去 is a composition,
+    // while 拉取 and 拉去 are actual whole-word entries.
+    let base: Arc<dyn Lexicon> = Arc::new(
+        from_pairs([
+            ("拉取", "la qu", 1347.),
+            ("拉去", "la qu", 618.),
+            ("啦", "la", 181128.),
+            ("去", "qu", 1049335.),
+            ("参考", "can kao", 1_183_767_572.),
+        ])
+        .0,
+    );
+    let user = Arc::new(UserDict::new());
+    let learner = Learner::with_system(Arc::clone(&user), Arc::clone(&base));
+    let lex = LayeredDict::with_system_and_user(base, user, 0.);
+    assert_eq!(decode("laqu", &lex)[0].text, "拉取");
+    choice(&learner, "啦去", "la qu", 0);
+    for candidates in [
+        decode("laqu", &lex),
+        retype_pinyin::shuangpin::decode("laqu", &lex, &Default::default()).candidates,
+    ] {
+        assert!(candidates.iter().any(|c| c.text == "啦去"));
+        assert_eq!(
+            candidates[0].text, "拉取",
+            "Registering a composition must not turn segmentation compensation into a high lexical prior"
+        );
+    }
+}
+
+#[test]
 fn repeated_choices_change_preference_and_another_preference_can_replace_it() {
     let (_, learner, lex) = fixture();
     assert_eq!(decode("shili", &lex)[0].text, "实力");
@@ -131,7 +162,7 @@ fn full_and_flypy_odd_and_even_codes_share_the_same_preference() {
 }
 
 #[test]
-fn registered_compound_becomes_a_whole_word_without_a_length_bonus() {
+fn registered_compound_uses_a_lexical_prior_without_sentence_bonuses() {
     let base: Arc<dyn Lexicon> = Arc::new(
         from_pairs([
             ("你", "ni", 1000.),
@@ -149,7 +180,8 @@ fn registered_compound_becomes_a_whole_word_without_a_length_bonus() {
     let original = before.iter().find(|c| c.text == "拟号").unwrap().score;
     choice(&learner, "拟号", "ni hao", 3);
     let prior = user.usage_snapshot().records[0].prior_logp.unwrap();
-    assert!((prior + retype_pinyin::DecodeOptions::default().word_bonus - original).abs() < 1e-5);
+    let bonus = retype_pinyin::DecodeOptions::default().word_bonus;
+    assert!((prior + 2. * bonus - original).abs() < 1e-5);
     // Once registered, the user phrase is a whole-word match. With no system
     // whole word for this reading, automatic compositions are now the fallback.
     let registered = decode("nihao", &lex);
@@ -159,4 +191,41 @@ fn registered_compound_becomes_a_whole_word_without_a_length_bonus() {
         choice(&learner, "拟号", "ni hao", 0);
     }
     assert_eq!(decode("nihao", &lex)[0].text, "拟号");
+}
+
+#[test]
+fn novel_compounds_remain_learnable_and_preferences_can_reverse_up_to_eight_syllables() {
+    for pairs in [1, 2, 4] {
+        let base: Arc<dyn Lexicon> = Arc::new(
+            from_pairs([
+                ("你", "ni", 1000.),
+                ("拟", "ni", 800.),
+                ("好", "hao", 1000.),
+                ("号", "hao", 800.),
+                ("参考", "can kao", 100000.),
+            ])
+            .0,
+        );
+        let user = Arc::new(UserDict::new());
+        let learner = Learner::with_system(Arc::clone(&user), Arc::clone(&base));
+        let lex = LayeredDict::with_system_and_user(base, Arc::clone(&user), 0.);
+        let input = "nihao".repeat(pairs);
+        let reading = vec!["ni hao"; pairs].join(" ");
+        let original = "你好".repeat(pairs);
+        let preferred = "拟号".repeat(pairs);
+        choice(&learner, &original, &reading, 0);
+        for _ in 0..48 {
+            choice(&learner, &preferred, &reading, 1);
+        }
+        assert_eq!(decode(&input, &lex)[0].text, preferred);
+        let usage = user.usage_snapshot();
+        let learned = usage.records.iter().find(|r| r.text == preferred).unwrap();
+        assert_eq!(learned.count, 48);
+        assert!(learned.prior_logp.unwrap().is_finite());
+        assert_eq!(learned.syllables.len(), pairs * 2);
+        for _ in 0..96 {
+            choice(&learner, &original, &reading, 1);
+        }
+        assert_eq!(decode(&input, &lex)[0].text, original);
+    }
 }

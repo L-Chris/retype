@@ -12,6 +12,8 @@
 
 pub mod backend;
 pub mod kernel;
+#[cfg(test)]
+mod learning_tests;
 pub mod merge;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1159,47 +1161,60 @@ mod tests {
 
     #[test]
     fn deferred_learning_requires_successful_platform_commit_and_respects_privacy() {
-        let (kernel, user, cloud) = make_kernel(false, MockConfig::default());
-        let backend = LocalBackend::new(kernel, cloud);
-        for ch in "nihao".chars() {
-            backend.submit(key_ev(Key::Char(ch)));
+        for segmented in [false, true] {
+            let (kernel, user, cloud) = make_kernel(false, MockConfig::default());
+            let backend = LocalBackend::new(kernel, cloud);
+            let spelling = if segmented { "nihaoma" } else { "nihao" };
+            for allow in [true, false] {
+                user.clear();
+                for ch in spelling.chars() {
+                    backend.submit(key_ev(Key::Char(ch)));
+                }
+                if segmented {
+                    let index = backend
+                        .render()
+                        .candidates
+                        .iter()
+                        .position(|c| c.text == "你好")
+                        .unwrap();
+                    backend.submit_deferred_learning(InputEvent::CandidateChosen { index }, allow);
+                }
+                let actions = backend
+                    .submit_deferred_learning(InputEvent::CandidateChosen { index: 0 }, allow);
+                let events: Vec<_> = actions
+                    .into_iter()
+                    .filter_map(|action| match action {
+                        KernelAction::Side(SideEffect::Learn(event)) => Some(event),
+                        _ => None,
+                    })
+                    .collect();
+                std::thread::sleep(Duration::from_millis(30));
+                assert_eq!(
+                    user.entry_count(),
+                    0,
+                    "An unconfirmed/private host write must not learn"
+                );
+                if !allow {
+                    assert!(events.is_empty());
+                    continue;
+                }
+                let expected = if segmented { 3 } else { 1 };
+                assert_eq!(events.len(), expected);
+                if segmented {
+                    assert!(events.iter().any(
+                        |e| matches!(e, LearningEvent::Coinage {text,..} if text == "你好吗")
+                    ));
+                }
+                for event in events {
+                    backend.record_learning(event);
+                }
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while user.entry_count() < expected && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(user.entry_count(), expected);
+            }
         }
-        let actions =
-            backend.submit_deferred_learning(InputEvent::CandidateChosen { index: 0 }, true);
-        let event = actions
-            .into_iter()
-            .find_map(|action| match action {
-                KernelAction::Side(SideEffect::Learn(event)) => Some(event),
-                _ => None,
-            })
-            .expect("learning should be deferred until the host commit succeeds");
-        std::thread::sleep(Duration::from_millis(30));
-        assert_eq!(
-            user.entry_count(),
-            0,
-            "an unconfirmed host write must not learn"
-        );
-        backend.record_learning(event);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while user.entry_count() == 0 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(user.entry_count(), 1);
-        user.clear();
-        for ch in "nihao".chars() {
-            backend.submit(key_ev(Key::Char(ch)));
-        }
-        let actions =
-            backend.submit_deferred_learning(InputEvent::CandidateChosen { index: 0 }, false);
-        assert!(!actions
-            .iter()
-            .any(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_)))));
-        std::thread::sleep(Duration::from_millis(30));
-        assert_eq!(
-            user.entry_count(),
-            0,
-            "hidden input contexts must not learn"
-        );
     }
 
     #[test]

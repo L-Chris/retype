@@ -47,6 +47,7 @@ jobs:
             -p retype-types \
             -p retype-pinyin \
             -p retype-dict \
+            -p retype-learning-store --features retype-learning-store/sqlite \
             -p retype-context \
             -p retype-cloud \
             -p retype-engine \
@@ -67,6 +68,7 @@ jobs:
             -p retype-types \
             -p retype-pinyin \
             -p retype-dict \
+            -p retype-learning-store --features retype-learning-store/sqlite \
             -p retype-context \
             -p retype-cloud \
             -p retype-engine \

@@ -10,7 +10,11 @@ impl Kernel {
                 continue;
             }
             let exact = word.text.eq_ignore_ascii_case(&self.buffer);
-            let before = if exact && !chinese_word {
+            // A learned Latin spelling can be a code or pinyin, rather than an
+            // English word. Retain it without promoting it over Chinese matches.
+            let before = if chinese_count > 0 && !self.english.contains_word(&word.text) {
+                chinese_count
+            } else if exact && !chinese_word {
                 0
             } else if exact {
                 1
