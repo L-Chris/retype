@@ -696,7 +696,7 @@ impl Kernel {
 
         if self.buffer.is_empty() {
             let text = self.committed_text();
-            self.emit_part_learning(actions);
+            self.emit_part_learning(None, actions);
             self.reset_composition();
             actions.push(KernelAction::Commit(CommitRequest::ReplaceComposition {
                 text,
@@ -709,7 +709,7 @@ impl Kernel {
 
     /// 上屏首选（整句），用于「组字中直接打标点」的场景。
     fn commit_best(&mut self, actions: &mut Vec<KernelAction>) {
-        self.emit_part_learning(actions);
+        self.emit_part_learning(self.candidates.first(), actions);
         if let Some(candidate) = self.candidates.first() {
             if candidate.language == CandidateLanguage::English {
                 actions.push(KernelAction::Side(SideEffect::Learn(
@@ -754,7 +754,7 @@ impl Kernel {
             return;
         }
         let text = self.composition_text();
-        self.emit_part_learning(actions);
+        self.emit_part_learning(None, actions);
         self.reset_composition();
         self.bump_gen();
         if text.is_empty() {
@@ -766,7 +766,7 @@ impl Kernel {
         actions.push(KernelAction::Render(self.render_state()));
     }
 
-    fn emit_part_learning(&self, actions: &mut Vec<KernelAction>) {
+    fn emit_part_learning(&self, tail: Option<&Candidate>, actions: &mut Vec<KernelAction>) {
         for part in &self.parts {
             if part.language == CandidateLanguage::English {
                 actions.push(KernelAction::Side(SideEffect::Learn(
@@ -788,6 +788,54 @@ impl Kernel {
                 },
             )));
         }
+        // Selecting a phrase in pieces is still one explicit spelling/word choice.
+        // Publish it only with the final commit so TSF can apply the same privacy
+        // and successful-write checks as the individual selections.
+        let selected = self
+            .parts
+            .iter()
+            .map(|part| (part.language, part.text.as_str(), part.syllables.as_slice()));
+        let final_part = tail.into_iter().map(|candidate| {
+            (
+                candidate.language,
+                candidate.text.as_str(),
+                candidate.syllables.as_slice(),
+            )
+        });
+        let mut text = String::new();
+        let mut syllables = Vec::new();
+        let mut count = 0usize;
+        let flush = |text: &mut String,
+                     syllables: &mut Vec<retype_types::SyllableId>,
+                     count: &mut usize,
+                     actions: &mut Vec<KernelAction>| {
+            if *count > 1 && syllables.len() <= self.cfg.decode.max_word_syllables {
+                actions.push(KernelAction::Side(SideEffect::Learn(
+                    LearningEvent::Coinage {
+                        text: std::mem::take(text),
+                        syllables: std::mem::take(syllables),
+                    },
+                )));
+            } else {
+                text.clear();
+                syllables.clear();
+            }
+            *count = 0;
+        };
+        for (language, part, reading) in selected.chain(final_part) {
+            // Do not join across an English selection or teach unmatched letters.
+            if language != CandidateLanguage::Chinese
+                || reading.is_empty()
+                || !retype_dict::annotate::all_han(part)
+            {
+                flush(&mut text, &mut syllables, &mut count, actions);
+                continue;
+            }
+            text.push_str(part);
+            syllables.extend_from_slice(reading);
+            count += 1;
+        }
+        flush(&mut text, &mut syllables, &mut count, actions);
     }
 
     fn cancel_composition(&mut self, actions: &mut Vec<KernelAction>) {

@@ -56,6 +56,10 @@ impl Vocabulary {
         let i = self.lower_bound(input);
         (i < self.count() && self.word(i) == input).then_some(i)
     }
+    /// Dictionary evidence for mixed-language priority, separate from personal spellings.
+    pub fn contains_word(&self, input: &str) -> bool {
+        self.find(&input.to_ascii_lowercase()).is_some()
+    }
     fn candidate(&self, id: usize, input: &str) -> Candidate {
         let mut c = Candidate::new(casing(self.word(id), input), CandidateSource::Local);
         c.language = CandidateLanguage::English;

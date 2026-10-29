@@ -4,18 +4,26 @@ use retype_dict::{Learner, UserDict};
 use retype_learning::protocol::*;
 use retype_learning::store::Store;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
+        // Wall-clock resolution alone is not unique across parallel test threads.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("retype-learning-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "retype-learning-{}-{id}-{serial}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -386,4 +394,155 @@ fn recency_clock_and_preference_survive_restart_and_replays() {
         .unwrap();
     assert_eq!(replay.tick, original.tick);
     assert_eq!(replay.records, original.records);
+}
+
+#[test]
+fn segmented_phrase_counts_survive_restart_and_replay_without_relearning() {
+    use retype_pinyin::Lexicon;
+    let directory = Directory::new();
+    let system: Arc<dyn Lexicon> = Arc::new(
+        retype_dict::from_pairs([
+            ("啦去", "la qu", 10000.),
+            ("啦", "la", 181128.),
+            ("拉", "la", 177106.),
+            ("去", "qu", 1049335.),
+            ("取", "qu", 50000.),
+        ])
+        .0,
+    );
+    let mut broker = Store::open(&directory.db(), Arc::clone(&system)).unwrap();
+    let mut batch = Request {
+        version: VERSION,
+        client: "segmented-client".into(),
+        known_revision: None,
+        events: Vec::new(),
+        stop: false,
+    };
+    for round in 0..48u64 {
+        batch.events = vec![
+            SequencedEvent {
+                sequence: round * 3 + 1,
+                event: Event::Chosen {
+                    text: "拉".into(),
+                    pinyin: "la".into(),
+                    index: 3,
+                },
+            },
+            SequencedEvent {
+                sequence: round * 3 + 2,
+                event: Event::Chosen {
+                    text: "取".into(),
+                    pinyin: "qu".into(),
+                    index: 3,
+                },
+            },
+            SequencedEvent {
+                sequence: round * 3 + 3,
+                event: Event::Coinage {
+                    text: "拉取".into(),
+                    pinyin: "la'qu".into(),
+                },
+            },
+        ];
+        broker.handle(&batch).unwrap();
+    }
+    drop(broker);
+    let mut broker = Store::open(&directory.db(), Arc::clone(&system)).unwrap();
+    // Replaying the last acknowledged transaction must leave the counts unchanged.
+    let snapshot = broker.handle(&batch).unwrap().snapshot.unwrap();
+    let phrase = snapshot
+        .ranking
+        .as_ref()
+        .unwrap()
+        .records
+        .iter()
+        .find(|r| r.text == "拉取")
+        .unwrap();
+    assert_eq!(phrase.count, 48);
+    let user = Arc::new(UserDict::new());
+    let learner = Learner::with_system(Arc::clone(&user), Arc::clone(&system));
+    snapshot.restore(&user, &learner);
+    let lex = retype_dict::LayeredDict::with_system_and_user(system, user, 0.);
+    assert_eq!(
+        retype_pinyin::Decoder::new()
+            .decode("laqu", &lex)
+            .candidates[0]
+            .text,
+        "拉取"
+    );
+}
+
+#[test]
+fn whole_word_learning_survives_a_cold_dictionary_start_without_losing_counts() {
+    use retype_pinyin::Lexicon;
+    let directory = Directory::new();
+    let system = retype_dict::AsyncDict::empty();
+    let mut broker = Store::open(&directory.db(), Arc::clone(&system) as Arc<dyn Lexicon>).unwrap();
+    let mut response = None;
+    for sequence in 1..=12 {
+        response = Some(
+            broker
+                .handle(&request(
+                    "whole-word",
+                    sequence,
+                    Event::Chosen {
+                        pinyin: "la'qu".into(),
+                        text: "拉取".into(),
+                        index: 2,
+                    },
+                ))
+                .unwrap(),
+        );
+    }
+    let before = response.unwrap();
+    assert_eq!(
+        before
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .ranking
+            .as_ref()
+            .unwrap()
+            .records[0]
+            .count,
+        12
+    );
+    assert!(before
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .ranking
+        .as_ref()
+        .unwrap()
+        .records[0]
+        .prior_logp
+        .is_none());
+    system.install(Arc::new(
+        retype_dict::from_pairs([("拉取", "la qu", 1347.), ("拉去", "la qu", 618.)]).0,
+    ));
+    let refresh = Request {
+        version: VERSION,
+        client: "whole-word".into(),
+        known_revision: Some(before.revision),
+        events: Vec::new(),
+        stop: false,
+    };
+    let after = broker.handle(&refresh).unwrap();
+    assert!(after.revision > before.revision);
+    let usage = &after
+        .snapshot
+        .as_ref()
+        .unwrap()
+        .ranking
+        .as_ref()
+        .unwrap()
+        .records[0];
+    assert_eq!(usage.count, 12);
+    assert!(usage.prior_logp.is_some());
+    drop(broker);
+    let mut broker = Store::open(&directory.db(), system as Arc<dyn Lexicon>).unwrap();
+    let mut inspect = refresh;
+    inspect.known_revision = None;
+    let persisted = broker.handle(&inspect).unwrap().snapshot.unwrap();
+    assert_eq!(persisted.ranking.unwrap().records[0].count, 12);
 }

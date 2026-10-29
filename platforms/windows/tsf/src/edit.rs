@@ -244,13 +244,14 @@ impl Edit_Impl {
                         .backend
                         .with_kernel(|k| (!k.is_chinese() && !cancel).then(|| k.composition_text()))
                 });
+                let allow_learning = english.is_some() && learnable(&self.context, ec);
                 end(state, ec, cancel)?;
                 state.reset_kernel();
                 if let Some(text) = english {
                     if countable(&self.context) {
                         stats::commit(&state.stats_clock, &text, true);
                     }
-                    if learnable(&self.context, ec)
+                    if allow_learning
                         && text.len() >= 2
                         && text.len() <= 64
                         && text.bytes().all(|c| c.is_ascii_alphabetic() || c == b'\'')
@@ -358,10 +359,16 @@ impl Edit_Impl {
             r.opening.is_some() || r.closing.is_some()
         }) && crate::preferences::symbol_completion()
             && learnable(&self.context, ec);
-        let allow_learning = countable(&self.context);
         let started = Instant::now();
-        let actions = session.submit_in_context(event, allow_learning);
+        let actions = session.submit_in_context(event, true);
         timing.kernel_us += crate::input_profile::micros(started.elapsed());
+        // Inspect the source field while the composition/selection is still intact.
+        // Some hosts stop exposing its scope after the commit ends the composition.
+        // Keep the events deferred until every document write below succeeds.
+        let allow_learning = actions
+            .iter()
+            .any(|action| matches!(action, KernelAction::Side(SideEffect::Learn(_))))
+            && learnable(&self.context, ec);
         if matches!(self.work, Work::Toggle | Work::SetChinese(_)) {
             state.notify_language_bar();
         }
@@ -426,10 +433,24 @@ impl Edit_Impl {
             Ok(())
         })();
         timing.write_us += crate::input_profile::micros(write_start.elapsed());
+        if !learning.is_empty() {
+            // Numeric metadata only: never log candidate text or pinyin.
+            crate::settings_log::event(
+                "learning",
+                "selection",
+                0,
+                serde_json::json!({
+                    "events": learning.len(),
+                    "allowed": allow_learning,
+                    "commits": committed.len(),
+                    "write_result": write_result.as_ref().err().map_or(0, |e| e.code().0),
+                }),
+            );
+        }
         write_result?;
         // Only successful host writes count as selections. Failed/cancelled edit sessions
-        // and hidden input contexts must not persist a user's uncommitted text.
-        if !committed.is_empty() && !learning.is_empty() && learnable(&self.context, ec) {
+        // and private input contexts must not persist a user's uncommitted text.
+        if !committed.is_empty() && allow_learning {
             for event in learning {
                 session.backend.record_learning(event);
             }
@@ -589,7 +610,11 @@ fn countable(ctx: &ITfContext) -> bool {
 }
 
 pub(crate) fn learnable(ctx: &ITfContext, ec: u32) -> bool {
-    if !countable(ctx) {
+    // NOHIDDENTEXT describes the entire document's capabilities, not the privacy
+    // of this field. Rich text hosts may support hidden text in normal fields.
+    // Require a connected context, then check the actual input scope instead.
+    // SAFETY: This reads metadata for the context owning the current edit cookie.
+    if unsafe { ctx.GetStatus() }.is_err() {
         return false;
     }
     // Query scopes only at commit, keeping this extra COM work out of candidate decoding.
@@ -651,7 +676,17 @@ fn safe_input_scope(value: &VARIANT) -> bool {
             && (count == 0
                 || !std::slice::from_raw_parts(scopes, count as usize)
                     .iter()
-                    .any(|scope| matches!(*scope, IS_PASSWORD | IS_PRIVATE | IS_NUMERIC_PIN)));
+                    .any(|scope| {
+                        matches!(
+                            *scope,
+                            IS_PASSWORD
+                                | IS_PRIVATE
+                                | IS_NUMERIC_PASSWORD
+                                | IS_NUMERIC_PIN
+                                | IS_ALPHANUMERIC_PIN
+                                | IS_ALPHANUMERIC_PIN_SET
+                        )
+                    }));
         CoTaskMemFree(Some(scopes.cast()));
         allowed
     }
