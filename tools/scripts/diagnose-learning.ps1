@@ -89,7 +89,9 @@ if ($isWindowsHost) {
 function Get-SelectionMetadata {
     if (-not $isWindowsHost) { return @() }
     $logRoot = Join-Path $env:LOCALAPPDATA 'retype\logs'
-    @(Get-ChildItem -LiteralPath $logRoot -Filter 'settings-learning-*.jsonl' -ErrorAction SilentlyContinue |
+    # The shared logger can use the first caller's role in its filename, so
+    # learning records may live in settings-launcher-*.jsonl as well.
+    @(Get-ChildItem -LiteralPath $logRoot -Filter 'settings-*.jsonl' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 6 | ForEach-Object {
             Get-Content -LiteralPath $_.FullName -Tail 20 -ErrorAction SilentlyContinue | ForEach-Object {
                 try {

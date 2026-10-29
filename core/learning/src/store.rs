@@ -1,5 +1,6 @@
 //! Single-writer transactional storage. Raw keystrokes and event payloads are not logged.
 use crate::protocol::{Event, Request, Response, Snapshot, MAX_BATCH, VERSION};
+use retype_dict::adaptive::PRIOR_MODEL_VERSION;
 use retype_dict::{Learner, UserDict};
 use retype_pinyin::Lexicon;
 use retype_types::LearningStore;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 pub struct Store {
     db: Connection,
@@ -44,7 +45,7 @@ impl Store {
                 original TEXT NOT NULL, replacement TEXT NOT NULL, count INTEGER NOT NULL,
                 PRIMARY KEY(original,replacement));
             CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY, sequence INTEGER NOT NULL, seen INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, tick INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS metadata (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, tick INTEGER NOT NULL DEFAULT 0, prior_version INTEGER NOT NULL DEFAULT 0);
             INSERT OR IGNORE INTO metadata(id,revision) VALUES(1,0);
             CREATE TABLE IF NOT EXISTS sync_identity (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sync_english (origin TEXT NOT NULL,text TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(origin,text));
@@ -64,7 +65,32 @@ impl Store {
                 UPDATE metadata SET tick=(SELECT COALESCE(SUM(usage_count),0) FROM entries);",
             )?;
         }
-        db.execute_batch("PRAGMA user_version=2; COMMIT;")?;
+        if matches!(schema, 1 | 2) {
+            db.execute_batch(
+                "ALTER TABLE metadata ADD COLUMN prior_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        let prior_version: u32 =
+            db.query_row("SELECT prior_version FROM metadata WHERE id=1", [], |row| {
+                row.get(0)
+            })?;
+        if prior_version > PRIOR_MODEL_VERSION {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if prior_version < PRIOR_MODEL_VERSION {
+            // Invalidate derived scores atomically, preserving all usage, receipts,
+            // and synchronization origins. A cold dictionary resolves them later on
+            // the broker worker; neither new nor legacy snapshots expose old boosts.
+            let invalidated = db.execute(
+                "UPDATE entries SET prior_logp=NULL,logp=?1 WHERE usage_count>0",
+                [f32::MIN_POSITIVE.ln()],
+            )?;
+            db.execute(
+                "UPDATE metadata SET prior_version=?1,revision=revision+?2 WHERE id=1",
+                params![PRIOR_MODEL_VERSION, i64::from(invalidated > 0)],
+            )?;
+        }
+        db.execute_batch("PRAGMA user_version=3; COMMIT;")?;
         // Seed existing evidence exactly once; subsequent selections are owned
         // by a stable local origin, separate from imported cumulative counts.
         db.execute_batch("BEGIN IMMEDIATE;

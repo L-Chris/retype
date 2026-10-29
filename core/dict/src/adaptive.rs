@@ -2,6 +2,9 @@
 //! Parameters are shared across words and schemes; candidate position is not evidence.
 use retype_types::SyllableId;
 
+/// Persisted priors from earlier models must be resolved again without changing usage.
+pub const PRIOR_MODEL_VERSION: u32 = 2;
+
 /// Equivalent prior sample size. Sparse feedback stays close to the base dictionary.
 pub const PRIOR_STRENGTH: f64 = 32.0;
 /// Half-life in subsequent learned selections, not elapsed wall-clock time.

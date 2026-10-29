@@ -370,7 +370,7 @@ fn migration_preserves_v1_counts_and_receipts_but_does_not_reuse_saturated_score
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 

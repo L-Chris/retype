@@ -248,8 +248,8 @@ impl Learner {
         self.user.observe(key, text, self.prior_for_word(key, text));
     }
 
-    /// Exact dictionary scores first; otherwise reproduce the existing segmented path.
-    /// Subtract one word bonus so registering a compound adds no new segmentation bonus.
+    /// Exact dictionary scores first; otherwise back off to constituent probabilities.
+    /// Sentence segmentation bonuses are not evidence of a new word's frequency.
     fn prior_for_word(&self, key: &[SyllableId], text: &str) -> Option<f32> {
         let system = self.system.as_ref()?;
         let mut entries = Vec::new();
@@ -267,7 +267,6 @@ impl Learner {
         if chars.len() != key.len() || key.is_empty() {
             return None;
         }
-        let bonus = retype_pinyin::DecodeOptions::default().word_bonus;
         let mut best = vec![f32::NEG_INFINITY; key.len() + 1];
         best[0] = 0.0;
         for start in 0..key.len() {
@@ -282,13 +281,11 @@ impl Learner {
                     .iter()
                     .filter(|entry| entry.text.as_ref() == expected.as_str())
                 {
-                    best[end] = best[end].max(best[start] + entry.logp + bonus);
+                    best[end] = best[end].max(best[start] + entry.logp);
                 }
             }
         }
-        best[key.len()]
-            .is_finite()
-            .then_some(best[key.len()] - bonus)
+        best[key.len()].is_finite().then_some(best[key.len()])
     }
 
     /// A base dictionary may arrive asynchronously after restoring a persisted snapshot.
