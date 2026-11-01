@@ -107,17 +107,11 @@ pub(crate) fn schedule(state: &Arc<TipState>) {
     let window = lock(&state.entry_bridge)
         .as_ref()
         .map(|bridge| bridge.window);
-    if let (Some(window), Some(session)) = (window, state.session()) {
-        let chinese = session.backend.with_kernel(|k| k.is_chinese());
+    if let Some(window) = window {
         // SAFETY: A message-only window owned by this TSF apartment. Destroying
         // it during deactivation discards queued requests for the old service.
         unsafe {
-            let _ = PostMessageW(
-                Some(window),
-                SWITCH,
-                WPARAM(usize::from(chinese)),
-                LPARAM(0),
-            );
+            let _ = PostMessageW(Some(window), SWITCH, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -134,7 +128,15 @@ unsafe extern "system" fn window_proc(
         if message == SWITCH && !pointer.is_null() {
             let state = (*pointer).upgrade();
             if let Some(state) = state.filter(|state| state.is_activated()) {
-                if let Err(error) = select(wp.0 != 0) {
+                // Read the latest completed mode so rapid toggles coalesce before
+                // native activation can deactivate this service and its window.
+                let chinese = state
+                    .session()
+                    .map(|session| session.backend.with_kernel(|k| k.is_chinese()));
+                let Some(chinese) = chinese else {
+                    return LRESULT(0);
+                };
+                if let Err(error) = select(chinese) {
                     tracing::warn!("retype input entry switch failed: {error}");
                     if let Some(chinese) = active_chinese() {
                         let _ = apply(&state, chinese);
@@ -197,7 +199,7 @@ impl EntryBridge {
             ) {
                 Ok(window) => {
                     let pointer = Box::into_raw(Box::new(Arc::downgrade(state)));
-                    SetWindowLongPtrW(window, GWLP_USERDATA, pointer as isize);
+                    SetWindowLongPtrW(window, GWLP_USERDATA, pointer as isize as _);
                     Ok(Self {
                         source,
                         cookie,

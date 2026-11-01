@@ -1224,6 +1224,21 @@ fn run_host() -> Result<()> {
         let outcome = check_symbol_completion(&state, &context, &data);
         crate::symbol_cursor::emulate_chromium(false);
         outcome?;
+        // Native profile notifications must use a host edit transaction when
+        // switching away from an unfinished English word.
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: true,
+            spelling: true,
+        });
+        crate::profiles::apply(&state, false)?;
+        for ch in "hel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        assert!(lock(&state.composition).is_some());
+        crate::profiles::apply(&state, true)?;
+        assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        assert!(lock(&state.composition).is_none());
+        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("hel"));
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;
