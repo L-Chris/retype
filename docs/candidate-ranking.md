@@ -128,3 +128,58 @@ operations, not all-key latency percentiles. Full capture uses
 An application reusing an old process will not pick up the new environment value.
 See [input latency investigation](input-latency.md) for stage definitions and the
 limitations of paint timing versus final screen presentation.
+
+## Scoped Shuangpin lookup reuse on Windows
+
+The follow-up shares dictionary prefix checks and raw lookup results between
+the strict, unfinished-tail and shorter-prefix graphs in one Shuangpin decode.
+The cache ends with that decode: no candidates, personalized scores or results
+survive into the next key event. It retains at most 256 keys of at most 32
+syllables and 4,096 dictionary entries; queries exceeding either budget use the
+ordinary scratch buffer without truncating matches. A reachable prefix with no
+terminal remains distinct from an absent prefix. Complete codes and one-key
+previews do not allocate this query cache.
+
+Unfinished-tail syllables are also indexed by their first key once, including
+the `ju/qu/xu/yu` aliases. Each list is sorted and deduplicated; preview option
+ordering stays identical to the former full-table scan. Candidate ranking,
+personalization, consumed key offsets and pagination rules are unchanged.
+
+Tests compare every output field with uncached decoding across typing/backspace
+prefixes, separators, zero initials, narrow beams and personalized scores. They
+also compare indexed options against the former scan, check the cache's bounds
+and fallback, and verify that the next decode observes changed dictionary scores.
+
+Windows measurements on 2026-11-01 used an i7-6800K, the same 1,622,791-entry
+dictionary, release builds and 100 warm typing/backspace cycles at each of
+100/150/200% scale. The baseline was PR #13's `4620ff9`. Both binaries ran
+consecutively after compilation stopped, followed by a reverse-order pair.
+The existing `typing-latency` example reports kernel handling separately from
+width measurement, copying/pagination and bitmap rendering.
+
+At 200% scale, kernel median times in milliseconds were:
+
+| Input | Before | After | Reverse-order before | Reverse-order after |
+| --- | ---: | ---: | ---: | ---: |
+| `hduiyzdmm` | 1.540 | 1.366 | 1.506 | 1.266 |
+| `wdsssssssssss` | 1.077 | 0.896 | 1.092 | 0.932 |
+| `woui` (complete-code control) | 0.159 | 0.158 | 0.162 | 0.183 |
+
+These pairs reduce target-input kernel medians by about 11–16% and the longer
+input by about 15–17%. All 156 per-step candidate-count/visible-page records
+across the three inputs (`hduiyzdmm`, `wdsssssssssss`, `woui`) and three scales
+match the baseline. Full candidate fields are compared in the unit tests;
+the CPU benchmark's count/page check alone does not prove text equivalence.
+The complete-code control shows no consistent improvement; the second pair
+increases by 0.021 ms. That case does not enable lookup memoization.
+An additional before/after/after/before control run with 200 cycles measured
+0.160/0.182/0.152/0.156 ms respectively, again showing variability rather than
+a consistent complete-code gain. Raw local measurements are retained in
+`target/matching-*.log`.
+
+This change does not optimize bitmap rendering or first-use width measurement.
+Rendering timings vary even though the rendering code is identical, so changes
+in whole-frame timings are not attributed to lookup reuse. Real TSF host queue
+waits, composition writes and final display latency remain outside this benchmark.
+The three scoped crates (`retype-pinyin`, `retype-dict`, `retype-engine`) pass
+179 tests and strict all-target Clippy checks.

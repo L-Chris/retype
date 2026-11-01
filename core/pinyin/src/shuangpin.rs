@@ -2,7 +2,7 @@
 //! so prefix selection/backspace never confuse expanded pinyin with typed keys.
 //! Layout reference: https://flypy.com/ (小鹤双拼); also checked against Rime's Flypy schema.
 use crate::{
-    decode::{build_lattice_with, decode_lattice},
+    decode::{build_lattice_with_queries, decode_lattice, LatticeQueries},
     syllables, DecodeOptions, DecodeOutput, Lexicon,
 };
 use retype_types::{Candidate, CandidateSource, SyllableId};
@@ -85,6 +85,21 @@ fn table() -> &'static HashMap<[u8; 2], Vec<SyllableId>> {
     })
 }
 
+fn initial_options() -> &'static [Vec<SyllableId>; 26] {
+    static INITIALS: OnceLock<[Vec<SyllableId>; 26]> = OnceLock::new();
+    INITIALS.get_or_init(|| {
+        let mut initials: [Vec<SyllableId>; 26] = std::array::from_fn(|_| Vec::new());
+        for (code, ids) in table() {
+            initials[(code[0] - b'a') as usize].extend(ids);
+        }
+        for ids in &mut initials {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        initials
+    })
+}
+
 fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
     out.clear();
     let start = pos;
@@ -111,15 +126,35 @@ fn options(input: &[u8], mut pos: usize, out: &mut Vec<(usize, SyllableId)>) {
 
 pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOutput {
     let normalized = crate::normalize(input);
-    let lattice = build_lattice_with(&normalized, lex, opts, options);
-    let has_exact_word = lattice.has_whole_word(&normalized);
-    let mut output = decode_lattice(&normalized, lattice, opts, lex);
+    // Complete codes need one graph only; keep their queries allocation-free.
+    let preview = can_preview_tail(normalized.as_bytes());
+    decode_with_queries(
+        &normalized,
+        lex,
+        opts,
+        preview,
+        preview && normalized.len() > 1,
+    )
+}
+
+fn decode_with_queries(
+    normalized: &str,
+    lex: &dyn Lexicon,
+    opts: &DecodeOptions,
+    preview: bool,
+    memoize: bool,
+) -> DecodeOutput {
+    let mut queries = LatticeQueries::new(lex, memoize);
+    let lattice = build_lattice_with_queries(normalized, &mut queries, opts, options);
+    let has_exact_word = lattice.has_whole_word(normalized);
+    let mut output = decode_lattice(normalized, lattice, opts, lex);
     output.has_whole_word = has_exact_word;
-    if can_preview_tail(normalized.as_bytes()) {
-        let mut preview = build_lattice_with(&normalized, lex, opts, preview_options);
+    if preview {
+        let mut preview =
+            build_lattice_with_queries(normalized, &mut queries, opts, preview_options);
         preview.complete_tail = true;
-        let has_preview_word = preview.has_whole_word(&normalized);
-        let preview = decode_lattice(&normalized, preview, opts, lex);
+        let has_preview_word = preview.has_whole_word(normalized);
+        let preview = decode_lattice(normalized, preview, opts, lex);
         let completions = preview.word_completions;
         let mut candidates: Vec<_> = preview
             .candidates
@@ -130,7 +165,7 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
             // A single-key vowel may complete a phrase directly, hiding the
             // preceding word from its best path. Keep that prefix selectable.
             let prefix = &normalized[..normalized.len() - 1];
-            let lattice = build_lattice_with(prefix, lex, opts, options);
+            let lattice = build_lattice_with_queries(prefix, &mut queries, opts, options);
             candidates.extend(
                 decode_lattice(prefix, lattice, opts, lex)
                     .candidates
@@ -225,18 +260,14 @@ fn preview_options(input: &[u8], pos: usize, out: &mut Vec<(usize, SyllableId)>)
     if end + 1 != input.len() {
         return;
     }
-    for (code, ids) in table() {
-        if input.get(end) == Some(&code[0]) {
-            for &id in ids {
-                let option = (input.len() - pos, id);
-                if !out.contains(&option) {
-                    out.push(option);
-                }
-            }
+    if let Some(key) = input.get(end).filter(|key| key.is_ascii_lowercase()) {
+        for &id in &initial_options()[(key - b'a') as usize] {
+            out.push((input.len() - pos, id));
         }
     }
-    // HashMap iteration order must not affect bounded k-best search ties.
+    // Keep the strict zero-initial alias and previews in the original order.
     out.sort_unstable();
+    out.dedup();
 }
 
 /// Walk complete syllable boundaries to see whether the last key can be a new
@@ -268,7 +299,165 @@ fn can_preview_tail(input: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn indexed_previews_match_table_scan_including_aliases_and_separators() {
+        for key in b'a'..=b'z' {
+            for prefix in ["", "'", "''", "hd'"] {
+                let input = format!("{prefix}{}", key as char);
+                for pos in 0..input.len() {
+                    let bytes = input.as_bytes();
+                    let mut expected = Vec::new();
+                    options(bytes, pos, &mut expected);
+                    let mut end = pos;
+                    while bytes.get(end) == Some(&b'\'') {
+                        end += 1;
+                    }
+                    if end + 1 == bytes.len() {
+                        for (code, ids) in table() {
+                            if bytes.get(end) == Some(&code[0]) {
+                                for &id in ids {
+                                    let option = (bytes.len() - pos, id);
+                                    if !expected.contains(&option) {
+                                        expected.push(option);
+                                    }
+                                }
+                            }
+                        }
+                        expected.sort_unstable();
+                    }
+                    let mut actual = Vec::new();
+                    preview_options(bytes, pos, &mut actual);
+                    assert_eq!(actual, expected, "{input:?} at {pos}");
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountedLex {
+        words: HashMap<Vec<SyllableId>, Vec<crate::LexEntry>>,
+        reads: std::sync::Mutex<(usize, usize)>,
+    }
+
+    impl Lexicon for CountedLex {
+        fn has_prefix(&self, ids: &[SyllableId]) -> bool {
+            self.reads.lock().unwrap().0 += 1;
+            self.words.keys().any(|key| key.starts_with(ids))
+        }
+        fn lookup(&self, ids: &[SyllableId], out: &mut Vec<crate::LexEntry>) {
+            self.reads.lock().unwrap().1 += 1;
+            if let Some(hits) = self.words.get(ids) {
+                out.extend(hits.iter().cloned());
+            }
+        }
+        fn len(&self) -> usize {
+            self.words.len()
+        }
+        fn personalize_candidates(&self, candidates: &mut [Candidate]) -> bool {
+            // Personalization must still run separately for each graph.
+            for candidate in candidates {
+                if candidate.text == "慢" {
+                    candidate.score += 0.5;
+                }
+            }
+            true
+        }
+    }
+
+    fn same_output(actual: &DecodeOutput, expected: &DecodeOutput) {
+        assert_eq!(actual.candidates, expected.candidates);
+        assert_eq!(actual.syllables, expected.syllables);
+        assert_eq!(actual.has_whole_word, expected.has_whole_word);
+        assert_eq!(actual.matched_syllables, expected.matched_syllables);
+        assert_eq!(actual.has_raw, expected.has_raw);
+        assert_eq!(actual.word_completions, expected.word_completions);
+    }
+
+    #[test]
+    fn shared_queries_preserve_complete_outputs_and_observe_dictionary_changes() {
+        let mut lex = CountedLex::default();
+        for (text, pinyin) in [
+            ("还是", "hai shi"),
+            ("还是有点", "hai shi you dian"),
+            ("有点慢", "you dian man"),
+            ("有点忙", "you dian mang"),
+            ("吗", "ma"),
+            ("慢", "man"),
+            ("我", "wo"),
+            ("渥恩", "wo en"),
+            ("饿肚子", "e du zi"),
+            ("额度", "e du"),
+        ] {
+            let ids = pinyin
+                .split_whitespace()
+                .map(|s| syllables::id_of(s).unwrap())
+                .collect();
+            lex.words
+                .entry(ids)
+                .or_default()
+                .push(crate::LexEntry::new(text, -5.0));
+        }
+        for k in [1, 24] {
+            for include_prefixes in [false, true] {
+                let opts = DecodeOptions {
+                    k,
+                    include_prefixes,
+                    ..Default::default()
+                };
+                for input in [
+                    "hduiyzdmm",
+                    "hd'ui'yz'dm'm",
+                    "wdsssssssssss",
+                    "woui",
+                    "woe",
+                    "eduz",
+                    "'woui'",
+                    "jvqvxv",
+                    "zzz",
+                    "",
+                ] {
+                    // Every prefix is also visited by repeated backspace.
+                    for end in 0..=input.len() {
+                        let prefix = &input[..end];
+                        let expected = decode_with_queries(
+                            prefix,
+                            &lex,
+                            &opts,
+                            can_preview_tail(prefix.as_bytes()),
+                            false,
+                        );
+                        same_output(&decode(prefix, &lex, &opts), &expected);
+                    }
+                }
+            }
+        }
+        let opts = DecodeOptions::default();
+        *lex.reads.lock().unwrap() = (0, 0);
+        let before = decode_with_queries("hduiyzdmm", &lex, &opts, true, false);
+        let uncached = *lex.reads.lock().unwrap();
+        *lex.reads.lock().unwrap() = (0, 0);
+        same_output(&decode("hduiyzdmm", &lex, &opts), &before);
+        let cached = *lex.reads.lock().unwrap();
+        assert!(
+            cached.0 < uncached.0 && cached.1 < uncached.1,
+            "{cached:?} versus {uncached:?}"
+        );
+
+        lex.words
+            .get_mut(&vec![syllables::id_of("man").unwrap()])
+            .unwrap()[0]
+            .logp = -0.1;
+        let changed = decode("hduiyzdmm", &lex, &opts);
+        same_output(
+            &changed,
+            &decode_with_queries("hduiyzdmm", &lex, &opts, true, false),
+        );
+        assert_ne!(changed.candidates, before.candidates);
+    }
+
     #[test]
     fn layout_and_zero_initials() {
         for (syllable, code) in [

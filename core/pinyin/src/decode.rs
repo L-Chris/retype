@@ -9,7 +9,7 @@
 use crate::lexicon::{LexEntry, Lexicon};
 use crate::syllables;
 use retype_types::{Candidate, CandidateSource, SyllableId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -157,10 +157,103 @@ pub(crate) fn build_lattice_with(
     opts: &DecodeOptions,
     options: impl Fn(&[u8], usize, &mut Vec<(usize, SyllableId)>),
 ) -> Lattice {
+    build_lattice_with_queries(input, &mut LatticeQueries::new(lex, false), opts, options)
+}
+
+/// Scoped to one decode: dictionary/learning changes are observed on the next
+/// key. Share raw lookup results, never personalized candidates or rankings.
+pub(crate) struct LatticeQueries<'a> {
+    lex: &'a dyn Lexicon,
+    cached: HashMap<Vec<SyllableId>, Option<Vec<LexEntry>>>,
+    entries: Vec<LexEntry>,
+    entry_count: usize,
+    memoize: bool,
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    struct Lex;
+    impl Lexicon for Lex {
+        fn has_prefix(&self, ids: &[SyllableId]) -> bool {
+            ids != [0]
+        }
+        fn lookup(&self, ids: &[SyllableId], out: &mut Vec<LexEntry>) {
+            if ids == [1] {
+                // A reachable prefix without a terminal is not a failed prefix.
+                return;
+            }
+            let count = if ids == [2] { 4097 } else { 1 };
+            out.extend((0..count).map(|_| LexEntry::new("字", -1.0)));
+        }
+        fn len(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn query_limits_fall_back_without_truncating_or_confusing_empty_prefixes() {
+        let mut queries = LatticeQueries::new(&Lex, true);
+        for _ in 0..2 {
+            assert!(queries.lookup(&[0]).is_none());
+            assert_eq!(queries.lookup(&[1]).map(<[_]>::len), Some(0));
+            assert_eq!(queries.lookup(&[2]).map(<[_]>::len), Some(4097));
+        }
+        for id in 3..400 {
+            assert_eq!(queries.lookup(&[id]).map(<[_]>::len), Some(1));
+        }
+        assert_eq!(queries.cached.len(), 256);
+        assert!(queries.entry_count <= 4096);
+        assert!(!queries.cached.contains_key([2].as_slice()));
+        assert_eq!(queries.lookup(&[399]).map(<[_]>::len), Some(1));
+    }
+}
+
+impl<'a> LatticeQueries<'a> {
+    pub(crate) fn new(lex: &'a dyn Lexicon, memoize: bool) -> Self {
+        Self {
+            lex,
+            cached: HashMap::new(),
+            entries: Vec::new(),
+            entry_count: 0,
+            memoize,
+        }
+    }
+
+    fn lookup(&mut self, ids: &[SyllableId]) -> Option<&[LexEntry]> {
+        if self.memoize && self.cached.contains_key(ids) {
+            return self.cached.get(ids).and_then(|hits| hits.as_deref());
+        }
+        self.entries.clear();
+        let exists = self.lex.has_prefix(ids);
+        if exists {
+            self.lex.lookup(ids, &mut self.entries);
+        }
+        // Bound retained entries as well as keys. Large homophone lists keep
+        // using the scratch buffer rather than duplicating them in the cache.
+        if self.memoize
+            && ids.len() <= 32
+            && self.cached.len() < 256
+            && self.entry_count + self.entries.len() <= 4096
+        {
+            self.entry_count += self.entries.len();
+            let hits = exists.then(|| std::mem::take(&mut self.entries));
+            return self.cached.entry(ids.to_vec()).or_insert(hits).as_deref();
+        }
+        exists.then_some(self.entries.as_slice())
+    }
+}
+
+pub(crate) fn build_lattice_with_queries(
+    input: &str,
+    queries: &mut LatticeQueries<'_>,
+    opts: &DecodeOptions,
+    options: impl Fn(&[u8], usize, &mut Vec<(usize, SyllableId)>),
+) -> Lattice {
     let bytes = input.as_bytes();
     let n = bytes.len();
     let mut edges: Vec<Vec<Edge>> = vec![Vec::new(); n + 1];
-    let mut entries: Vec<LexEntry> = Vec::new();
     let mut syl_opts: Vec<(usize, SyllableId)> = Vec::new();
     let mut stack: Vec<(usize, Vec<SyllableId>)> = Vec::new();
     let mut reachable = vec![false; n + 1];
@@ -198,11 +291,9 @@ pub(crate) fn build_lattice_with(
                 let npos = pos + len;
                 let mut next = syls.clone();
                 next.push(id);
-                if !lex.has_prefix(&next) {
+                let Some(entries) = queries.lookup(&next) else {
                     continue;
-                }
-                entries.clear();
-                lex.lookup(&next, &mut entries);
+                };
                 for e in entries.iter() {
                     edges[i].push(Edge {
                         to: npos,
