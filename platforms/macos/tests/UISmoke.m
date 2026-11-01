@@ -135,6 +135,22 @@ static void CheckInputEntries(RTAppDelegate *delegate) {
     delegate.runtime=NULL;rt_runtime_free(runtime);
     printf("Separate input entries use the real engine, preserve composition at switches and isolate client language.\n");
 }
+static void CheckCandidateWidthCache(void) {
+    NSMutableString *text=[@"缓存宽度验证 abc 😀" mutableCopy];
+    NSString *original=text.copy;
+    NSUInteger queries=RTTestCandidateWidthQueries;
+    NSArray *widths=[RTCandidatePanel widths:@[text,original]];
+    Check([widths[0] isEqual:widths[1]]&&RTTestCandidateWidthQueries==queries+1,@"Repeated text is measured once");
+    [text appendString:@"变长"];
+    NSArray *changed=[RTCandidatePanel widths:@[text,original]];
+    Check([changed[0] doubleValue]>[changed[1] doubleValue]&&[changed[1] isEqual:widths[0]],@"Cache owns immutable keys and preserves original metrics");
+    Check(RTTestCandidateWidthQueries==queries+2,@"Only the changed text needs measurement");
+    for(NSString *word in @[@"你好",@"hello",@"😀",text]){
+        CGFloat expected=MIN(10000,MAX(40,ceil([word sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:16]}].width)+34));
+        Check(fabs([[RTCandidatePanel widths:@[word]][0] doubleValue]-expected)<.01,@"Cached widths match native CJK/Latin/emoji metrics");
+    }
+    printf("Candidate width cache reuses metrics and handles mutable keys, CJK, Latin and emoji.\n");
+}
 static void CheckDeletion(void){
     RetypeInputController *controller=[RetypeInputController new];
     RTDeletionClient *client=[RTDeletionClient new];client.text=@"hello";client.selection=NSMakeRange(5,0);
@@ -197,6 +213,7 @@ int main(void){@autoreleasepool{
     CheckInputMenuSettings(settings);
     CheckAsyncSettings(settings);
     CheckInputEntries(delegate);
+    CheckCandidateWidthCache();
     CheckDeletion();
     CheckTranslationCapture();
     NSStackView *navigation=[settings valueForKey:@"navigation"];

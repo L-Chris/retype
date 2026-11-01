@@ -5,6 +5,12 @@
 NSDictionary *RTJSON(char *owned);
 NSDictionary *RTSend(RtSession *session, NSDictionary *command);
 NSString *RTDataRoot(void);
+#ifdef RT_UI_SMOKE
+extern double RTTestCommandSeconds;
+extern double RTTestCandidateDrawSeconds;
+extern double RTTestCandidateWidthSeconds;
+extern NSUInteger RTTestCandidateWidthQueries;
+#endif
 NSDictionary *RTFeature(NSDictionary *command);
 NSString *RTSecret(NSString *account);
 BOOL RTSaveSecret(NSString *account, NSString *value);

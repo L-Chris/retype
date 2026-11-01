@@ -54,7 +54,10 @@ $summary = @(foreach ($group in @($records | Group-Object Version, Pid, Work, Dp
             MaximumMs = [math]::Round($stats.Maximum / 1000, 3) }
     }
 })
-if ($AsJson) { ConvertTo-Json -InputObject $summary -Depth 3; return }
+if ($AsJson) {
+    if (-not $summary.Count) { Write-Output '[]' } else { ConvertTo-Json -InputObject $summary -Depth 3 }
+    return
+}
 Write-Host 'Existing sampled timings only; default logs normally contain operations >= 16 ms.'
 Write-Host 'These are not all-key latency percentiles, and paint timings exclude compositor display.'
 if (-not $summary.Count) {

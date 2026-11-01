@@ -82,6 +82,38 @@ also changes, so that is not a rendering-only comparison. Sixty samples give
 only an estimated tail, and these numbers cannot explain or establish a fix
 for the reported Windows application-visible delay.
 
+## Native macOS measurement
+
+`bash platforms/macos/test-input-latency.sh` builds an isolated Cocoa harness
+using the current `RetypeInputController`, a real `NSTextView`, the native
+candidate panel and the full dictionary. It uses `RETYPE_TEST_ROOT` and does
+not install, enable or select an input source or access personal learning.
+The main thread requests interactive QoS and prevents App Nap during the test.
+It records the initial pass separately, then measures 40 typing/backspace
+cycles for `hduiyzdmm`, `wdsssssssssss` and `woui`. JSON stage timings and actual
+editor/candidate PNGs are written under `target/macos-input-latency/current`.
+`RETYPE_LATENCY_OUTPUT` and `RETYPE_LATENCY_ROUNDS` override those defaults.
+
+The input controller and panel both request widths for every candidate. Native
+CJK text measurement dominated the measured macOS handler time. The panel now
+caches scalar widths at its fixed 16-point font, with NSCache count/cost limits;
+it retains no glyph or bitmap layouts. Keys are immutable copies, and smoke
+checks cover repeated/mutated strings and native CJK/Latin/emoji metrics.
+
+In consecutive before/after runs after builds stopped, the target input's
+width-computation P99 fell from 9.068 ms to 0.244 ms (720 warm keystrokes per
+build). A reverse-order repeat measured 9.001 ms versus 0.245 ms. Candidate
+PNGs were byte-identical, with `还是有点慢` first. Whole-frame submission did
+**not** show a stable improvement: the first pair measured P99 10.970 ms before
+and 11.887 ms after, with substantially different costs in unrelated command
+and drawing stages. This establishes reduced width work, not an overall
+latency improvement or a comparison with WeChat.
+
+The harness calls the input controller directly and submits AppKit drawing; it
+does not include hardware event delivery, system InputMethodKit cross-process
+calls, other applications' edit behavior or compositor/display latency. Native
+macOS results cannot establish Windows application-visible latency.
+
 For Windows, run the read-only diagnostic after reproducing:
 
 ```powershell
