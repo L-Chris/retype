@@ -257,6 +257,39 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    fn entry_window_discards_queued_switches_when_service_is_removed() -> Result<()> {
+        // SAFETY: Private STA and message-only window. Remove the window before
+        // dispatching its queued request, so the test never selects a keyboard.
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let result = (|| -> Result<()> {
+                let manager: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let tid = manager.Activate()?;
+                let state = TipState::new();
+                state.tid.store(tid, Ordering::SeqCst);
+                state.activated.store(true, Ordering::SeqCst);
+                let bridge = EntryBridge::attach(&state, &manager)?;
+                let window = bridge.window;
+                assert!(IsWindow(Some(window)).as_bool());
+                *lock(&state.entry_bridge) = Some(bridge);
+                schedule(&state);
+                let bridge = lock(&state.entry_bridge).take();
+                drop(bridge);
+                assert!(!IsWindow(Some(window)).as_bool());
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&message);
+                }
+                manager.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            result
+        }
+    }
+
+    #[test]
     fn profile_notifications_select_prediction_language_and_ignore_other_services() -> Result<()> {
         let state = TipState::new();
         state.activated.store(true, Ordering::SeqCst);
