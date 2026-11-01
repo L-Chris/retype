@@ -1231,6 +1231,13 @@ fn run_host() -> Result<()> {
             spelling: true,
         });
         crate::profiles::apply(&state, false)?;
+        let original = {
+            let mut host = lock(&data);
+            host.start = host.text.len() as i32;
+            host.end = host.start;
+            host.chromium = false;
+            String::from_utf16_lossy(&host.text)
+        };
         for ch in "hel".chars() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
         }
@@ -1238,7 +1245,10 @@ fn run_host() -> Result<()> {
         crate::profiles::apply(&state, true)?;
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
         assert!(lock(&state.composition).is_none());
-        assert!(String::from_utf16_lossy(&lock(&data).text).ends_with("hel"));
+        assert_eq!(
+            String::from_utf16_lossy(&lock(&data).text),
+            format!("{original}hel")
+        );
         state.deactivate()?;
         document.Pop(TF_POPF_ALL)?;
         manager.Deactivate()?;
