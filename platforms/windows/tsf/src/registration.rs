@@ -220,55 +220,61 @@ mod tests {
                 }
             }
             let _language = InputLanguage(profiles.clone(), profiles.GetCurrentLanguage()?);
-            // CI starts with an English input language. Enabling a Chinese
-            // profile alone does not switch the host's input language to it.
-            profiles
-                .ChangeCurrentLanguage(LANGID_ZH_CN)
-                .inspect_err(|error| eprintln!("switching CI host to Chinese failed: {error}"))?;
-            assert_eq!(profiles.GetCurrentLanguage()?, LANGID_ZH_CN);
-            manager
-                .ActivateProfile(
+            for (language, profile, _) in INPUT_PROFILES {
+                assert!(profiles
+                    .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, *language, profile)?
+                    .as_bool());
+                profiles
+                    .ChangeCurrentLanguage(*language)
+                    .inspect_err(|error| {
+                        eprintln!("switching test host language failed: {error}")
+                    })?;
+                assert_eq!(profiles.GetCurrentLanguage()?, *language);
+                manager
+                    .ActivateProfile(
+                        TF_PROFILETYPE_INPUTPROCESSOR,
+                        *language,
+                        &CLSID_RETYPE_TIP,
+                        profile,
+                        HKL::default(),
+                        TF_IPPMF_FORPROCESS,
+                    )
+                    .inspect_err(|error| eprintln!("activating installed TIP failed: {error}"))?;
+                let mut active = TF_INPUTPROCESSORPROFILE::default();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let result = loop {
+                    if let Err(error) =
+                        manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
+                    {
+                        break Err(error);
+                    }
+                    if (active.clsid == CLSID_RETYPE_TIP && active.guidProfile == *profile)
+                        || std::time::Instant::now() >= deadline
+                    {
+                        break Ok(());
+                    }
+                    // Deliver TSF notifications on this STA instead of assuming that
+                    // an asynchronous profile change is already visible.
+                    let mut message = MSG::default();
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                };
+                let cleanup = manager.DeactivateProfile(
                     TF_PROFILETYPE_INPUTPROCESSOR,
-                    LANGID_ZH_CN,
+                    *language,
                     &CLSID_RETYPE_TIP,
-                    &GUID_PROFILE_RETYPE,
+                    profile,
                     HKL::default(),
                     TF_IPPMF_FORPROCESS,
-                )
-                .inspect_err(|error| eprintln!("activating installed TIP failed: {error}"))?;
-            let mut active = TF_INPUTPROCESSORPROFILE::default();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            let result = loop {
-                if let Err(error) = manager.GetActiveProfile(&GUID_TFCAT_TIP_KEYBOARD, &mut active)
-                {
-                    break Err(error);
-                }
-                if (active.clsid == CLSID_RETYPE_TIP && active.guidProfile == GUID_PROFILE_RETYPE)
-                    || std::time::Instant::now() >= deadline
-                {
-                    break Ok(());
-                }
-                // Deliver TSF notifications on this STA instead of assuming that
-                // an asynchronous profile change is already visible.
-                let mut message = MSG::default();
-                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
-                    let _ = TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            };
-            let cleanup = manager.DeactivateProfile(
-                TF_PROFILETYPE_INPUTPROCESSOR,
-                LANGID_ZH_CN,
-                &CLSID_RETYPE_TIP,
-                &GUID_PROFILE_RETYPE,
-                HKL::default(),
-                TF_IPPMF_FORPROCESS,
-            );
-            result?;
-            cleanup?;
-            assert_eq!(active.clsid, CLSID_RETYPE_TIP);
-            assert_eq!(active.guidProfile, GUID_PROFILE_RETYPE);
+                );
+                result?;
+                cleanup?;
+                assert_eq!(active.clsid, CLSID_RETYPE_TIP);
+                assert_eq!(active.guidProfile, *profile);
+            }
         }
         Ok(())
     }

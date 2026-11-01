@@ -135,7 +135,8 @@ int main(int argc, const char *argv[]) {
         if (argc > 1 && strcmp(argv[1], "--register") == 0) {
             OSStatus status = TISRegisterInputSource((__bridge CFURLRef)NSBundle.mainBundle.bundleURL);
             if (status != noErr) return 1;
-            for (NSString *identifier in @[RTChineseInputSource, RTEnglishInputSource]) {
+            // TIS requires the parent enabled before any of its input modes.
+            for (NSString *identifier in @[NSBundle.mainBundle.bundleIdentifier, RTChineseInputSource, RTEnglishInputSource]) {
                 NSDictionary *filter = @{(__bridge NSString *)kTISPropertyInputSourceID:identifier};
                 CFArrayRef sources = TISCreateInputSourceList((__bridge CFDictionaryRef)filter, true);
                 if (!sources || !CFArrayGetCount(sources)) { if (sources) CFRelease(sources); return 1; }
