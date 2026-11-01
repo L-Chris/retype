@@ -37,7 +37,8 @@ if ($Uninstall) {
 }
 if (-not $Uninstall) {
   foreach ($entry in $entries) {
-    $profile = ('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\0x{0:x8}\{{{1}}}' -f $entry.Language, $entry.Profile)
+    $languageKey = '0x{0:x8}' -f $entry.Language
+    $profile = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\$languageKey\{$($entry.Profile)}"
     if (-not (Test-Path -LiteralPath $profile)) { throw "Install $($entry.Name) before adding its keyboard." }
   }
 }
