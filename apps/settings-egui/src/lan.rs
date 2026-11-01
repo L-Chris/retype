@@ -27,6 +27,25 @@ fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
+fn visible_addresses(addresses: &[String]) -> Vec<String> {
+    addresses
+        .iter()
+        .filter(|address| !address.contains('[') && address.matches(':').count() <= 1)
+        .cloned()
+        .collect()
+}
+
+fn network_label(ui: &mut egui::Ui, label: &str) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(80.0, 36.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(80.0);
+            ui.label(label);
+        },
+    );
+}
+
 pub struct LanPage {
     config: Config,
     status: Status,
@@ -292,12 +311,16 @@ impl LanPage {
                                 .status
                                 .connections
                                 .get(&peer.id)
+                                .filter(|address| {
+                                    !address.contains('[') && address.matches(':').count() <= 1
+                                })
                                 .cloned()
                                 .unwrap_or_else(|| {
-                                    if peer.addresses.is_empty() {
+                                    let addresses = visible_addresses(&peer.addresses);
+                                    if addresses.is_empty() {
                                         "自动发现".into()
                                     } else {
-                                        peer.addresses.join(", ")
+                                        addresses.join(", ")
                                     }
                                 });
                             let is_editing = self
@@ -368,7 +391,7 @@ impl LanPage {
                                             } else {
                                                 self.editing_peer = Some((
                                                     peer.id.clone(),
-                                                    peer.addresses.join(", "),
+                                                    visible_addresses(&peer.addresses).join(", "),
                                                 ));
                                             }
                                         }
@@ -419,7 +442,7 @@ impl LanPage {
             card(ui, |ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     ui.horizontal(|ui| {
-                        crate::ai::form_label(ui, "监听端口", 80.0);
+                        network_label(ui, "监听端口");
                         if self.editing_port {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.listen_port)
@@ -466,16 +489,12 @@ impl LanPage {
                         }
                     });
 
-                    if !self.status.addresses.is_empty() {
+                    let addresses = visible_addresses(&self.status.addresses);
+                    if !addresses.is_empty() {
                         ui.separator();
-                        for (idx, address) in self.status.addresses.clone().into_iter().enumerate()
-                        {
+                        for (idx, address) in addresses.into_iter().enumerate() {
                             ui.horizontal(|ui| {
-                                crate::ai::form_label(
-                                    ui,
-                                    if idx == 0 { "本机地址" } else { "" },
-                                    80.0,
-                                );
+                                network_label(ui, if idx == 0 { "本机地址" } else { "" });
                                 ui.label(
                                     RichText::new(&address).monospace().size(13.0).color(MUTED),
                                 );
@@ -512,61 +531,115 @@ impl LanPage {
 mod tests {
     use super::*;
     #[test]
-    fn lan_cards_fit_normal_and_minimum_widths() {
+    fn lan_cards_fit_normal_and_minimum_widths() -> Result<(), String> {
         for width in [420.0, 620.0] {
-            let mut page = LanPage {
-                config: Config {
-                    enabled: true,
-                    port: 50206,
-                    peers: vec![retype_sync::lan::Peer {
-                        id: "peer-1".into(),
-                        name: "MacBook Pro".into(),
-                        addresses: vec!["100.64.0.1:50206".into()],
-                    }],
-                    ..Default::default()
-                },
-                status: Status {
-                    mode: "show".into(),
-                    code: "482910".into(),
-                    expires: retype_sync::runtime::now() * 1000 + 120_000,
-                    online: vec!["peer-1".into()],
-                    addresses: vec!["192.168.1.20:50206".into()],
-                    ..Default::default()
-                },
-                last_poll: Instant::now(),
-                error: None,
-                join_code: "123456".into(),
-                join_address: String::new(),
-                editing_peer: Some(("peer-1".into(), "100.64.0.1:50206".into())),
-                editing_port: true,
-                listen_port: "50206".into(),
-                show_join: true,
-                job: None,
-            };
-            let ctx = egui::Context::default();
-            assert!(crate::app::chinese_fonts(&ctx).is_ok());
-            let mut right = 0.0;
-            for _ in 0..3 {
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(width, 900.0),
-                        )),
+            for editing_port in [false, true] {
+                let mut page = LanPage {
+                    config: Config {
+                        enabled: true,
+                        port: 50206,
+                        peers: vec![retype_sync::lan::Peer {
+                            id: "peer-1".into(),
+                            name: "MacBook Pro".into(),
+                            addresses: vec![
+                                "[fd7a:115c:a1e0::1]:50206".into(),
+                                "100.64.0.1:50206".into(),
+                            ],
+                        }],
                         ..Default::default()
                     },
-                    |ui| {
-                        page.ui(ui);
-                        right = ui.min_rect().right();
+                    status: Status {
+                        mode: "show".into(),
+                        code: "482910".into(),
+                        expires: retype_sync::runtime::now() * 1000 + 120_000,
+                        online: vec!["peer-1".into()],
+                        addresses: vec![
+                            "[fd7a:115c:a1e0::1]:50206".into(),
+                            "192.168.1.20:50206".into(),
+                            "100.64.0.2:50206".into(),
+                        ],
+                        ..Default::default()
                     },
+                    last_poll: Instant::now(),
+                    error: None,
+                    join_code: "123456".into(),
+                    join_address: String::new(),
+                    editing_peer: Some(("peer-1".into(), "100.64.0.1:50206".into())),
+                    editing_port,
+                    listen_port: "50206".into(),
+                    show_join: true,
+                    job: None,
+                };
+                let ctx = egui::Context::default();
+                assert!(crate::app::chinese_fonts(&ctx).is_ok());
+                let mut right = 0.0;
+                let mut texts = Vec::new();
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 900.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            page.ui(ui);
+                            right = ui.min_rect().right();
+                        },
+                    );
+                    output.textures_delta.clear();
+                    fn collect(shape: &egui::epaint::Shape, texts: &mut Vec<(String, f32)>) {
+                        match shape {
+                            egui::epaint::Shape::Vec(shapes) => {
+                                for shape in shapes {
+                                    collect(shape, texts);
+                                }
+                            }
+                            egui::epaint::Shape::Text(text) => {
+                                texts.push((text.galley.text().to_owned(), text.pos.x))
+                            }
+                            _ => {}
+                        }
+                    }
+                    texts.clear();
+                    for shape in output.shapes {
+                        collect(&shape.shape, &mut texts);
+                    }
+                }
+                assert!(
+                    !texts.iter().any(|(text, _)| text.contains("fd7a:")),
+                    "IPv6 must not appear in address labels"
                 );
-                output.textures_delta.clear();
+                let first = texts
+                    .iter()
+                    .find(|(text, _)| text == "192.168.1.20:50206")
+                    .ok_or("first local address is missing")?;
+                let second = texts
+                    .iter()
+                    .find(|(text, _)| text == "100.64.0.2:50206")
+                    .ok_or("second local address is missing")?;
+                assert!(
+                    (first.1 - second.1).abs() < 1.0,
+                    "Every address must share the same column, including rows without a label"
+                );
+                assert!(
+                    right <= width + 1.0,
+                    "lan page extends to {right} at width {width}"
+                );
+                if !editing_port {
+                    let port = texts
+                        .iter()
+                        .find(|(text, _)| text == "50206")
+                        .ok_or("listen port is missing")?;
+                    assert!(
+                        (port.1 - first.1).abs() < 1.0,
+                        "The port and addresses must share their value column"
+                    );
+                }
+                assert!(page.job.is_none());
             }
-            assert!(
-                right <= width + 1.0,
-                "lan page extends to {right} at width {width}"
-            );
-            assert!(page.job.is_none());
         }
+        Ok(())
     }
 }

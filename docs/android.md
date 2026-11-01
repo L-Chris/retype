@@ -70,6 +70,23 @@ and retains version history. The first import requires confirmation; concurrent
 settings remain local until explicitly resolved. No cloud account is required
 for normal offline typing.
 
+## Clipboard devices
+
+The Cross-device page can associate multiple computers. Each device has its own
+encrypted credential, certificate pin, saved routes, connection and retry loop.
+Adding, cancelling or removing one association leaves the other connections
+running. Existing single-device associations migrate automatically.
+
+Text and supported images copied on the phone are sent to every connected device.
+Incoming clipboard events share one deduplication journal; received content is
+not reissued as a new phone copy. Clipboard access still requires retype to be the
+default keyboard, and sensitive clipboard items are not sent.
+
+The page shows local IPv4 addresses and each connected device's local and remote
+address and port. Android initiates these connections and receives a separate
+automatically assigned local port for each connection. Address lists on Android,
+Windows and macOS hide IPv6 entries.
+
 ## Updates and release signing
 
 About checks stable GitHub releases for `retype-<version>-android-<abi>.apk`
@@ -177,6 +194,15 @@ Native tests exercise external test dictionaries, both Pinyin schemes, English
 learning persistence and private sessions. The UI test types only into isolated
 test editors, verifies touch commits and field switching, and restores the
 previous default input method afterward.
+
+The opt-in `LanMultiDeviceTest` connects an emulator to two independent TLS desktop
+fixtures. Start `cargo test -p retype-sync android_emulator_multiple_devices --
+--ignored --nocapture` on macOS, then pass the ports and IDs from
+`retype-lan-multi-ports.json` in the OS temporary directory as the instrumentation
+arguments `multiA`, `multiB`, `multiAId` and `multiBId`. Use the validation application
+ID (`-PretypeValidationBuild=true`) with that APK selected as the emulator's keyboard.
+This checks independent pairing, phone clipboard fan-out, incoming original JPEG,
+offline/reconnect behavior, disable/re-enable and removing just one peer.
 
 A3 has been exercised on an Android 15 ARM64 phone and an Android 15 x86_64
 emulator: all 12 connected tests passed, including real editor translation,

@@ -5,6 +5,7 @@ import org.json.JSONObject
 
 /** Routing policy is shared with desktop Rust; addresses never replace peer identity. */
 internal object LanEndpoint {
+    fun visible(value: String): Boolean = !value.contains('[') && value.count { it == ':' } <= 1
     val PORT = JSONObject(NativeBridge.feature(JSONObject().put("type", "featurePolicy").toString())).getJSONObject("clipboard").getInt("port")
     private fun request(operation: String, value: String): JSONObject = JSONObject(NativeBridge.feature(
         JSONObject().put("type", "lanEndpoint").put("operation", operation).put("value", value).toString()))

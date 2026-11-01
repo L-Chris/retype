@@ -19,9 +19,9 @@ class PhysicalLanPairingTest {
     val lan = LanClipboard.get(instrumentation.targetContext)
     instrumentation.runOnMainSync { lan.enable(true); lan.join(code!!) }
     withTimeout(35_000) {
-      while (lan.state.value.message != "已连接") delay(100)
+      while (lan.state.value.peers.none { it.connection.isNotEmpty() }) delay(100)
     }
-    assertTrue(lan.state.value.name.isNotEmpty())
+    assertTrue(lan.state.value.peers.any { it.name.isNotEmpty() })
     assertNull(lan.state.value.code)
   }
 }

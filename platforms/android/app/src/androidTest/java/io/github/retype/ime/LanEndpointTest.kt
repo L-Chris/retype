@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class LanEndpointTest {
+    @Test fun addressDisplaysHideIpv6WithoutRemovingIpv4OrHostnames() {
+        assertFalse(LanEndpoint.visible("[fd7a:115c:a1e0::1]:50206"))
+        assertFalse(LanEndpoint.visible("fd7a:115c:a1e0::1"))
+        assertTrue(LanEndpoint.visible("100.64.0.1:50206"))
+        assertTrue(LanEndpoint.visible("home.tailnet.ts.net:50206"))
+    }
     @Test fun exactOverlayRangeAndExistingLanAddressesAreAccepted() {
         for (address in listOf("100.64.0.1", "100.127.255.254", "192.168.31.128", "home", "home.tailnet.ts.net")) {
             assertEquals("$address:50206", LanEndpoint.normalize(address))
