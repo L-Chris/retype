@@ -324,6 +324,7 @@ impl CandidateWindow {
                 if IsWindowVisible(window).as_bool() != show {
                     let _ = ShowWindow(window, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
                 }
+                crate::popup::present(window);
                 metrics.raster_us = update.metrics.raster_us;
                 metrics.reused = update.metrics.reused;
                 metrics.dpi = update.metrics.dpi;

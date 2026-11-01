@@ -413,6 +413,84 @@ mod tests {
     }
 
     #[test]
+    fn flypy_sentence_completion_survives_a_frequent_short_prefix_and_narrow_beam() {
+        let mut lex = TestLex::default();
+        lex.add("还是", "hai shi", -7.0);
+        lex.add("还是有点", "hai shi you dian", -12.0);
+        lex.add("有点慢", "you dian man", -20.0);
+        lex.add("有点忙", "you dian mang", -21.0);
+        lex.add("吗", "ma", -7.0);
+        lex.add("慢", "man", -10.0);
+        let opts = DecodeOptions {
+            k: 1,
+            ..Default::default()
+        };
+        for input in ["hduiyzdmm", "hd'ui'yz'dm'm"] {
+            let out = shuangpin::decode(input, &lex, &opts);
+            let first = &out.candidates[0];
+            assert_eq!(first.text, "还是有点慢");
+            assert_eq!(first.consumed, input.len());
+            assert_eq!(first.syllable_len, 5);
+            assert_eq!(out.syllables, ["hai", "shi", "you", "dian", "man"]);
+            assert!(out.candidates.iter().any(|c| c.text == "还是有点吗"));
+            let prefix = out
+                .candidates
+                .iter()
+                .find(|c| c.text == "还是有点")
+                .unwrap();
+            assert!(prefix.consumed < input.len());
+        }
+    }
+
+    #[test]
+    fn flypy_completion_keeps_a_strong_prefix_ahead_of_an_implausible_rare_word() {
+        let mut lex = TestLex::default();
+        lex.add("我", "wo", -1.0);
+        lex.add("渥恩", "wo en", -10.0);
+        let out = shuangpin::decode("woe", &lex, &DecodeOptions::default());
+        assert_eq!(out.candidates[0].text, "我");
+        assert!(out
+            .candidates
+            .iter()
+            .any(|c| c.text == "渥恩" && c.consumed == 3));
+    }
+
+    #[test]
+    fn lattice_does_not_query_an_unreachable_word_interior() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counted {
+            lex: TestLex,
+            interiors: AtomicUsize,
+        }
+        impl Lexicon for Counted {
+            fn lookup(&self, ids: &[SyllableId], out: &mut Vec<LexEntry>) {
+                self.lex.lookup(ids, out);
+            }
+            fn has_prefix(&self, ids: &[SyllableId]) -> bool {
+                if ids == [syllables::id_of("hao").unwrap()] {
+                    self.interiors.fetch_add(1, Ordering::Relaxed);
+                }
+                self.lex.has_prefix(ids)
+            }
+            fn len(&self) -> usize {
+                self.lex.len()
+            }
+        }
+        let mut lex = TestLex::default();
+        lex.add("你好", "ni hao", -1.0);
+        let lex = Counted {
+            lex,
+            interiors: AtomicUsize::new(0),
+        };
+        let out = Decoder::new().decode("nihao", &lex);
+        assert_eq!(out.candidates[0].text, "你好");
+        assert_eq!(lex.interiors.load(Ordering::Relaxed), 0);
+        // An unmatched leading key still supplies a reachable raw fallback.
+        let out = Decoder::new().decode("xnihao", &lex);
+        assert!(out.candidates.iter().any(|c| c.text == "x你好"));
+    }
+
+    #[test]
     fn flypy_jiuu_and_qiuu_follow_the_actual_pronunciation() {
         let mut lex = TestLex::default();
         lex.add("技术", "ji shu", -1.0);

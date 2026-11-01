@@ -116,9 +116,12 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
     let mut output = decode_lattice(&normalized, lattice, opts, lex);
     output.has_whole_word = has_exact_word;
     if can_preview_tail(normalized.as_bytes()) {
-        let preview = build_lattice_with(&normalized, lex, opts, preview_options);
+        let mut preview = build_lattice_with(&normalized, lex, opts, preview_options);
+        preview.complete_tail = true;
         let has_preview_word = preview.has_whole_word(&normalized);
-        let mut candidates: Vec<_> = decode_lattice(&normalized, preview, opts, lex)
+        let preview = decode_lattice(&normalized, preview, opts, lex);
+        let completions = preview.word_completions;
+        let mut candidates: Vec<_> = preview
             .candidates
             .into_iter()
             .filter(|c| c.source != CandidateSource::Raw)
@@ -150,15 +153,34 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
                 candidates.push(candidate);
             }
         }
+        // Coverage is meaningful only among plausible completions. Keep a
+        // strong short match ahead of a very rare unfinished word (e.g. 我
+        // versus 渥恩 for `woe`). Scores include word bonuses, so this is a
+        // bounded score window, not a calibrated probability threshold.
+        const COMPLETION_SCORE_WINDOW: f32 = 3.0;
+        let rank = |candidate: &Candidate| candidate.score / candidate.syllable_len.max(1) as f32;
+        let best_rank = candidates
+            .iter()
+            .map(&rank)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let plausible =
+            |candidate: &Candidate| rank(candidate) >= best_rank - COMPLETION_SCORE_WINDOW;
         candidates.sort_by(|a, b| {
             // Compare dictionary evidence per syllable. Whole-phrase log
             // probabilities otherwise lose to a high-frequency single word
             // merely because they cover more of the typed input.
-            let rank =
-                |candidate: &Candidate| candidate.score / candidate.syllable_len.max(1) as f32;
-            rank(b)
-                .total_cmp(&rank(a))
+            plausible(b)
+                .cmp(&plausible(a))
                 .then_with(|| b.consumed.cmp(&a.consumed))
+                // A phrase extending the unfinished syllable is dictionary
+                // evidence for that completion, unlike attaching an isolated
+                // high-frequency character to an already completed prefix.
+                .then_with(|| {
+                    completions
+                        .contains(&b.text)
+                        .cmp(&completions.contains(&a.text))
+                })
+                .then_with(|| rank(b).total_cmp(&rank(a)))
                 .then_with(|| a.text.cmp(&b.text))
         });
         exact.extend(candidates);
@@ -167,6 +189,7 @@ pub fn decode(input: &str, lex: &dyn Lexicon, opts: &DecodeOptions) -> DecodeOut
         candidates.retain(|c| seen.insert(c.text.clone()));
         candidates.extend(raw.into_iter().filter(|c| seen.insert(c.text.clone())));
         output.candidates = candidates;
+        output.word_completions = completions;
         if let Some(first) = output.candidates.first() {
             output.syllables = first
                 .syllables

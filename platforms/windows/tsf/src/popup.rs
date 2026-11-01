@@ -229,6 +229,18 @@ pub fn update(
     }
 }
 
+pub(crate) fn present(window: HWND) {
+    // SAFETY: Only our visible, apartment-owned popup is painted. WM_PAINT
+    // copies an already completed bitmap with GDI; it never requests TSF edits
+    // or calls the host. Present after placement so queued input/layout work
+    // cannot indefinitely postpone the low-priority WM_PAINT notification.
+    unsafe {
+        if IsWindowVisible(window).as_bool() {
+            let _ = UpdateWindow(window);
+        }
+    }
+}
+
 unsafe fn paint(window: HWND, frame: &Frame) {
     // SAFETY: The owned bitmap has exactly width*height top-down BGRX pixels.
     // GDI only presents the completed egui frame; it does not measure/draw text.
@@ -315,6 +327,15 @@ unsafe extern "system" fn window_proc(window: HWND, msg: u32, wp: WPARAM, lp: LP
         DefWindowProcW(window, msg, wp, lp)
     }))
     .unwrap_or(LRESULT(0))
+}
+
+#[cfg(test)]
+pub(crate) fn paint_pending_for_test(window: HWND) -> bool {
+    // SAFETY: Used only with the fixture's live popup on its creating thread.
+    unsafe {
+        let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Frame;
+        !pointer.is_null() && (*pointer).invalidated.is_some()
+    }
 }
 
 #[cfg(test)]
