@@ -17,7 +17,7 @@ A native [macOS preview](docs/macos.md) is also in development, with AppKit cand
 - Full Pinyin and Xiaohe Shuangpin, selectable from the language bar; incomplete Shuangpin codes preview matching characters and phrases.
 - A downloadable Wanxiang Base dictionary with word-specific pronunciations and phrase weights; typing works offline after installation.
 - A compact horizontal candidate window with keyboard and mouse selection.
-- Chinese/English mode switching from the language bar.
+- Separate `retype 中文` and `retype English` system entries on Windows, macOS and Android.
 - Offline English word completion and spelling suggestions, with case preservation and persistent personal vocabulary; see [English input](docs/english-input.md).
 - [Voice input](docs/voice-input.md) on Windows and Android, with recording previews, audio-capable AI models, and separate voice counts.
 - Configurable AI providers and models, with a shortcut to translate and replace supported input fields or preview the result first.
@@ -37,7 +37,7 @@ Download the Windows installer from the [latest release](https://github.com/L-Ch
 
 For Android, download the APK from the same release and enable retype in the system keyboard settings. Signed release APKs use a different certificate from development previews; remove the preview app before switching to the release channel.
 
-Select **retype** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between Chinese and English, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme, view typing statistics, or check for updates. Reopen applications that were already running after an update so they load the new input component.
+Select **retype 中文** or **retype English** with `Win+Space`. Type `nihao` in Full Pinyin or `nihc` in Xiaohe Shuangpin, then press Space to commit “你好”. Tap Shift alone to switch between the two retype entries, or click the mode icon on the left of the branded language indicator. While composing, use `-` and `=` to turn candidate pages; keys `1`–`8` select from the current page. Right-click the mode icon and choose **Settings** to change the Pinyin scheme, view typing statistics, or check for updates. Reopen applications that were already running after an update so they load the new input component.
 
 In English mode, Space commits what you typed; Tab or clicking a candidate accepts it with a trailing space. Use Up/Down to select explicitly, then Space to accept it with a trailing space. Numbered candidates support selection with 1–8 and add a trailing space; digits without a matching visible candidate and punctuation remain ordinary input. Press Esc before typing digits in words such as `python3`. Settings > Input controls English completion and spelling suggestions.
 

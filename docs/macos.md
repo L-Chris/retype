@@ -32,14 +32,14 @@ bash platforms/macos/test-ui.sh
 bash platforms/macos/install.sh /path/to/retype.app
 ```
 
-安装到当前用户的 `~/Library/Input Methods/retype.app`，无需管理员权限。安装器只停止当前用户的 retype 进程，不停止其他应用；升级保留词库、个人学习和设置。随后在「系统设置 → 键盘 → 文字输入 → 编辑 → +」添加 retype；首次安装若未列出，注销后重新登录一次。不要把应用放进普通的 Applications 文件夹来替代输入法安装目录。
+安装到当前用户的 `~/Library/Input Methods/retype.app`，无需管理员权限。安装器只停止当前用户的 retype 进程，不停止其他应用；升级保留词库、个人学习和设置。安装器会登记并启用「retype 中文」和「retype English」两个输入源，也可在「系统设置 → 键盘 → 文字输入 → 编辑 → +」分别添加；首次安装若未列出，注销后重新登录一次。不要把应用放进普通的 Applications 文件夹来替代输入法安装目录。
 
 点击菜单栏输入法菜单的「设置…」，或双击已安装的 retype.app。首次使用在「词库」页下载基础词库，或导入发行版附件 `retype-base.retype-resources`。下载、校验、导入及数据库加载均在后台；安装前按键原样交给应用，安装完成后无需重新登录即可开始输入。
 
 - 全拼输入 `nihao`，小鹤双拼输入 `nihc`；空格选首项，数字 1–8 选当前页，也可鼠标选词。
-- `-` / `=` 翻页，上下方向键移动选择，Esc 清空；默认单独按左 Shift 切换中英文。
+- `-` / `=` 翻页，上下方向键移动选择，Esc 清空；默认单独按左 Shift 在两个 retype 输入源之间切换。
 - 候选横排、16 点常规字重、最大宽度 480 点（Retina 自动按像素缩放），按实际字宽分页，最多 8 项；较长词组减少同页数量。
-- 英文模式空格保留原始输入，Tab、数字键或鼠标接受候选并补空格。除用户配置的翻译／录音快捷键外，系统 Command / Control / Option 快捷键及 Option 组合字符交给 macOS。
+- 选择「retype English」使用 retype 的英文补全、拼写建议与个人学习；英文模式空格保留原始输入，Tab、数字键或鼠标接受候选并补空格。除用户配置的翻译／录音快捷键外，系统 Command / Control / Option 快捷键及 Option 组合字符交给 macOS。
 - 输入方案和英文选项在下次激活输入框时生效；切换到设置前会按系统请求提交或结束组字。
 
 ## 翻译、语音和权限

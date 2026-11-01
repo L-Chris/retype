@@ -27,6 +27,7 @@ mod langbar;
 mod packs;
 mod popup;
 mod preferences;
+mod profiles;
 mod registration;
 mod search;
 pub mod session;

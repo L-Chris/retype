@@ -134,7 +134,17 @@ int main(int argc, const char *argv[]) {
         // Registration is an explicit installer step, not part of each launch.
         if (argc > 1 && strcmp(argv[1], "--register") == 0) {
             OSStatus status = TISRegisterInputSource((__bridge CFURLRef)NSBundle.mainBundle.bundleURL);
-            return status == noErr ? 0 : 1;
+            if (status != noErr) return 1;
+            // TIS requires the parent enabled before any of its input modes.
+            for (NSString *identifier in @[NSBundle.mainBundle.bundleIdentifier, RTChineseInputSource, RTEnglishInputSource]) {
+                NSDictionary *filter = @{(__bridge NSString *)kTISPropertyInputSourceID:identifier};
+                CFArrayRef sources = TISCreateInputSourceList((__bridge CFDictionaryRef)filter, true);
+                if (!sources || !CFArrayGetCount(sources)) { if (sources) CFRelease(sources); return 1; }
+                status = TISEnableInputSource((TISInputSourceRef)CFArrayGetValueAtIndex(sources, 0));
+                CFRelease(sources);
+                if (status != noErr) return 1;
+            }
+            return 0;
         }
         NSApplication *app = NSApplication.sharedApplication;
         __attribute__((objc_precise_lifetime)) RTAppDelegate *delegate = [RTAppDelegate new];

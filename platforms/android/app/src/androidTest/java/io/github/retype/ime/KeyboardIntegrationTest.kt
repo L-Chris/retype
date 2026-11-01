@@ -9,6 +9,7 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class KeyboardIntegrationTest {
+  @Suppress("DEPRECATION")
   @Test
   fun touchCompositionEnglishAndPrivateFieldSwitch() {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -47,6 +48,10 @@ class KeyboardIntegrationTest {
       prefs.edit().putBoolean("flypy", true).putBoolean("chinese", true).commit()
       device.executeShellCommand("ime enable $ime")
       device.executeShellCommand("ime set $ime")
+      val manager = instrumentation.targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+      val own = manager.inputMethodList.first { it.id == ime }
+      assertEquals(2, own.subtypeCount)
+
       val launched =
           device.executeShellCommand("am start -W -n ${instrumentation.targetContext.packageName}/io.github.retype.ime.EditorFixtureActivity")
       assertFalse(launched, launched.contains("Error:"))
@@ -54,6 +59,9 @@ class KeyboardIntegrationTest {
       assertNotNull(editor)
       editor!!.click()
       assertNotNull(find(By.desc("retype"), 10000))
+      find(By.desc("切换至中文"), 500)?.click()
+      assertNotNull(find(By.desc("切换至英文")))
+      assertEquals("zh-CN", manager.currentInputMethodSubtype?.languageTag)
       for (letter in "wo") find(By.text(letter.toString()))!!.click()
       assertNotNull(find(By.desc("candidate-我")))
       find(By.text("u"))!!.click()
@@ -85,6 +93,7 @@ class KeyboardIntegrationTest {
         device.executeShellCommand("screencap -p /sdcard/Download/retype-switch-failure.png")
       }
       assertTrue("English mode must update the keyboard", switched)
+      assertEquals("The system entry must follow the keyboard toggle", "en-US", manager.currentInputMethodSubtype?.languageTag)
       for (letter in "hel") find(By.text(letter.toString()))!!.click()
       // Personal learning can move a long word outside the compact viewport.
       find(By.desc("展开候选"))!!.click()
@@ -93,6 +102,11 @@ class KeyboardIntegrationTest {
       hello!!.click()
       assertNotNull("English selection must reach the editor", find(By.desc("editor-normal").text("你好hello ")))
       expectWords(initialWords + 1)
+      for (letter in "helo") find(By.text(letter.toString()))!!.click()
+      find(By.desc("展开候选"))!!.click()
+      assertNotNull("English entry retains spelling correction", find(By.desc("candidate-hello")))
+      find(By.desc("收起候选"))!!.click()
+      repeat(4) { find(By.text("⌫"))!!.click() }
       for (letter in "ni") find(By.text(letter.toString()))!!.click()
       find(By.desc("editor-password"))!!.click()
       assertNotNull(find(By.text("安全输入")))
@@ -102,6 +116,7 @@ class KeyboardIntegrationTest {
       find(By.desc("editor-email"))!!.click()
       assertNotNull(find(By.desc("retype"), 10000))
       assertTrue(device.hasObject(By.desc("切换至中文")))
+      assertEquals("en-US", manager.currentInputMethodSubtype?.languageTag)
       assertTrue(device.findObject(By.desc("editor-email")).text in listOf("", "email"))
       assertEquals(
           "你好hello ni",
@@ -110,7 +125,7 @@ class KeyboardIntegrationTest {
     } finally {
       prefs.edit().putBoolean("flypy", oldFlypy).putBoolean("chinese", oldChinese).commit()
       if (oldIme != "null" && oldIme.isNotEmpty())
-          device.executeShellCommand("ime set '${oldIme.replace("'", "'\\''")}'")
+          device.executeShellCommand("ime set $oldIme")
       if (!wasEnabled) device.executeShellCommand("ime disable $ime")
     }
   }

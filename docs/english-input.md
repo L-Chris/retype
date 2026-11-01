@@ -2,6 +2,20 @@
 
 This first stage adds local word completion, one-edit spelling suggestions and personal vocabulary to English mode. Phrase prediction, next-word prediction, grammar correction and AI writing are not included yet.
 
+## System entries
+
+Windows, macOS and Android expose **retype 中文** and **retype English** separately.
+Choose the English entry in the system input picker to use retype completion,
+spelling suggestions and personal vocabulary. Switching back to a retype entry
+starts in its own language. The mode shortcut or keyboard button selects the
+other retype entry; it does not select an unrelated system keyboard.
+
+Windows setup adds both profiles while preserving the default keyboard. macOS
+installation registers and enables both input modes. On Android, open Settings
+→ Input → Manage Chinese and English entries and enable both languages if the
+system picker only lists the current device language. Email/URL and secure
+fields retain their field-specific input behavior.
+
 ## Interaction
 
 - Type letters to preview prefix matches, ordered by word frequency and personal usage. Initial capitals and all-caps input retain their casing; internal apostrophes are supported.

@@ -84,7 +84,11 @@ void RTUpdateSaveLog(BOOL saved, NSString *reason);
 - (void)refresh;
 @end
 
+FOUNDATION_EXPORT NSString * const RTChineseInputSource;
+FOUNDATION_EXPORT NSString * const RTEnglishInputSource;
+
 @interface RetypeInputController : IMKInputController <RTCandidateOwner>
+@property(nonatomic, copy) NSString *inputModeID;
 @property(nonatomic) RtSession *session;
 @property(nonatomic, weak) id<IMKTextInput> activeClient;
 @property(nonatomic, copy) NSDictionary *state;

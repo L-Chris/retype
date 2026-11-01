@@ -59,20 +59,12 @@ impl ITfCompartmentEventSink_Impl for ModeSink_Impl {
             if !state.is_activated() {
                 return Ok(());
             }
-            let Some(session) = state.session() else {
-                return Ok(());
-            };
-            // SAFETY: TSF notifies on this compartment's apartment.
-            let chinese = i32::try_from(&unsafe { self.compartment.GetValue()? })? != 0;
-            if session.backend.with_kernel(|k| k.is_chinese()) == chinese {
-                return Ok(());
-            }
-            let current = lock(&state.composition).clone();
-            if let Some(current) = current {
-                edit::request(&state, &current.context, edit::Work::SetChinese(chinese))?;
-            } else {
-                session.submit(InputEvent::ToggleChinese);
-                state.notify_language_bar();
+            // Open/close means service enabled/disabled, never Chinese/English.
+            // Closing ends composition; reopening keeps the selected entry.
+            let open = i32::try_from(&unsafe { self.compartment.GetValue()? })? != 0;
+            if !open {
+                state.finish(false);
+                state.hide();
             }
             Ok(())
         })
@@ -244,6 +236,7 @@ impl Button_Impl {
                     };
                     session.submit(event);
                     state.notify_language_bar();
+                    crate::profiles::schedule(&state);
                 }
             }
             Ok(())
@@ -677,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn os_open_close_notification_updates_the_engine() -> Result<()> {
+    fn os_open_close_notification_preserves_the_selected_language() -> Result<()> {
         use windows::Win32::System::Com::*;
         // SAFETY: Private STA; only its thread-local TSF compartment is changed.
         unsafe {
@@ -693,9 +686,11 @@ mod tests {
                 *lock(&state.session) = Some(Arc::clone(&session));
                 let bridge = ModeBridge::attach(&state, &manager)?;
                 bridge.compartment.SetValue(tid, &VARIANT::from(0i32))?;
-                assert!(!session.backend.with_kernel(|k| k.is_chinese()));
-                bridge.compartment.SetValue(tid, &VARIANT::from(1i32))?;
                 assert!(session.backend.with_kernel(|k| k.is_chinese()));
+                session.submit(InputEvent::ToggleChinese);
+                bridge.compartment.SetValue(tid, &VARIANT::from(1i32))?;
+                assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+                assert_eq!(i32::try_from(&bridge.compartment.GetValue()?)?, 1);
                 drop(bridge);
                 manager.Deactivate()?;
                 Ok(())

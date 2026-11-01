@@ -25,7 +25,14 @@ pub const GUID_PROFILE_RETYPE_STR: &str = "{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74
 pub const LANGID_ZH_CN: u16 = 0x0804;
 
 /// 显示名称（M1 应改为资源 DLL 里的字符串 ID，才能本地化）。
-pub const DISPLAY_NAME: &str = "retype 输入法";
+pub const DISPLAY_NAME: &str = "retype 中文";
+pub const LANGID_EN_US: u16 = 0x0409;
+pub const GUID_PROFILE_ENGLISH: GUID = GUID::from_u128(0x8e082735_45e3_4d99_8bca_a5cd3591c4e6);
+pub const GUID_PROFILE_ENGLISH_STR: &str = "{8E082735-45E3-4D99-8BCA-A5CD3591C4E6}";
+pub const INPUT_PROFILES: &[(u16, GUID, &str)] = &[
+    (LANGID_ZH_CN, GUID_PROFILE_RETYPE, DISPLAY_NAME),
+    (LANGID_EN_US, GUID_PROFILE_ENGLISH, "retype English"),
+];
 pub const DISPLAY_DESC: &str = "retype 拼音输入法（本地首刷 + 云端二刷）";
 
 /// 注册表键名用的 `{...}` 形式。
@@ -47,6 +54,7 @@ mod tests {
         // 字符串形式是给注册表用的，必须和二进制形式一致，否则注册了也激活不了
         assert_eq!(braced(&CLSID_RETYPE_TIP), CLSID_RETYPE_TIP_STR);
         assert_eq!(braced(&GUID_PROFILE_RETYPE), GUID_PROFILE_RETYPE_STR);
+        assert_eq!(braced(&GUID_PROFILE_ENGLISH), GUID_PROFILE_ENGLISH_STR);
     }
 
     #[test]
