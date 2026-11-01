@@ -1184,6 +1184,22 @@ fn run_host() -> Result<()> {
             .as_ref()
             .and_then(|w| w.native_handle())
             .expect("native popup");
+        assert!(!crate::popup::paint_pending_for_test(window));
+        // Change pixels without moving/resizing the window, and deliberately
+        // do not pump the application's queue. Present must finish the ready
+        // frame even while input or layout messages would outrank WM_PAINT.
+        let actual = session.backend.with_kernel(|k| k.render_state());
+        let mut changed = actual.clone();
+        changed.candidates[0].text = "您好".into();
+        let layout = crate::popup::measure(&changed, None, None);
+        let update = crate::popup::update(window, &state, &context, &changed, &layout);
+        assert!(!update.metrics.reused);
+        assert!(crate::popup::paint_pending_for_test(window));
+        crate::popup::present(window);
+        assert!(!crate::popup::paint_pending_for_test(window));
+        let layout = crate::popup::measure(&actual, None, None);
+        crate::popup::update(window, &state, &context, &actual, &layout);
+        crate::popup::present(window);
         let (before, old_generation) = crate::popup::frame_for_test(window);
         request(
             &state,
@@ -1299,7 +1315,19 @@ fn check_symbol_completion(
         type_key(c)?;
     }
     type_key('"')?;
-    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("“你好”"));
+    let (actual, start, end, chromium) = {
+        let host = lock(data);
+        (
+            String::from_utf16_lossy(&host.text),
+            host.start,
+            host.end,
+            host.chromium,
+        )
+    };
+    assert!(
+        actual.ends_with("“你好”"),
+        "quoted commit: {actual:?}, selection={start}..{end}, chromium={chromium}"
+    );
     request(state, context, Work::Toggle)?;
     type_key('(')?;
     for c in "don't".chars() {

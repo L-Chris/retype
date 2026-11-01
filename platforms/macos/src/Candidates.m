@@ -2,6 +2,11 @@
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 
+#ifdef RT_UI_SMOKE
+double RTTestCandidateDrawSeconds;
+double RTTestCandidateWidthSeconds;
+NSUInteger RTTestCandidateWidthQueries;
+#endif
 static const CGFloat RTItemHeight = 36;
 @interface RTCandidateView : NSView
 @property(nonatomic, copy) NSDictionary *state;
@@ -12,6 +17,9 @@ static const CGFloat RTItemHeight = 36;
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 - (void)drawRect:(NSRect)dirtyRect {
+    #ifdef RT_UI_SMOKE
+    CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();
+    #endif
     (void)dirtyRect;
     [[NSColor colorWithCalibratedRed:.985 green:.99 blue:.995 alpha:1] setFill];
     [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:7 yRadius:7] fill];
@@ -44,6 +52,9 @@ static const CGFloat RTItemHeight = 36;
         [NSGraphicsContext restoreGraphicsState];
         x += width;
     }
+    #ifdef RT_UI_SMOKE
+    RTTestCandidateDrawSeconds+=CFAbsoluteTimeGetCurrent()-started;
+    #endif
 }
 - (void)mouseDown:(NSEvent *)event {
     NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
@@ -86,11 +97,33 @@ static const CGFloat RTItemHeight = 36;
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeMainWindow { return NO; }
 + (NSArray<NSNumber *> *)widths:(NSArray<NSString *> *)candidates {
+    #ifdef RT_UI_SMOKE
+    CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();
+    #endif
+    // Metrics are in points at the fixed 16-point font, independent of screen
+    // scale and viewport. Cache scalars, never glyph layouts or bitmap frames.
+    static NSCache<NSString *,NSNumber *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache=[NSCache new];cache.name=@"retype.candidate-widths";
+        cache.countLimit=4096;cache.totalCostLimit=128*1024;
+    });
     NSMutableArray *widths = [NSMutableArray arrayWithCapacity:candidates.count];
     for (NSString *text in candidates) {
-        CGFloat width = ceil([text sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:16]}].width) + 34;
-        [widths addObject:@(MIN(10000, MAX(40, width)))];
+        NSNumber *width=[cache objectForKey:text];
+        if(!width){
+            CGFloat measured=ceil([text sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:16]}].width)+34;
+            width=@(MIN(10000,MAX(40,measured)));
+            [cache setObject:width forKey:text.copy cost:[text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]];
+            #ifdef RT_UI_SMOKE
+            RTTestCandidateWidthQueries++;
+            #endif
+        }
+        [widths addObject:width];
     }
+    #ifdef RT_UI_SMOKE
+    RTTestCandidateWidthSeconds+=CFAbsoluteTimeGetCurrent()-started;
+    #endif
     return widths;
 }
 - (void)showState:(NSDictionary *)state anchor:(NSRect)anchor screen:(NSScreen *)screen level:(NSInteger)level owner:(id<RTCandidateOwner>)owner {

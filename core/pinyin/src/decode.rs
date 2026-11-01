@@ -94,6 +94,7 @@ struct Edge {
 pub struct Lattice {
     n: usize,
     edges: Vec<Vec<Edge>>,
+    pub(crate) complete_tail: bool,
 }
 
 impl Lattice {
@@ -162,8 +163,16 @@ pub(crate) fn build_lattice_with(
     let mut entries: Vec<LexEntry> = Vec::new();
     let mut syl_opts: Vec<(usize, SyllableId)> = Vec::new();
     let mut stack: Vec<(usize, Vec<SyllableId>)> = Vec::new();
+    let mut reachable = vec![false; n + 1];
+    reachable[0] = true;
 
     for i in 0..n {
+        // Only expand boundaries reachable by a dictionary word, separator or
+        // raw fallback from the start. Building overlapping graphs inside a
+        // word cannot contribute to any Viterbi path or selectable prefix.
+        if !reachable[i] {
+            continue;
+        }
         if bytes[i] == b'\'' {
             // 显式分隔符：消费掉但不产出文字，也不参与切分
             edges[i].push(Edge {
@@ -172,6 +181,7 @@ pub(crate) fn build_lattice_with(
                 syllables: Vec::new(),
                 score: 0.0,
             });
+            reachable[i + 1] = true;
             continue;
         }
 
@@ -221,9 +231,16 @@ pub(crate) fn build_lattice_with(
                 score: -opts.raw_penalty,
             });
         }
+        for edge in &edges[i] {
+            reachable[edge.to] = true;
+        }
     }
 
-    Lattice { n, edges }
+    Lattice {
+        n,
+        edges,
+        complete_tail: false,
+    }
 }
 
 /// k-best 搜索节点。
@@ -264,6 +281,10 @@ fn insert_node(beam: &mut Vec<Rc<Node>>, node: Rc<Node>, k: usize) {
 fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
     let n = lattice.n;
     let mut dp: Vec<Vec<Rc<Node>>> = vec![Vec::new(); n + 1];
+    // Keep dictionary-word completions in their own bounded beam. Otherwise
+    // frequent single characters at an unfinished final syllable can evict
+    // every path ending in a phrase before candidate ranking even sees it.
+    let mut completions: Vec<Rc<Node>> = Vec::new();
     // 起点哨兵：prev == None 标记路径开头
     dp[0].push(Rc::new(Node {
         score: 0.0,
@@ -282,25 +303,32 @@ fn kbest(lattice: &Lattice, k: usize) -> Vec<(f32, Vec<(usize, usize)>)> {
             for (ei, e) in lattice.edges[i].iter().enumerate() {
                 let score = beam.score + e.score;
                 let destination = &dp[e.to];
-                if destination.len() >= k && score <= destination[k - 1].score {
+                let keep_regular = destination.len() < k || score > destination[k - 1].score;
+                let keep_completion = lattice.complete_tail
+                    && e.to == n
+                    && e.syllables.len() > 1
+                    && (completions.len() < k || score > completions[k - 1].score);
+                if !keep_regular && !keep_completion {
                     continue;
                 }
-                insert_node(
-                    &mut dp[e.to],
-                    Rc::new(Node {
-                        score,
-                        from: i as u32,
-                        edge: ei as u32,
-                        prev: Some(Rc::clone(beam)),
-                    }),
-                    k,
-                );
+                let node = Rc::new(Node {
+                    score,
+                    from: i as u32,
+                    edge: ei as u32,
+                    prev: Some(Rc::clone(beam)),
+                });
+                if keep_completion {
+                    insert_node(&mut completions, Rc::clone(&node), k);
+                }
+                if keep_regular {
+                    insert_node(&mut dp[e.to], node, k);
+                }
             }
         }
     }
 
     let mut paths = Vec::new();
-    for node in dp[n].iter() {
+    for node in dp[n].iter().chain(completions.iter()) {
         let mut rev: Vec<(usize, usize)> = Vec::new();
         let mut cur = Some(Rc::clone(node));
         // 路径长度上界 = 字符数，超过说明状态异常，直接止损
@@ -357,6 +385,9 @@ pub struct DecodeOutput {
     pub matched_syllables: usize,
     /// 首选路径是否含未能匹配的字母（true 表示还在打无效串）
     pub has_raw: bool,
+    /// Full-coverage candidates whose unfinished final syllable completes a
+    /// dictionary phrase. Internal evidence, independent of display text length.
+    pub(crate) word_completions: HashSet<String>,
 }
 
 fn comment_of(syllables: &[SyllableId]) -> String {
@@ -519,6 +550,7 @@ pub(crate) fn decode_lattice(
     let capacity = whole_words.len().max(paths.len());
     let mut found: Vec<(Candidate, bool, Option<usize>)> = Vec::with_capacity(capacity);
     let mut seen: HashSet<String> = HashSet::with_capacity(capacity);
+    let mut word_completions = HashSet::new();
 
     for edge in whole_words {
         let Some(candidate) = word_candidate(edge, input.len()) else {
@@ -533,6 +565,14 @@ pub(crate) fn decode_lattice(
         let Some((cand, raw)) = path_to_candidate(bytes, &lattice, path, *score) else {
             continue;
         };
+        if lattice.complete_tail
+            && !raw
+            && path
+                .last()
+                .is_some_and(|&(from, ei)| lattice.edges[from][ei].syllables.len() > 1)
+        {
+            word_completions.insert(cand.text.clone());
+        }
         if !seen.insert(cand.text.clone()) {
             continue;
         }
@@ -634,6 +674,7 @@ pub(crate) fn decode_lattice(
         syllables: first_syllables,
         matched_syllables: matched,
         has_raw,
+        word_completions,
     }
 }
 

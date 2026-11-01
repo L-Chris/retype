@@ -2,6 +2,7 @@
 #import <Carbon/Carbon.h>
 #ifdef RT_UI_SMOKE
 NSDictionary *(^RTTestRuntimeFlush)(void);
+double RTTestCommandSeconds;
 #endif
 
 NSDictionary *RTJSON(char *owned) {
@@ -12,9 +13,16 @@ NSDictionary *RTJSON(char *owned) {
     return [value isKindOfClass:NSDictionary.class] ? value : @{ @"error": @"输入内核响应无效" };
 }
 NSDictionary *RTSend(RtSession *session, NSDictionary *command) {
+    #ifdef RT_UI_SMOKE
+    CFAbsoluteTime started=CFAbsoluteTimeGetCurrent();
+    #endif
     NSData *data = [NSJSONSerialization dataWithJSONObject:command options:0 error:NULL];
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    return RTJSON(rt_session_send(session, json.UTF8String));
+    NSDictionary *result=RTJSON(rt_session_send(session, json.UTF8String));
+    #ifdef RT_UI_SMOKE
+    RTTestCommandSeconds+=CFAbsoluteTimeGetCurrent()-started;
+    #endif
+    return result;
 }
 NSString *RTDataRoot(void) {
     #ifdef RT_UI_SMOKE
