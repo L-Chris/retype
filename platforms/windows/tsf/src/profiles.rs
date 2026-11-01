@@ -41,6 +41,18 @@ fn mode(profile: &GUID) -> Option<bool> {
     }
 }
 pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
+    let compartment = lock(&state.mode_bridge)
+        .as_ref()
+        .map(|bridge| bridge.compartment.clone());
+    if let Some(compartment) = compartment {
+        // A selected retype entry processes keys in either language.
+        unsafe {
+            compartment.SetValue(
+                state.tid.load(std::sync::atomic::Ordering::SeqCst),
+                &windows::Win32::System::Variant::VARIANT::from(1i32),
+            )?;
+        }
+    }
     let Some(session) = state.session() else {
         return Ok(());
     };
@@ -261,6 +273,7 @@ mod tests {
                 session.submit(InputEvent::Key {
                     key: Key::Char(ch),
                     mods: Modifiers::NONE,
+                    source: retype_types::InputSource::Keyboard,
                 });
             }
             assert!(session.backend.with_kernel(|k| k

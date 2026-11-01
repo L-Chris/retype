@@ -93,6 +93,48 @@ static void CheckAsyncSettings(RTSettings *settings){
     self.text=[self.text stringByReplacingCharactersInRange:range withString:text];
 }
 @end
+@interface RTModeClient : NSObject
+@property(nonatomic,copy) NSString *text;
+@property(nonatomic,copy) NSString *marked;
+@end
+@implementation RTModeClient
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+    (void)range; self.text=[(self.text ?: @"") stringByAppendingString:text]; self.marked=@"";
+}
+- (void)setMarkedText:(id)text selectionRange:(NSRange)selection replacementRange:(NSRange)range {
+    (void)selection;(void)range;self.marked=text;
+}
+@end
+@interface RetypeInputController (ModeTest)
+- (BOOL)ensureSession;
+- (NSDictionary *)applyCommand:(NSDictionary *)command;
+@end
+static void CheckInputEntries(RTAppDelegate *delegate) {
+    RtRuntime *runtime=NULL;
+    NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
+    Check(!opened[@"error"]&&runtime,@"Entry tests open an isolated real engine");
+    delegate.runtime=runtime;
+    RetypeInputController *controller=[RetypeInputController new];
+    RTModeClient *client=[RTModeClient new];controller.active=YES;controller.activeClient=(id<IMKTextInput>)client;
+    [controller setValue:RTEnglishInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    Check([controller ensureSession],@"English entry opens the retype engine");
+    NSDictionary *result=[controller applyCommand:@{@"type":@"key",@"value":@"h"}];
+    Check(![result[@"chinese"] boolValue]&&[client.marked isEqual:@"h"],@"English entry processes marked text through retype");
+    [controller setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    Check(controller.chinese&&[client.text isEqual:@"h"]&&!client.marked.length,@"Changing entry commits the previous English composition");
+    [controller setValue:RTEnglishInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    Check(!controller.chinese&&[[controller valueForTag:kTextServiceInputModePropertyTag client:client] isEqual:RTEnglishInputSource],@"Mode queries reflect the selected English entry");
+    RetypeInputController *other=[RetypeInputController new];other.active=YES;other.activeClient=(id<IMKTextInput>)client;
+    [other setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    Check([other ensureSession],@"A second client opens independently");
+    result=[other applyCommand:@{@"type":@"key",@"value":@"a"}];
+    Check([result[@"chinese"] boolValue],@"A Chinese client must not inherit the previous English client's mode");
+    [controller.timer invalidate];[other.timer invalidate];
+    controller.active=NO;other.active=NO;
+    [[RTCandidatePanel shared] hideFor:controller];[[RTCandidatePanel shared] hideFor:other];
+    delegate.runtime=NULL;rt_runtime_free(runtime);
+    printf("Separate input entries use the real engine, preserve composition at switches and isolate client language.\n");
+}
 static void CheckDeletion(void){
     RetypeInputController *controller=[RetypeInputController new];
     RTDeletionClient *client=[RTDeletionClient new];client.text=@"hello";client.selection=NSMakeRange(5,0);
@@ -154,6 +196,7 @@ int main(void){@autoreleasepool{
     RTSettings *settings=RTSettings.shared;[settings showWindow:nil];[settings.window makeKeyAndOrderFront:nil];
     CheckInputMenuSettings(settings);
     CheckAsyncSettings(settings);
+    CheckInputEntries(delegate);
     CheckDeletion();
     CheckTranslationCapture();
     NSStackView *navigation=[settings valueForKey:@"navigation"];

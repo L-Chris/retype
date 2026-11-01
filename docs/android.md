@@ -8,7 +8,7 @@ published alongside Windows installers on the GitHub Releases page.
 ## Available behavior
 
 - Offline Full Pinyin and Xiaohe Shuangpin, including incomplete syllables.
-- English completion and spelling suggestions; tapping a word adds a space.
+- Separate Chinese and English system keyboard entries with English completion and spelling suggestions; tapping a word adds a space.
 - A QWERTY keyboard, uppercase toggle, numeric/symbol layout, repeat backspace,
   language switching, and the system input-method picker.
 - Single-line scrollable candidates and a scrollable expanded grid replacing the keyboard. Words
@@ -38,6 +38,12 @@ Tablet-specific layouts belong to A4. About now includes Android update checks,
 release notes, streamed downloads and a system installer entry point.
 Network access is used for explicitly enabled downloads, translation and sync;
 the app does not request accessibility or external-storage access.
+
+In Settings → Input, use **Manage Chinese and English entries** to enable both
+`retype 中文` and `retype English` in Android's language settings. The keyboard's
+language button selects the other retype entry. English completion and spelling
+suggestions remain active in the English entry; changing editors preserves the
+selected entry.
 
 ## A3 behavior and boundaries
 

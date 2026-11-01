@@ -154,7 +154,7 @@ pub struct TipState {
     shortcuts: Mutex<(std::time::Instant, retype_ai::config::Shortcuts)>,
     preserved_translation: Mutex<Option<retype_ai::config::Shortcut>>,
     preserved_voice: Mutex<Option<retype_ai::config::Shortcut>>,
-    mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
+    pub(crate) mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
     pub(crate) entry_bridge: Mutex<Option<crate::profiles::EntryBridge>>,
     pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }

@@ -51,7 +51,7 @@ class KeyboardIntegrationTest {
       val manager = instrumentation.targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
       val own = manager.inputMethodList.first { it.id == ime }
       assertEquals(2, own.subtypeCount)
-      assertTrue(manager.setCurrentInputMethodSubtype(own.getSubtypeAt(0)))
+
       val launched =
           device.executeShellCommand("am start -W -n ${instrumentation.targetContext.packageName}/io.github.retype.ime.EditorFixtureActivity")
       assertFalse(launched, launched.contains("Error:"))
@@ -59,6 +59,9 @@ class KeyboardIntegrationTest {
       assertNotNull(editor)
       editor!!.click()
       assertNotNull(find(By.desc("retype"), 10000))
+      find(By.desc("切换至中文"), 500)?.click()
+      assertNotNull(find(By.desc("切换至英文")))
+      assertEquals("zh-CN", manager.currentInputMethodSubtype?.languageTag)
       for (letter in "wo") find(By.text(letter.toString()))!!.click()
       assertNotNull(find(By.desc("candidate-我")))
       find(By.text("u"))!!.click()
@@ -122,7 +125,7 @@ class KeyboardIntegrationTest {
     } finally {
       prefs.edit().putBoolean("flypy", oldFlypy).putBoolean("chinese", oldChinese).commit()
       if (oldIme != "null" && oldIme.isNotEmpty())
-          device.executeShellCommand("ime set '${oldIme.replace("'", "'\\''")}'")
+          device.executeShellCommand("ime set $oldIme")
       if (!wasEnabled) device.executeShellCommand("ime disable $ime")
     }
   }
