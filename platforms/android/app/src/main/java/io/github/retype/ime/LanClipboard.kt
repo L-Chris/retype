@@ -3,7 +3,11 @@ package io.github.retype.ime
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.LinkProperties
 import android.util.Base64
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -31,6 +35,7 @@ data class NearbyClipboard(
     val address: String,
     val mode: String = "",
     val id: String = "",
+    val dial: Boolean = false,
 )
 
 data class LanState(
@@ -38,6 +43,9 @@ data class LanState(
     val message: String = "已关闭",
     val peers: List<LanPeerState> = emptyList(),
     val localAddresses: List<String> = emptyList(),
+    val port: Int = LanEndpoint.PORT,
+    val listening: Boolean = false,
+    val listenerError: String = "",
     val code: String? = null,
     val expires: Long = 0,
     val nearby: List<NearbyClipboard> = emptyList(),
@@ -83,12 +91,20 @@ class LanClipboard private constructor(private val context: Context) {
       MutableStateFlow(
           LanState(
               enabled = prefs.getBoolean("enabled", false),
+              port = prefs.getInt("port", LanEndpoint.PORT),
               peers = peers.all().map { LanPeerState(it.id, it.name, it.manualAddresses.split(',').filter(LanEndpoint::visible).joinToString(", "), it.address) },
           )
       )
   val state = mutable.asStateFlow()
   private val control = Any()
   private val connections = mutableMapOf<String, LanConnection>()
+  private val inbound = mutableSetOf<LanConnection>()
+  private var listenerJob: Job? = null
+  private var listener: SSLServerSocket? = null
+  private var listenerEpoch = 0L
+  private var listenerCloseJob: Job? = null
+  private var pairingAttempts = 0
+  private var pairingGeneration = 0L
   private var pairingConnection: LanConnection? = null
   @Volatile private var pairingPin = ""
   @Volatile private var pairingMode = ""
@@ -108,6 +124,20 @@ class LanClipboard private constructor(private val context: Context) {
           ?: UUID.randomUUID().toString().replace("-", "").also {
             prefs.edit().putString("id", it).commit()
           }
+  private val identity by lazy { LanIdentity.load() }
+  private val advertisement = LanAdvertisement(context, id) {
+    update { if (it.enabled) it.copy(listenerError = "自动发现广播不可用，可使用本机地址关联") else it }
+  }
+  private var networkCallback: ConnectivityManager.NetworkCallback? = null
+  private var serviceRequested = false
+  private var serviceStarted = false
+
+  internal fun serviceRunning() = synchronized(control) { serviceStarted = true }
+  internal fun serviceStopped() = synchronized(control) {
+    serviceRequested = false
+    serviceStarted = false
+    if (prefs.getBoolean("enabled", false)) scope.launch { resume() }
+  }
 
   init {
     clipboard.addPrimaryClipChangedListener { capture() }
@@ -123,7 +153,7 @@ class LanClipboard private constructor(private val context: Context) {
 
   private fun current(link: LanConnection): Boolean = synchronized(control) {
     link.active.get() && prefs.getBoolean("enabled", false) &&
-        (pairingConnection === link || connections[link.peerId] === link)
+        (pairingConnection === link || connections[link.peerId] === link || link in inbound)
   }
 
   private fun refreshPeers(reset: Boolean = false) {
@@ -171,7 +201,7 @@ class LanClipboard private constructor(private val context: Context) {
             .flatMap { it.inetAddresses.toList() }.filter { it is Inet4Address && LanEndpoint.allowed(it) }
             .mapNotNull { it.hostAddress?.substringBefore('%') }.distinct().sorted()
       }.getOrDefault(emptyList())
-      update { it.copy(localAddresses = addresses) }
+      update { state -> state.copy(localAddresses = addresses.map { "$it:${state.port}" }) }
     }
   }
 
@@ -179,12 +209,145 @@ class LanClipboard private constructor(private val context: Context) {
     refreshLocalAddresses()
     synchronized(control) {
       if (!prefs.getBoolean("enabled", false)) return
+      if (!serviceRequested) {
+        serviceRequested = true
+        runCatching { context.startForegroundService(Intent(context, LanSyncService::class.java)) }
+            .onFailure { serviceRequested = false }
+      }
+      startListener()
+      watchNetwork()
       if (discoveryStop == null) discoveryStop = discover()
       for (peer in peers.all()) {
-        if (connections[peer.id]?.job?.isActive != true) connect(peer.address, false, peer.id)
+        if (connections[peer.id]?.job?.isActive != true && candidates(peer.id).isNotEmpty()) connect(candidates(peer.id).first(), false, peer.id)
       }
       refreshPeers()
     }
+  }
+
+  fun setPort(value: String): Boolean {
+    val port = value.toIntOrNull()
+    if (port == null || port !in 1..65535) {
+      update { it.copy(listenerError = "端口范围为 1–65535") }
+      return false
+    }
+    synchronized(control) {
+      prefs.edit().putInt("port", port).commit()
+      stopListener()
+      update { it.copy(port = port, listenerError = "") }
+      refreshLocalAddresses()
+      if (prefs.getBoolean("enabled", false)) startListener()
+    }
+    return true
+  }
+
+  private fun watchNetwork() {
+    if (networkCallback != null) return
+    val callback = object : ConnectivityManager.NetworkCallback() {
+      override fun onAvailable(network: Network) { scope.launch { resume() } }
+      override fun onLost(network: Network) { refreshLocalAddresses() }
+      override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) { refreshLocalAddresses() }
+    }
+    runCatching { context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(callback) }
+        .onSuccess { networkCallback = callback }
+  }
+
+  /** All bind, accept, key generation and close operations stay off the UI thread. */
+  private fun startListener() {
+    if (listenerJob?.isActive == true) return
+    val epoch = ++listenerEpoch
+    val previousClose = listenerCloseJob
+    val port = prefs.getInt("port", LanEndpoint.PORT)
+    val job = scope.launch(start = CoroutineStart.LAZY) {
+      var server: SSLServerSocket? = null
+      try {
+        previousClose?.join()
+        val tls = identity
+        ensureActive()
+        server = tls.context.serverSocketFactory.createServerSocket() as SSLServerSocket
+        server.reuseAddress = true
+        server.enabledProtocols = server.supportedProtocols.filter { it == "TLSv1.2" || it == "TLSv1.3" }.toTypedArray()
+        server.bind(InetSocketAddress(port), 16)
+        server.soTimeout = 1000
+        synchronized(control) {
+          if (epoch != listenerEpoch || !prefs.getBoolean("enabled", false)) throw CancellationException()
+          listener = server
+          update { it.copy(port = server.localPort, listening = true, listenerError = "") }
+          advertisement.update(server.localPort, pairingMode)
+          refreshLocalAddresses()
+        }
+        while (isActive) {
+          val socket = try { server.accept() as SSLSocket } catch (_: SocketTimeoutException) { continue }
+          synchronized(control) {
+            if (epoch != listenerEpoch || !prefs.getBoolean("enabled", false) ||
+                !LanEndpoint.allowed(socket.inetAddress) || inbound.size >= 16) {
+              socket.close()
+            } else {
+              val link = LanConnection(code = pairingPin, mode = pairingMode, expires = pairingExpires,
+                  incoming = true, pairingGeneration = pairingGeneration)
+              link.socket.set(socket)
+              inbound.add(link)
+              link.job = scope.launch(start = CoroutineStart.LAZY) {
+                try { incomingSession(socket, link, tls.certificate) }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) {
+                  synchronized(control) {
+                    if (pairingConnection === link && pairingMode.isNotEmpty()) update { it.copy(message =
+                        if (pairingAttempts >= 5) "尝试次数过多，请重新生成匹配码" else "关联验证失败，请检查两端匹配码") }
+                  }
+                }
+                finally {
+                  synchronized(control) {
+                    inbound.remove(link)
+                    if (pairingConnection === link) pairingConnection = null
+                    if (connections[link.peerId] === link) connections.remove(link.peerId)
+                    link.active.set(false)
+                    refreshPeers()
+                  }
+                  link.socket.compareAndSet(socket, null)
+                  runCatching { socket.close() }
+                  scope.launch { delay(1000); resume() }
+                }
+              }
+              link.job!!.start()
+            }
+          }
+        }
+      } catch (error: CancellationException) { throw error }
+      catch (_: Exception) {
+        synchronized(control) {
+          if (epoch == listenerEpoch) update { it.copy(listening = false,
+              listenerError = "无法监听端口 $port，请检查端口占用或更改监听端口") }
+        }
+      } finally {
+        runCatching { server?.close() }
+        synchronized(control) {
+          if (epoch == listenerEpoch) {
+            listener = null
+            update { it.copy(listening = false) }
+            advertisement.update(0, "")
+          }
+        }
+      }
+    }
+    listenerJob = job
+    job.start()
+  }
+
+  private fun stopListener() {
+    listenerEpoch++
+    val oldJob = listenerJob
+    val oldSocket = listener
+    listenerJob = null
+    listener = null
+    oldJob?.cancel()
+    val previousClose = listenerCloseJob
+    listenerCloseJob = scope.launch {
+      previousClose?.join()
+      runCatching { oldSocket?.close() }
+      oldJob?.join()
+    }
+    update { it.copy(listening = false) }
+    advertisement.update(0, "")
   }
 
   fun enable(value: Boolean) {
@@ -196,10 +359,22 @@ class LanClipboard private constructor(private val context: Context) {
     else {
       cancelPair(false)
       synchronized(control) {
+        stopListener()
         connections.values.forEach { it.close(scope) }
         connections.clear()
+        inbound.toList().forEach { it.close(scope) }
+        inbound.clear()
         discoveryStop?.invoke()
         discoveryStop = null
+        networkCallback?.let { runCatching { context.getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) } }
+        networkCallback = null
+        // Never stop a newly requested FGS before its startForeground callback;
+        // Android treats cancelling that pending start as a process-fatal error.
+        if (serviceStarted) {
+          serviceRequested = false
+          serviceStarted = false
+          context.stopService(Intent(context, LanSyncService::class.java))
+        }
         refreshPeers(reset = true)
       }
       synchronized(gate) {
@@ -267,6 +442,8 @@ class LanClipboard private constructor(private val context: Context) {
     pairingMode = mode
     pairingPin = code
     pairingExpires = System.currentTimeMillis() + 120_000
+    pairingAttempts = 0
+    advertisement.update(if (mutable.value.listening) mutable.value.port else 0, mode)
     synchronized(tried) { tried.clear() }
     update {
       it.copy(
@@ -293,7 +470,7 @@ class LanClipboard private constructor(private val context: Context) {
           val wanted = if (pairingMode == "show") "join" else "show"
           val peer =
               if(target.isNotEmpty()) NearbyClipboard("",target,wanted) else mutable.value.nearby.firstOrNull {
-                it.mode == wanted && synchronized(tried) { it.address !in tried }
+                it.id != id && it.mode == wanted && (!it.dial || id < it.id) && synchronized(tried) { it.address !in tried }
               }
           if (peer != null) {
             synchronized(tried) { tried.add(peer.address) }
@@ -317,9 +494,11 @@ class LanClipboard private constructor(private val context: Context) {
   }
 
   fun cancelPair(resumeConnection: Boolean = true) = synchronized(control) {
+    pairingGeneration++
     pairingPin = ""
     pairingMode = ""
     pairingExpires = 0
+    advertisement.update(if (mutable.value.listening) mutable.value.port else 0, "")
     pairingJob?.cancel()
     pairingJob = null
     synchronized(control) {
@@ -410,9 +589,12 @@ class LanClipboard private constructor(private val context: Context) {
       if (!protocol("accept", now) { it.put("event", event) }.getBoolean("accepted")) return
       captureGeneration++ // A pending local image conversion must not overtake this event.
       latest = event
-      // Desktop listeners require a client's clip origin to match its authenticated ID.
-      // Remote clips update this phone only, and supersede pending local clipboard sends.
       broadcast(null)
+      // Server-role connections can receive relayed clips. Client-role desktop
+      // connections still send only this phone's own authenticated origin.
+      synchronized(control) {
+        connections.values.filter { it.incoming && it !== source }.forEach { it.outgoing.set(event) }
+      }
     }
     main.post {
       synchronized(gate) {
@@ -450,10 +632,184 @@ class LanClipboard private constructor(private val context: Context) {
     else appliedImage
   }
 
+  private fun equalProof(expected: String, actual: String) =
+      MessageDigest.isEqual(expected.toByteArray(Charsets.UTF_8), actual.toByteArray(Charsets.UTF_8))
+
+  private fun resumeProof(token: String, client: String, server: String, cert: String, nonce: String, challenge: String): JSONObject =
+      JSONObject(NativeBridge.feature(JSONObject().put("type", "pairResume").put("token", token)
+          .put("client", client).put("server", server).put("certificate", cert)
+          .put("nonce", nonce).put("challenge", challenge).toString()))
+
+  private fun advertised(message: JSONObject): List<String> {
+    val values = message.optJSONArray("addresses") ?: return emptyList()
+    return (0 until minOf(values.length(), 8)).mapNotNull {
+      runCatching { LanEndpoint.normalize(values.getString(it)) }.getOrNull()
+    }.distinct()
+  }
+
+  private fun claimIncoming(link: LanConnection, peerId: String, token: String) = synchronized(control) {
+    require(current(link) && peers.get(peerId) != null && token.isNotEmpty() && equalProof(token, peers.token(peerId))) { "设备已解除关联" }
+    val old = connections[peerId]
+    if (old != null && old !== link) {
+      val online = mutable.value.peers.any { it.id == peerId && it.connection.isNotEmpty() }
+      // If both endpoints dial simultaneously, the lower device ID keeps its
+      // outbound socket. An idle retry worker never blocks an inbound recovery.
+      require(!online && (old.socket.get()?.isClosed != false || (!old.incoming && id > peerId))) { "设备已有连接" }
+      old.close(scope)
+    }
+    link.peerId = peerId
+    connections[peerId] = link
+    inbound.remove(link)
+  }
+
+  private suspend fun incomingSession(socket: SSLSocket, link: LanConnection, cert: ByteArray) {
+    socket.soTimeout = 5000
+    socket.tcpNoDelay = true
+    socket.startHandshake()
+    socket.soTimeout = 200
+    val input = socket.inputStream.buffered(8192)
+    val output = socket.outputStream
+    fun send(message: JSONObject) {
+      output.write((message.toString() + "\n").toByteArray(Charsets.UTF_8))
+      output.flush()
+    }
+    var peerId = ""
+    var name = ""
+    var routes = emptyList<String>()
+    var formats = emptySet<String>()
+    var exchange = ""
+    var proof: JSONObject? = null
+    var expectedResume = ""
+    var trustedToken = ""
+    var ready = false
+    var authorized = false
+    val frame = ByteArrayOutputStream()
+    val started = System.currentTimeMillis()
+    var lastRead = started
+    var heartbeat = started
+    try {
+      while (currentCoroutineContext().isActive && current(link)) {
+        val now = System.currentTimeMillis()
+        require(ready || now - started < if (exchange.isNotEmpty()) 120_000 else 10_000) { "连接超时" }
+        require(now - lastRead < 45_000) { "连接已断开" }
+        if (ready) {
+          link.outgoing.getAndSet(null)?.let { event ->
+            if ((event.isNull("image") || imageInfo(event.getString("image"))?.optString("mime") in formats) &&
+                protocol("valid") { it.put("event", event) }.getBoolean("valid"))
+              send(JSONObject().put("type", "clip").put("clip", event))
+          }
+          if (now - heartbeat >= 15_000) { send(JSONObject().put("type", "ping")); heartbeat = now }
+        }
+        val byte = try { input.read() } catch (_: SocketTimeoutException) { continue }
+        if (byte < 0) break
+        lastRead = System.currentTimeMillis()
+        if (byte != 10) { require(frame.size() < if (ready) MAX_FRAME else 16 * 1024); frame.write(byte); continue }
+        val message = JSONObject(frame.toString("UTF-8"))
+        frame.reset()
+        when (message.getString("type")) {
+          "hello" -> {
+            require(peerId.isEmpty() && message.getInt("version") == 2)
+            peerId = message.getString("id")
+            name = message.getString("name").take(64)
+            require(peerId.matches(Regex("[a-fA-F0-9]{32}")) && peerId != id && name.isNotBlank())
+            routes = advertised(message)
+            formats = if (message.optBoolean("images")) {
+              val values = message.optJSONArray("imageFormats")
+              if (values == null) setOf("image/png") else (0 until minOf(values.length(), 16)).map { values.optString(it) }.toSet()
+            } else emptySet()
+            synchronized(control) {
+              require(current(link))
+              val saved = if (peers.get(peerId) != null) peers.token(peerId) else ""
+              trustedToken = saved
+              when {
+                saved.isNotEmpty() && equalProof(saved, message.optString("token")) -> authorized = true
+                saved.isNotEmpty() && !message.isNull("resume") -> {
+                  val challenge = UUID.randomUUID().toString().replace("-", "")
+                  val resume = resumeProof(saved, peerId, id, digest(cert), message.getString("resume"), challenge)
+                  expectedResume = resume.getString("client")
+                  send(JSONObject().put("type", "resume").put("id", id).put("challenge", challenge).put("proof", resume.getString("server")))
+                }
+                else -> {
+                  require(link.pairingGeneration == pairingGeneration && link.code.matches(Regex("[0-9]{6}")) && link.code == pairingPin &&
+                      System.currentTimeMillis() < link.expires && link.mode == pairingMode &&
+                      ((link.mode == "show" && message.optString("mode") == "join") ||
+                          (link.mode == "join" && message.optString("mode") == "show")) &&
+                      pairingAttempts < 5 && (peers.get(peerId) != null || peers.all().size < 8)) { "设备未关联或匹配码已失效" }
+                  val pending = pairingConnection
+                  require(pending == null || pending === link || !pending.active.get() || pending.job?.isActive != true ||
+                      (!pending.incoming && (pending.socket.get()?.isClosed != false || id > peerId))) { "关联正在进行" }
+                  pending?.takeIf { it !== link }?.close(scope)
+                  pairingConnection = link
+                  pairingAttempts++
+                  val begin = JSONObject(NativeBridge.feature(JSONObject().put("type", "pairBegin")
+                      .put("code", link.code).put("client", peerId).put("server", id).put("certificate", digest(cert)).toString()))
+                  exchange = begin.getString("handle")
+                  send(JSONObject().put("type", "pair").put("id", id).put("message", begin.getString("message")))
+                }
+              }
+            }
+          }
+          "resumeProof" -> {
+            require(!ready && expectedResume.isNotEmpty() && equalProof(expectedResume, message.getString("proof"))) { "设备身份验证失败" }
+            expectedResume = ""
+            authorized = true
+          }
+          "proof" -> {
+            require(!ready && exchange.isNotEmpty() && proof == null)
+            val finished = JSONObject(NativeBridge.feature(JSONObject().put("type", "pairFinish")
+                .put("handle", exchange).put("message", message.getString("message")).toString()))
+            exchange = ""
+            require(equalProof(finished.getString("client"), message.getString("proof"))) { "匹配码不正确" }
+            proof = finished
+            val token = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "")
+            // An inbound peer has no server certificate yet. A future reversed
+            // connection uses token-bound resume proofs before trusting its cert.
+            promote(link, LanPeer(peerId, name, "", routes.firstOrNull().orEmpty(), routes), token)
+            trustedToken = token
+            send(JSONObject().put("type", "paired").put("id", id).put("name", android.os.Build.MODEL)
+                .put("token", token).put("proof", finished.getString("server")))
+            authorized = true
+          }
+          "clip" -> {
+            require(ready)
+            val event = message.getJSONObject("clip")
+            require(event.getString("origin") == peerId) { "剪贴板来源无效" }
+            accept(event, link)
+          }
+          "ping" -> send(JSONObject().put("type", "pong"))
+          "pong" -> {}
+          else -> error("设备协议不兼容")
+        }
+        if (authorized && !ready) {
+          claimIncoming(link, peerId, trustedToken)
+          synchronized(control) {
+            require(peers.get(peerId) != null) { "设备已解除关联" }
+            if (routes.isNotEmpty()) remember(peerId, name, routes.first(), org.json.JSONArray(routes))
+            require(peers.token(peerId).isNotEmpty())
+          }
+          ready = true
+          val remote = socket.remoteSocketAddress as InetSocketAddress
+          val local = socket.localSocketAddress as InetSocketAddress
+          fun endpoint(value: InetSocketAddress): String {
+            val host = value.address.hostAddress!!.substringBefore('%')
+            return "${if (value.address is Inet4Address) host else "[$host]"}:${value.port}"
+          }
+          updatePeer(link, target = routes.firstOrNull().orEmpty(), connection = endpoint(remote), local = endpoint(local), message = "已连接")
+          send(JSONObject().put("type", "ready").put("id", id).put("name", android.os.Build.MODEL)
+              .put("images", true).put("imageFormats", IMAGE_FORMATS)
+              .put("addresses", org.json.JSONArray(if (mutable.value.listening) mutable.value.localAddresses else emptyList<String>())))
+          synchronized(gate) { latest?.let { link.outgoing.set(it) } }
+        }
+      }
+    } finally {
+      if (exchange.isNotEmpty()) runCatching { NativeBridge.feature(JSONObject().put("type", "pairCancel").put("handle", exchange).toString()) }
+    }
+  }
+
   private fun connect(address: String, pairing: Boolean, peerId: String? = null) {
     synchronized(control) {
       val link = LanConnection(peerId, if (pairing) pairingPin else "",
-          if (pairing) pairingMode else "", if (pairing) pairingExpires else 0)
+          if (pairing) pairingMode else "", if (pairing) pairingExpires else 0, pairingGeneration = pairingGeneration)
       if (pairing) {
         pairingConnection?.close(scope)
         pairingConnection = link
@@ -508,7 +864,7 @@ class LanClipboard private constructor(private val context: Context) {
 
   private fun promote(link: LanConnection, peer: LanPeer, token: String) {
     synchronized(control) {
-      if (!current(link) || pairingConnection !== link || pairingPin != link.code ||
+      if (!current(link) || pairingConnection !== link || link.pairingGeneration != pairingGeneration || pairingPin != link.code ||
           System.currentTimeMillis() >= link.expires) throw CancellationException("匹配码已失效")
       peers.paired(peer, token)
       link.peerId = peer.id
@@ -516,9 +872,11 @@ class LanClipboard private constructor(private val context: Context) {
       connections.put(peer.id, link)?.takeIf { it !== link }?.close(scope)
       pairingJob?.cancel()
       pairingJob = null
+      pairingGeneration++
       pairingPin = ""
       pairingMode = ""
       pairingExpires = 0
+      advertisement.update(if (mutable.value.listening) mutable.value.port else 0, "")
       update { it.copy(code = null, expires = 0) }
       refreshPeers()
     }
@@ -533,7 +891,9 @@ class LanClipboard private constructor(private val context: Context) {
     val resolved = InetAddress.getAllByName(host).filter(LanEndpoint::allowed).sortedBy(LanEndpoint::overlay)
     require(resolved.isNotEmpty()) { "设备地址不属于局域网或 Tailscale" }
     val expectedPin = if (pairing) "" else peers.get(link.peerId!!)?.pin.orEmpty()
-    require(pairing || expectedPin.isNotEmpty())
+    val resuming = !pairing && expectedPin.isEmpty()
+    val nonce = UUID.randomUUID().toString().replace("-", "")
+    require(pairing || peers.token(link.peerId!!).isNotEmpty()) { "设备凭据不可用，请重新关联" }
     val trust =
         object : X509TrustManager {
           override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
@@ -543,7 +903,7 @@ class LanClipboard private constructor(private val context: Context) {
 
           override fun checkServerTrusted(chain: Array<X509Certificate>, auth: String) {
             require(chain.isNotEmpty())
-            if (!pairing) require(digest(chain[0].encoded) == expectedPin) { "设备身份已变化，请重新关联" }
+            if (!pairing && !resuming) require(digest(chain[0].encoded) == expectedPin) { "设备身份已变化，请重新关联" }
             // Initial certificate trust is established by certificate-bound SPAKE2 proofs.
           }
         }
@@ -582,13 +942,16 @@ class LanClipboard private constructor(private val context: Context) {
               .put("id", id)
               .put("name", android.os.Build.MODEL)
               .put("mode", if (pairing) sessionMode else "")
-              .put("token", if (pairing) "" else peers.token(link.peerId!!))
+              .put("token", if (pairing || resuming) "" else peers.token(link.peerId!!))
+              .put("resume", if (resuming) nonce else JSONObject.NULL)
+              .put("addresses", org.json.JSONArray(if (mutable.value.listening) mutable.value.localAddresses else emptyList<String>()))
       )
       var ready = false
       var imageFormats = emptySet<String>()
       var expectedProof = ""
       var pairingPeer = ""
       var pairedToken = ""
+      var resumed = false
       val frame = ByteArrayOutputStream()
 
       var heartbeat = System.currentTimeMillis()
@@ -608,12 +971,11 @@ class LanClipboard private constructor(private val context: Context) {
             heartbeat = System.currentTimeMillis()
           }
         }
-        val byte =
-            try {
-              input.read()
-            } catch (_: SocketTimeoutException) {
-              continue
-            }
+        val byte = try {
+          input.read()
+        } catch (_: SocketTimeoutException) {
+          continue
+        }
         if (byte < 0) break
         lastRead = System.currentTimeMillis()
         if (byte != 10) {
@@ -624,6 +986,18 @@ class LanClipboard private constructor(private val context: Context) {
         val message = JSONObject(frame.toString("UTF-8"))
         frame.reset()
         when (message.getString("type")) {
+          "resume" -> {
+            require(resuming && !resumed && !ready && message.getString("id") == link.peerId)
+            val proof = resumeProof(peers.token(link.peerId!!), id, link.peerId!!, digest(cert), nonce, message.getString("challenge"))
+            require(equalProof(proof.getString("server"), message.getString("proof"))) { "设备身份验证失败" }
+            send(JSONObject().put("type", "resumeProof").put("proof", proof.getString("client")))
+            synchronized(control) {
+              require(current(link))
+              val peer = peers.get(link.peerId!!) ?: error("设备已解除关联")
+              peers.upsert(peer.copy(pin = digest(cert)))
+            }
+            resumed = true
+          }
           "pair" -> {
             require(pairing && expectedProof.isEmpty() && sessionCode.matches(Regex("[0-9]{6}")))
             pairingPeer=message.getString("id")
@@ -682,7 +1056,7 @@ class LanClipboard private constructor(private val context: Context) {
             }
             if (pairing) {
               require(pairedToken.isNotEmpty() && message.getString("id")==pairingPeer)
-            } else require(message.getString("id") == link.peerId)
+            } else require(message.getString("id") == link.peerId && (!resuming || resumed))
             synchronized(control) {
               if (!current(link)) throw CancellationException()
               remember(link.peerId!!, message.getString("name"), address, message.optJSONArray("addresses"))
@@ -745,6 +1119,7 @@ class LanClipboard private constructor(private val context: Context) {
                     if (!LanEndpoint.allowed(host)) return
                     val address = "${if(host.address.size==16) "[${host.hostAddress}]" else host.hostAddress}:${info.port}"
                     val peerId = info.attributes["id"]?.toString(Charsets.UTF_8)
+                    if (peerId == id) return
                     val mode = info.attributes["mode"]?.toString(Charsets.UTF_8) ?: ""
                     if (peerId != null && peers.get(peerId) != null)
                         synchronized(discoveredAddresses) {discoveredAddresses[peerId]=(discoveredAddresses[peerId].orEmpty()+address).distinct().take(8)}
@@ -757,6 +1132,7 @@ class LanClipboard private constructor(private val context: Context) {
                                           address,
                                           mode,
                                           peerId ?: "",
+                                          info.attributes["dial"]?.toString(Charsets.UTF_8) == "1",
                                       ))
                                   .take(16)
                       )

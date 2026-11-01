@@ -96,7 +96,8 @@ internal class LanPeerStore(private val prefs: SharedPreferences, private val va
 }
 
 /** Each connection owns its socket and latest outgoing clip; closing one cannot detach another. */
-internal class LanConnection(@Volatile var peerId: String? = null, val code: String = "", val mode: String = "", val expires: Long = 0) {
+internal class LanConnection(@Volatile var peerId: String? = null, val code: String = "", val mode: String = "", val expires: Long = 0,
+    val incoming: Boolean = false, val pairingGeneration: Long = 0) {
   var job: Job? = null
   val active = AtomicBoolean(true)
   val socket = AtomicReference<Socket?>(null)

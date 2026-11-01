@@ -88,10 +88,26 @@ Incoming clipboard events share one deduplication journal; received content is
 not reissued as a new phone copy. Clipboard access still requires retype to be the
 default keyboard, and sensitive clipboard items are not sent.
 
-The page shows local IPv4 addresses and each connected device's local and remote
-address and port. Android initiates these connections and receives a separate
-automatically assigned local port for each connection. Address lists on Android,
-Windows and macOS hide IPv6 entries.
+Android can both initiate and accept connections, including connections from
+Windows, macOS and another Android device. All three platforms default to TCP
+port `50206`. The page shows the phone's IPv4 listening endpoints as `IP:port`,
+with an editable listening port and an explicit error if the port cannot be
+bound. A computer can enter that phone endpoint to pair manually; local service
+discovery advertises the same listener and the current pairing mode.
+
+The selected port, per-install TLS identity and per-device credentials survive
+restarts. Either device may display the matching code while the other enters it.
+Pairing uses the desktop certificate-bound proof protocol; already-associated
+devices can reverse connection roles with fresh token-bound proofs rather than
+trusting an unknown certificate. Incoming and outgoing connections share the
+same device list and duplicate-connection handling. Disabling sync closes the
+listener and peer sockets and withdraws its discovery advertisement.
+
+Enabled sync uses an Android connected-device foreground service so closing the
+settings activity does not close the listener; its notification can disable sync.
+Each connected device also shows its actual local and remote socket endpoints;
+an outgoing socket's temporary local port is distinct from the listening port.
+Address lists on Android, Windows and macOS hide IPv6 entries.
 
 ## Updates and release signing
 
@@ -209,6 +225,53 @@ arguments `multiA`, `multiB`, `multiAId` and `multiBId`. Use the validation appl
 ID (`-PretypeValidationBuild=true`) with that APK selected as the emulator's keyboard.
 This checks independent pairing, phone clipboard fan-out, incoming original JPEG,
 offline/reconnect behavior, disable/re-enable and removing just one peer.
+
+`LanInboundTest` exercises real TLS 1.2/default TLS connections to the Android
+listener: incoming pairing, fresh resume proofs, two simultaneous devices,
+clipboard relay, individual unlink, disabled listeners, stable certificates,
+port conflicts, cancelled offers, unauthenticated messages and rapid foreground
+service restarts. `LanPageTest` checks the visible IPv4 listening endpoints and
+port editor. Use the validation application ID to keep these fixtures isolated.
+
+For a production desktop-client acceptance test, forward an emulator listener
+with `adb -s emulator-5554 forward tcp:51206 tcp:50206`. Run
+`LanDesktopInboundTest` with instrumentation argument `desktopInbound=true` and
+the validation APK selected as that emulator's keyboard. In parallel, set
+`RETYPE_ANDROID_LISTENER=127.0.0.1:51206` and run
+`cargo test -p retype-sync android_listener_accepts_production_desktop_pairing_and_resume -- --ignored --nocapture`.
+This exercises desktop-initiated pairing, bidirectional text, original PNG
+reception, persistent certificate identity and desktop token-bound resume proofs.
+
+Discovery acceptance uses an independent desktop mDNS browser. Run
+`LanDiscoveryHostTest` with `discoveryHost=true`, read its synthetic device ID
+from `cache/lan-discovery-id.txt` via `adb shell run-as` for the validation app,
+then set `RETYPE_ANDROID_DISCOVERY_ID` to that ID and run
+`cargo test -p retype-sync android_listener_announces_modes_to_desktop_browser -- --ignored --nocapture`.
+The browser checks the shared port, Android platform/dial attributes, show/join/idle
+mode transitions and withdrawal. The discovery host never selects an input method
+or writes the system clipboard.
+
+`LanPhoneToPhoneTest` runs on two isolated Android environments with the
+validation APK selected as each environment's keyboard. Start one with
+`phoneRole=server`; start the other with `phoneRole=client` and an explicit
+`phoneAddress`. Both listeners retain port `50206`; emulator port forwarding can
+provide the explicit route. The test exchanges text in both directions and
+checks that a PNG roundtrip preserves the original bytes.
+
+TLS keys authorize pre-hashed ECDSA signing as required by the
+[Android Keystore TLS guidance](https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setDigests(java.lang.String...)).
+The enabled listener uses Android's
+[connected-device foreground service type](https://developer.android.com/develop/background-work/services/fgs/service-types#connected-device)
+and [NSD registration](https://developer.android.com/develop/connectivity/wifi/use-nsd).
+
+Listener validation on 2026-11-01 passed nine Android 15 emulator regressions,
+the production Windows client's incoming-pair/resume/text/PNG acceptance test,
+the independent desktop discovery-mode/withdrawal test and a two-emulator Android
+text/byte-identical PNG roundtrip. ARM64 and x86_64 JNI builds, Android unit tests,
+debug/test APK builds, lint and scoped strict Clippy passed. The three affected
+Rust library suites passed 33 tests when run serially. These new listener checks
+used isolated validation applications; no physical phone's input-method selection
+or production pairing records were changed.
 
 A3 has been exercised on an Android 15 ARM64 phone and an Android 15 x86_64
 emulator: all 12 connected tests passed, including real editor translation,

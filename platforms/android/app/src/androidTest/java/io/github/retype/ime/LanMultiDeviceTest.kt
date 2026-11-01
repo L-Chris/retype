@@ -53,7 +53,7 @@ class LanMultiDeviceTest {
         assertTrue(peer.connection.substringAfterLast(':').toInt() > 0)
       }
       waitFor { lan.state.value.localAddresses.isNotEmpty() }
-      assertTrue(lan.state.value.localAddresses.all { !it.contains(':') })
+      assertTrue(lan.state.value.localAddresses.all { LanEndpoint.visible(it) && it.endsWith(":${lan.state.value.port}") })
       waitFor { lan.pasteText() == "multi-from-a" }
       assertTrue("Receiving A's clip must not break B's authenticated connection", online(b))
       copy("multi-from-phone")

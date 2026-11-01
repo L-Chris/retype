@@ -222,7 +222,9 @@ pub fn perform(v: Value) -> Result<Value> {
                 _ => Err("剪贴板操作无效".into()),
             }
         }
-        "pairBegin" | "pairFinish" | "pairCancel" => retype_sync::pairing::mobile(&v),
+        "pairBegin" | "pairFinish" | "pairCancel" | "pairResume" => {
+            retype_sync::pairing::mobile(&v)
+        }
         "models" => {
             let p: Provider =
                 serde_json::from_value(v["provider"].clone()).map_err(|e| e.to_string())?;
