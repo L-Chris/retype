@@ -559,7 +559,7 @@ class LanClipboard private constructor(private val context: Context) {
       try {candidate.connect(InetSocketAddress(ip,port),3000);connected=candidate;break}
       catch(error: Exception){candidate.close();android.util.Log.i("retype-lan","TCP connection failed: $address (${error.javaClass.simpleName})")}
     }
-    val connection=connected?:error("设备连接失败，请检查路由、防火墙和同步端口")
+    val connection=connected?:throw java.io.IOException("设备连接失败，请检查路由、防火墙和同步端口")
     try {
       connection.soTimeout = 5000
       connection.startHandshake()

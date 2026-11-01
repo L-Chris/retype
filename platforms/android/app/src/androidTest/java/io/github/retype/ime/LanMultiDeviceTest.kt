@@ -41,6 +41,13 @@ class LanMultiDeviceTest {
       assertEquals(2, lan.state.value.peers.size)
       assertEquals(originalA, store.get(a)!! to store.token(a))
       assertNotEquals(store.token(a), store.token(b))
+      val bToken = store.token(b)
+      // A wrong route pointing at B must fail A's certificate pin, then fall back to A.
+      lan.setAddresses(a, "10.0.2.2:$bPort, 10.0.2.2:$aPort")
+      waitFor { online(a) && online(b) }
+      assertEquals(originalA.first.pin, store.get(a)!!.pin)
+      assertEquals(originalA.second, store.token(a))
+      assertEquals(bToken, store.token(b))
       for (peer in lan.state.value.peers) {
         assertTrue(peer.localAddress.substringAfterLast(':').toInt() > 0)
         assertTrue(peer.connection.substringAfterLast(':').toInt() > 0)
