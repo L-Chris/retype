@@ -3,6 +3,165 @@ use std::io::{BufRead, BufReader};
 type Client = BufReader<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
 #[test]
+#[ignore = "requires an isolated Android discovery host on the same multicast network"]
+fn android_listener_announces_modes_to_desktop_browser() -> Result<()> {
+    let expected = std::env::var("RETYPE_ANDROID_DISCOVERY_ID")
+        .map_err(|_| "Set the isolated Android device ID")?;
+    if !config::valid_id(&expected) {
+        return Err("Invalid test device ID".into());
+    }
+    let daemon = mdns_sd::ServiceDaemon::new().map_err(|error| error.to_string())?;
+    let result = (|| -> Result<()> {
+        let events = daemon
+            .browse("_retype-clip._tcp.local.")
+            .map_err(|error| error.to_string())?;
+        let mut full_name = String::new();
+        for mode in [Some("show"), Some("join"), Some(""), None] {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(format!("No Android advertisement transition to {mode:?}"));
+                }
+                match events.recv_timeout(Duration::from_millis(200)) {
+                    Ok(mdns_sd::ServiceEvent::ServiceResolved(info))
+                        if info.get_property_val_str("id") == Some(expected.as_str()) =>
+                    {
+                        assert_eq!(info.get_port(), DEFAULT_PORT);
+                        assert_eq!(info.get_property_val_str("platform"), Some("android"));
+                        assert_eq!(info.get_property_val_str("dial"), Some("1"));
+                        full_name = info.get_fullname().to_owned();
+                        if mode == info.get_property_val_str("mode") {
+                            break;
+                        }
+                    }
+                    Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name))
+                        if mode.is_none() && name == full_name =>
+                    {
+                        break
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    })();
+    let _ = daemon.shutdown();
+    result
+}
+
+#[test]
+#[ignore = "requires an isolated Android validation app and explicit adb-forwarded endpoint"]
+fn android_listener_accepts_production_desktop_pairing_and_resume() -> Result<()> {
+    let address: std::net::SocketAddr = std::env::var("RETYPE_ANDROID_LISTENER")
+        .map_err(|_| "Set RETYPE_ANDROID_LISTENER to the adb-forwarded test endpoint")?
+        .parse()
+        .map_err(|_| "Invalid Android fixture endpoint")?;
+    if !address.ip().is_loopback() {
+        return Err("Use an explicit loopback adb forward".into());
+    }
+    let desktop = Fixture::new()?;
+    let launch = |remote: String| {
+        let state = Arc::clone(&desktop.state);
+        let incoming = Arc::clone(&desktop.incoming);
+        let folder = desktop.root.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let quit = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            loop {
+                match outbound::connect(address, &remote, &state, &quit, &incoming, &folder) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if Instant::now() >= deadline || quit.load(Ordering::Relaxed) => {
+                        return Err(error)
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(200)),
+                }
+            }
+        });
+        (stop, worker)
+    };
+    let (stop, worker) = launch(String::new());
+    let first = (|| -> Result<String> {
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let remote = loop {
+            if let Some(id) = desktop
+                .state
+                .lock()
+                .map_err(|_| "lock")?
+                .status
+                .online
+                .first()
+                .cloned()
+            {
+                break id;
+            }
+            if worker.is_finished() || Instant::now() >= deadline {
+                return Err("Android did not accept desktop pairing".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        desktop.publish("desktop-to-android-listener")?;
+        assert_eq!(
+            desktop.receive(Duration::from_secs(20))?.text,
+            "android-server-received"
+        );
+        desktop.publish_image()?;
+        assert_eq!(
+            desktop.receive(Duration::from_secs(20))?.text,
+            "android-server-image-received"
+        );
+        Ok(remote)
+    })();
+    stop.store(true, Ordering::Relaxed);
+    worker.join().map_err(|_| "desktop client panicked")??;
+    let remote = first?;
+    let credentials = client_identity(&remote);
+    let token = credentials["token"]
+        .as_str()
+        .ok_or("missing paired token")?
+        .to_owned();
+    let pin = credentials["pin"]
+        .as_str()
+        .ok_or("missing paired certificate")?
+        .to_owned();
+    // Force the certificate-bound role-reversal proof used by existing pairings.
+    retype_ai::secrets::save_cloud_password(
+        &format!("lan-client-{remote}"),
+        &json!({"pin":"","token":token}).to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let (stop, worker) = launch(remote.clone());
+    let resumed = (|| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !desktop
+            .state
+            .lock()
+            .map_err(|_| "lock")?
+            .status
+            .online
+            .contains(&remote)
+        {
+            if worker.is_finished() || Instant::now() >= deadline {
+                return Err("Android resume failed".into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let resumed = client_identity(&remote);
+        assert_eq!(resumed["token"], token);
+        assert_eq!(resumed["pin"], pin);
+        desktop.publish("desktop-to-android-resumed")?;
+        assert_eq!(
+            desktop.receive(Duration::from_secs(20))?.text,
+            "android-server-resumed"
+        );
+        Ok(())
+    })();
+    stop.store(true, Ordering::Relaxed);
+    worker.join().map_err(|_| "desktop client panicked")??;
+    resumed
+}
+
+#[test]
 fn idle_accepted_socket_waits_for_input_instead_of_spinning() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;

@@ -173,12 +173,22 @@ fun LanPage() {
   SettingsCard {
     Text("本机地址", style = MaterialTheme.typography.labelLarge, color = Color(0xFF657781))
     HorizontalDivider(color = Color(0xFFEDF1F3))
+    var port by remember(state.port) { mutableStateOf(state.port.toString()) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) },
+          label = { Text("监听端口") }, singleLine = true,
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+      ActionIconButton(ActionIcon.Check, "保存监听端口", primary = true,
+          enabled = port.toIntOrNull() in 1..65535) { clipboard.setPort(port) }
+    }
     SelectionContainer {
       Text(state.localAddresses.joinToString("\n").ifEmpty { "暂无可用网络地址" },
           style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
     }
-    Text("连接端口自动分配，连接后显示在对应设备下方。",
+    Text(if (state.listening) "其他设备可填写以上地址关联本机。" else "开启同步后监听此端口。",
         style = MaterialTheme.typography.bodySmall, color = Color(0xFF657781))
+    if (state.listenerError.isNotEmpty()) Text(state.listenerError,
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
   }
 }
 

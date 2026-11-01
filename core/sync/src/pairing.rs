@@ -124,12 +124,57 @@ pub fn mobile(v: &serde_json::Value) -> Result<serde_json::Value> {
             sessions.remove(text("handle")?);
             Ok(serde_json::json!({}))
         }
+        "pairResume" => {
+            let proof = Proof::resume(
+                text("token")?,
+                text("client")?,
+                text("server")?,
+                text("certificate")?,
+                text("nonce")?,
+                text("challenge")?,
+            )?;
+            Ok(serde_json::json!({"client":proof.tag("client")?,"server":proof.tag("server")?}))
+        }
         _ => Err("无效的关联操作".into()),
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mobile_resume_proofs_match_desktop_and_bind_both_transport_roles() -> Result<()> {
+        let request = serde_json::json!({"type":"pairResume", "token":"a".repeat(64),
+            "client":"b".repeat(32), "server":"c".repeat(32), "certificate":"d".repeat(64),
+            "nonce":"e".repeat(32), "challenge":"f".repeat(32)});
+        let mobile = mobile(&request)?;
+        let desktop = Proof::resume(
+            &"a".repeat(64),
+            &"b".repeat(32),
+            &"c".repeat(32),
+            &"d".repeat(64),
+            &"e".repeat(32),
+            &"f".repeat(32),
+        )?;
+        desktop.verify("client", mobile["client"].as_str().ok_or("missing proof")?)?;
+        desktop.verify("server", mobile["server"].as_str().ok_or("missing proof")?)?;
+        for field in [
+            "token",
+            "client",
+            "server",
+            "certificate",
+            "nonce",
+            "challenge",
+        ] {
+            let mut changed = request.clone();
+            let old = changed[field].as_str().ok_or("missing field")?;
+            changed[field] = serde_json::json!("0".repeat(old.len()));
+            let proof = super::mobile(&changed)?;
+            assert!(desktop
+                .verify("client", proof["client"].as_str().ok_or("missing proof")?)
+                .is_err());
+        }
+        Ok(())
+    }
     #[test]
     fn matching_code_authenticates_and_binds_certificate() -> Result<()> {
         let a = "a".repeat(32);

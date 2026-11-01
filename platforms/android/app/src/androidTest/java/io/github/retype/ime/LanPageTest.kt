@@ -46,15 +46,15 @@ class LanPageTest {
       assertFalse(hierarchy.contains("fd7a:"))
       assertTrue(hierarchy.contains("100.64.0.1:50206"))
       repeat(5) {
-        if (find(By.textContains("连接端口自动分配")) == null) {
+        if (find(By.textContains("其他设备可填写以上地址")) == null) {
           device.swipe(device.displayWidth / 2, device.displayHeight * 4 / 5,
               device.displayWidth / 2, device.displayHeight / 3, 20)
         }
       }
       assertNotNull(find(By.text("本机地址")))
-      assertNotNull(find(By.textContains("连接端口自动分配")))
+      assertNotNull(find(By.textContains("其他设备可填写以上地址")))
       assertTrue(lan.state.value.localAddresses.isNotEmpty())
-      assertTrue(lan.state.value.localAddresses.all { !it.contains(':') })
+      assertTrue(lan.state.value.localAddresses.all { LanEndpoint.visible(it) && it.endsWith(":${lan.state.value.port}") })
       device.takeScreenshot(File(context.cacheDir, "lan-multiple-ipv4.png"))
     } finally {
       device.dumpWindowHierarchy(File(context.cacheDir, "lan-ui-final.xml"))
