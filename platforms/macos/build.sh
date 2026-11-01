@@ -30,6 +30,7 @@ for arch in arm64 x86_64; do
     executables+=("$stage/retype-$arch")
 done
 xcrun lipo -create "${executables[@]}" -output "$bundle/Contents/MacOS/retype"
+cp -R platforms/macos/Resources/. "$bundle/Contents/Resources/"
 cp assets/logo.png "$bundle/Contents/Resources/logo.png"
 cp NOTICE.txt "$bundle/Contents/Resources/NOTICE.txt"
 cp LICENSE "$bundle/Contents/Resources/LICENSE.txt"

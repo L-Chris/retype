@@ -9,7 +9,14 @@
 [CmdletBinding()]
 param([switch]$Uninstall, [switch]$Verify)
 $ErrorActionPreference = 'Stop'
-$tip = '0804:{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
+$entries = @(
+  @{ Language = [ushort]0x0804; Profile = 'A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74'; Name = 'retype Chinese' },
+  @{ Language = [ushort]0x0409; Profile = '8E082735-45E3-4D99-8BCA-A5CD3591C4E6'; Name = 'retype English' }
+)
+foreach ($entry in $entries) {
+  $entry.Tip = ('{0:X4}:{{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}}{{{1}}}' -f $entry.Language, $entry.Profile)
+}
+$tips = @($entries | ForEach-Object { $_.Tip })
 
 function Get-UserTips {
   @(Get-WinUserLanguageList | ForEach-Object { $_.InputMethodTips })
@@ -26,11 +33,13 @@ if ($Uninstall) {
   if (Test-Path -LiteralPath $learningHost) {
     Start-Process -FilePath $learningHost -ArgumentList '--stop' -WindowStyle Hidden -Wait | Out-Null
   }
-  if ($before -notcontains $tip) { return }
+  if (-not @($before | Where-Object { $tips -contains $_ }).Count) { return }
 }
 if (-not $Uninstall) {
-  $profile = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\0x00000804\{A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74}'
-  if (-not (Test-Path -LiteralPath $profile)) { throw 'Install retype before adding its keyboard.' }
+  foreach ($entry in $entries) {
+    $profile = ('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\CTF\TIP\{7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52}\LanguageProfile\0x{0:x8}\{{{1}}}' -f $entry.Language, $entry.Profile)
+    if (-not (Test-Path -LiteralPath $profile)) { throw "Install $($entry.Name) before adding its keyboard." }
+  }
 }
 if (-not ('Retype.UserInputProfile' -as [type])) {
   Add-Type -TypeDefinition @'
@@ -58,26 +67,26 @@ namespace Retype {
         void IsEnabledLanguageProfile(ref Guid clsid, ushort lang, ref Guid profile, [MarshalAs(UnmanagedType.Bool)] out bool enabled);
     }
     public static class UserInputProfile {
-        public static bool IsEnabled() {
+        public static bool IsEnabled(ushort language, string profileId) {
             var instance = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("33C53A50-F456-4884-B049-85FD643ECFED")));
             try {
                 var profiles = (IInputProcessorProfiles)instance;
                 var clsid = new Guid("7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52");
-                var profile = new Guid("A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74");
+                var profile = new Guid(profileId);
                 bool enabled;
-                profiles.IsEnabledLanguageProfile(ref clsid, 0x0804, ref profile, out enabled);
+                profiles.IsEnabledLanguageProfile(ref clsid, language, ref profile, out enabled);
                 return enabled;
             } finally { Marshal.ReleaseComObject(instance); }
         }
-        public static void SetEnabled(bool enabled) {
+        public static void SetEnabled(ushort language, string profileId, bool enabled) {
             var instance = Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("33C53A50-F456-4884-B049-85FD643ECFED")));
             try {
                 var profiles = (IInputProcessorProfiles)instance;
                 var clsid = new Guid("7E4C9A21-5B38-4D2E-9F6A-1C0D8E7B4A52");
-                var profile = new Guid("A3F1C6D9-2E47-4B8A-9C51-6D0E8F2A3B74");
-                profiles.EnableLanguageProfile(ref clsid, 0x0804, ref profile, enabled);
+                var profile = new Guid(profileId);
+                profiles.EnableLanguageProfile(ref clsid, language, ref profile, enabled);
                 bool actual;
-                profiles.IsEnabledLanguageProfile(ref clsid, 0x0804, ref profile, out actual);
+                profiles.IsEnabledLanguageProfile(ref clsid, language, ref profile, out actual);
                 if (actual != enabled) throw new InvalidOperationException("TSF profile enablement did not persist.");
             } finally {
                 Marshal.ReleaseComObject(instance);
@@ -93,8 +102,10 @@ namespace Retype {
 }
 # 0 = append/enable, 1 = uninstall. Never change the user's default input method.
 if ($Verify) {
-  if ($before -notcontains $tip -or -not [Retype.UserInputProfile]::IsEnabled()) {
-    throw 'The current user keyboard is missing or disabled.'
+  foreach ($entry in $entries) {
+    if ($before -notcontains $entry.Tip -or -not [Retype.UserInputProfile]::IsEnabled($entry.Language, $entry.Profile)) {
+      throw "$($entry.Name) is missing or disabled for the current user."
+    }
   }
   return
 }
@@ -198,20 +209,21 @@ if (-not $Uninstall) {
   }
 }
 $flags = if ($Uninstall) { [uint32]1 } else { [uint32]0 }
-if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($tip, $flags)) {
-  throw 'InstallLayoutOrTip failed. The keyboard was not successfully configured.'
+foreach ($entry in $entries) {
+  if ($Uninstall -and $before -notcontains $entry.Tip) { continue }
+  if (-not [Retype.UserInputProfile]::InstallLayoutOrTip($entry.Tip, $flags)) {
+    throw "InstallLayoutOrTip failed for $($entry.Name)."
+  }
+  [Retype.UserInputProfile]::SetEnabled($entry.Language, $entry.Profile, -not [bool]$Uninstall)
 }
-# A keyboard-list entry can already exist while TSF still considers it disabled.
-# Set and verify current-user enablement independently; do not change the default.
-[Retype.UserInputProfile]::SetEnabled(-not [bool]$Uninstall)
-# Read the user language list, not only TSF's Enable registry value.
+# Verify both the keyboard list and TSF enablement; never change the default.
 for ($attempt = 0; $attempt -lt 10; $attempt++) {
   $after = @(Get-UserTips)
-  $present = $after -contains $tip
-  if ($present -ne [bool]$Uninstall) { break }
+  $pending = @($entries | Where-Object { ($after -contains $_.Tip) -eq [bool]$Uninstall })
+  if (-not $pending.Count) { break }
   Start-Sleep -Milliseconds 300
 }
-if ($present -eq [bool]$Uninstall) { throw 'Windows has not reflected the requested keyboard change in the user language list.' }
-$missing = @($before | Where-Object { $_ -ne $tip -and $after -notcontains $_ })
+if ($pending.Count) { throw 'Windows has not reflected the requested keyboard changes in the user language list.' }
+$missing = @($before | Where-Object { $tips -notcontains $_ -and $after -notcontains $_ })
 if ($missing.Count) { throw "Other keyboard entries changed during registration: $($missing -join ', ')" }
 Write-Host $(if ($Uninstall) { 'retype removed from the current user keyboard list.' } else { 'retype added to the current user keyboard list. Use Win+Space in a desktop app.' })

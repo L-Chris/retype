@@ -7,6 +7,8 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputMethodSubtype
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -71,6 +73,7 @@ class RetypeImeService :
   private var voiceInput: VoiceInput? = null
   private var voiceGeneration = 0L
   private var voicePending = false
+  private var selectedSubtype: InputMethodSubtype? = null
   private var modifierTap = 0
   private var modifierUsed = false
 
@@ -189,7 +192,8 @@ class RetypeImeService :
         "start input epoch=$current restart=$restarting literal=${policy.literal} ascii=${policy.ascii}",
     )
     val preferences = getSharedPreferences("settings", MODE_PRIVATE)
-    val chinese = !policy.ascii && preferences.getBoolean("chinese", true)
+    val subtype = selectedSubtype ?: getSystemService(InputMethodManager::class.java).currentInputMethodSubtype
+    val chinese = !policy.ascii && subtype?.languageTag != "en-US" && subtype?.locale != "en_US"
     val flypy = preferences.getBoolean("flypy", false)
     Log.d("retype", "session scheme=${if (flypy) "flypy" else "full"} epoch=$current")
     state =
@@ -209,6 +213,29 @@ class RetypeImeService :
                 },
         )
     initializeSession(current, fieldPolicy, chinese, flypy)
+  }
+
+  override fun onCurrentInputMethodSubtypeChanged(newSubtype: InputMethodSubtype?) {
+    super.onCurrentInputMethodSubtypeChanged(newSubtype)
+    selectedSubtype = newSubtype
+    // Recreate through the same editor boundary as a field change: old marked text
+    // stays in its field and queued work cannot reach the new language session.
+    currentInputEditorInfo?.let { onStartInput(it, true) }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun selectEntry(chinese: Boolean) {
+    val manager = getSystemService(InputMethodManager::class.java)
+    val own = manager.inputMethodList.firstOrNull {
+      it.packageName == packageName && it.serviceName == RetypeImeService::class.java.name
+    } ?: return
+    val target = (0 until own.subtypeCount).map { own.getSubtypeAt(it) }
+        .firstOrNull { (it.languageTag == "en-US" || it.locale == "en_US") != chinese } ?: return
+    if (android.os.Build.VERSION.SDK_INT >= 28) {
+      switchInputMethod(own.id, target)
+    } else {
+      window?.window?.attributes?.token?.let { manager.setInputMethodAndSubtype(it, own.id, target) }
+    }
   }
 
   private fun initializeSession(current: Long, fieldPolicy: EditorPolicy, chinese: Boolean, flypy: Boolean) {
@@ -268,7 +295,7 @@ class RetypeImeService :
     }
   }
 
-  private fun command(command: NativeCommand, passthrough: (() -> Boolean)? = null) {
+  private fun command(command: NativeCommand, afterApplied: (() -> Unit)? = null, passthrough: (() -> Boolean)? = null) {
     val queuedAt = System.nanoTime()
     val current = epoch
     val ic = connection ?: return
@@ -359,11 +386,6 @@ class RetypeImeService :
           }
           state = state.withNativeUpdate(update)
           if (switching)
-              getSharedPreferences("settings", MODE_PRIVATE)
-                  .edit()
-                  .putBoolean("chinese", state.chinese)
-                  .apply()
-          if (switching)
               Log.d(
                   "retype",
                   "mode UI chinese=${state.chinese} lifecycle=${registry.currentState}",
@@ -376,6 +398,9 @@ class RetypeImeService :
         }
       }
       NativeBridge.acknowledge(handle, generation, accepted)
+      if (accepted && afterApplied != null) withContext(Dispatchers.Main) {
+        if (epoch == current && connection === ic) afterApplied()
+      }
       InputPerformance.record(queuedAt, nativeStarted, nativeFinished, editorStarted, editorFinished, update.candidateTotal)
     }
   }
@@ -490,11 +515,11 @@ class RetypeImeService :
     if (policy.literal) return
     if (state.resourcesMissing) {
       finishStatistics()
-      state = state.copy(chinese = !state.chinese)
-      getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("chinese", state.chinese).apply()
+      selectEntry(!state.chinese)
       return
     }
-    command(NativeCommand.toggle())
+    val targetChinese = !state.chinese
+    command(NativeCommand.toggle(), afterApplied = { selectEntry(targetChinese) })
   }
 
   private fun requestCandidates(generation: Long, start: Int) {

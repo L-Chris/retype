@@ -186,6 +186,9 @@ impl ITfEditSession_Impl for Edit_Impl {
             self.state.writing.store(true, Ordering::SeqCst);
             let result = guarded(|| self.run(ec, &mut timing));
             self.state.writing.store(false, Ordering::SeqCst);
+            if result.is_ok() && matches!(self.work, Work::Toggle) {
+                crate::profiles::schedule(&self.state);
+            }
             if result.is_ok() && self.synchronous {
                 self.completed.store(true, Ordering::SeqCst);
             }

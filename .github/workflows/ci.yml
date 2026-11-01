@@ -85,6 +85,7 @@ jobs:
     uses: ./.github/workflows/windows.yml
     with:
       version: '0.0.0'
+      register-tip: true
 
   version-consistency:
     name: 版本号一致性

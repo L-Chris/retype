@@ -155,6 +155,7 @@ pub struct TipState {
     preserved_translation: Mutex<Option<retype_ai::config::Shortcut>>,
     preserved_voice: Mutex<Option<retype_ai::config::Shortcut>>,
     mode_bridge: Mutex<Option<crate::langbar::ModeBridge>>,
+    pub(crate) entry_bridge: Mutex<Option<crate::profiles::EntryBridge>>,
     pub(crate) stats_clock: Mutex<stats::ActivityClock>,
 }
 impl TipState {
@@ -184,6 +185,7 @@ impl TipState {
             preserved_translation: Mutex::new(None),
             preserved_voice: Mutex::new(None),
             mode_bridge: Mutex::new(None),
+            entry_bridge: Mutex::new(None),
             stats_clock: Mutex::new(stats::ActivityClock::default()),
         })
     }
@@ -246,6 +248,13 @@ impl TipState {
         if let Ok(bridge) = crate::langbar::ModeBridge::attach(self, &mgr) {
             *lock(&self.mode_bridge) = Some(bridge);
         }
+        match crate::profiles::EntryBridge::attach(self, &mgr) {
+            Ok(bridge) => *lock(&self.entry_bridge) = Some(bridge),
+            Err(error) => tracing::warn!("TSF input entry notifications unavailable: {error}"),
+        }
+        if let Some(chinese) = crate::profiles::active_chinese() {
+            crate::profiles::apply(self, chinese)?;
+        }
         match crate::langbar::LanguageBar::attach(self, &mgr) {
             Ok(bar) => *lock(&self.language_bar) = Some(bar),
             Err(error) => {
@@ -263,6 +272,8 @@ impl TipState {
         self.activated.store(false, Ordering::SeqCst);
         *lock(&self.shift_tap) = ShiftTap::default();
         lock(&self.stats_clock).reset();
+        let entry = lock(&self.entry_bridge).take();
+        drop(entry);
         let bridge = lock(&self.mode_bridge).take();
         drop(bridge);
         self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -422,26 +433,6 @@ impl TipState {
         lock(&self.session).clone()
     }
     pub(crate) fn notify_language_bar(&self) {
-        let compartment = lock(&self.mode_bridge)
-            .as_ref()
-            .map(|bridge| bridge.compartment.clone());
-        if let (Some(compartment), Some(session)) = (compartment, self.session()) {
-            let value = i32::from(session.backend.with_kernel(|k| k.is_chinese()));
-            // SAFETY: Publish OS IME state outside locks; the callback compares before applying.
-            unsafe {
-                if compartment
-                    .GetValue()
-                    .ok()
-                    .and_then(|v| i32::try_from(&v).ok())
-                    != Some(value)
-                {
-                    let _ = compartment.SetValue(
-                        self.tid.load(Ordering::SeqCst),
-                        &windows::Win32::System::Variant::VARIANT::from(value),
-                    );
-                }
-            }
-        }
         let sink = lock(&self.language_bar).as_ref().and_then(|bar| bar.sink());
         if let Some(sink) = sink {
             // SAFETY: Callback is on the owning TSF apartment, outside state locks.
@@ -495,6 +486,19 @@ impl TipState {
         self.hide();
     }
     pub(crate) fn wants(&self, key: Key, mods: Modifiers) -> bool {
+        let compartment = lock(&self.mode_bridge)
+            .as_ref()
+            .map(|bridge| bridge.compartment.clone());
+        if let Some(compartment) = compartment {
+            // SAFETY: Read this apartment's service switch, independent of language.
+            if unsafe { compartment.GetValue() }
+                .ok()
+                .and_then(|value| i32::try_from(&value).ok())
+                == Some(0)
+            {
+                return false;
+            }
+        }
         let Some(session) = self.session() else {
             return false;
         };

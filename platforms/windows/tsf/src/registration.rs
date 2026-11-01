@@ -82,7 +82,6 @@ pub fn register() -> Result<()> {
     // Keep NUL terminators in backing storage even though the API takes explicit
     // lengths. Some TSF registration paths read the buffers as PCWSTR and can
     // otherwise persist adjacent heap data in the profile description.
-    let description: Vec<u16> = DISPLAY_NAME.encode_utf16().chain([0]).collect();
     let icon_path: Vec<u16> = path.iter().copied().chain([0]).collect();
     let key_path: Vec<u16> = format!("{}\\InprocServer32\0", class_key())
         .encode_utf16()
@@ -114,26 +113,29 @@ pub fn register() -> Result<()> {
             &"Apartment".encode_utf16().collect::<Vec<_>>(),
         )?;
         profiles.Register(&CLSID_RETYPE_TIP)?;
-        profiles.AddLanguageProfile(
-            &CLSID_RETYPE_TIP,
-            LANGID_ZH_CN,
-            &GUID_PROFILE_RETYPE,
-            &description[..description.len() - 1],
-            &icon_path[..icon_path.len() - 1],
-            0,
-        )?;
+        for (language, profile, name) in INPUT_PROFILES {
+            let description: Vec<u16> = name.encode_utf16().chain([0]).collect();
+            profiles.AddLanguageProfile(
+                &CLSID_RETYPE_TIP,
+                *language,
+                profile,
+                &description[..description.len() - 1],
+                &icon_path[..icon_path.len() - 1],
+                0,
+            )?;
+            profiles.EnableLanguageProfileByDefault(
+                &CLSID_RETYPE_TIP,
+                *language,
+                profile,
+                false,
+            )?;
+        }
         for category in CATEGORIES {
             categories.RegisterCategory(&CLSID_RETYPE_TIP, category, &CLSID_RETYPE_TIP)?;
         }
         // user-profile.ps1 both enrolls the keyboard with InstallLayoutOrTip and
         // enables it for the original desktop user with EnableLanguageProfile.
         // Neither operation alone guarantees a listed, switchable keyboard.
-        profiles.EnableLanguageProfileByDefault(
-            &CLSID_RETYPE_TIP,
-            LANGID_ZH_CN,
-            &GUID_PROFILE_RETYPE,
-            false,
-        )?;
     }
     Ok(())
 }
@@ -302,37 +304,40 @@ mod tests {
             }
             let profiles: ITfInputProcessorProfiles =
                 CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
-            let description = profiles.GetLanguageProfileDescription(
-                &CLSID_RETYPE_TIP,
-                LANGID_ZH_CN,
-                &GUID_PROFILE_RETYPE,
-            )?;
-            assert_eq!(
-                description.to_string(),
-                DISPLAY_NAME,
-                "registered profile name must not contain trailing heap data"
-            );
-            assert!(profiles
-                .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, LANGID_ZH_CN, &GUID_PROFILE_RETYPE)?
-                .as_bool());
-            let enumeration = profiles.EnumLanguageProfiles(LANGID_ZH_CN)?;
-            let mut found = false;
-            loop {
-                let mut entries = [TF_LANGUAGEPROFILE::default()];
-                let mut fetched = 0;
-                enumeration.Next(&mut entries, &mut fetched)?;
-                if fetched == 0 {
-                    break;
+            for (language, profile, name) in INPUT_PROFILES {
+                let description = profiles.GetLanguageProfileDescription(
+                    &CLSID_RETYPE_TIP,
+                    *language,
+                    profile,
+                )?;
+                assert_eq!(
+                    description.to_string(),
+                    *name,
+                    "registered profile name must not contain trailing heap data"
+                );
+                assert!(profiles
+                    .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, *language, profile)?
+                    .as_bool());
+                let enumeration = profiles.EnumLanguageProfiles(*language)?;
+                let mut found = false;
+                loop {
+                    let mut entries = [TF_LANGUAGEPROFILE::default()];
+                    let mut fetched = 0;
+                    enumeration.Next(&mut entries, &mut fetched)?;
+                    if fetched == 0 {
+                        break;
+                    }
+                    if entries[0].clsid == CLSID_RETYPE_TIP && entries[0].guidProfile == *profile {
+                        assert_eq!(entries[0].catid, GUID_TFCAT_TIP_KEYBOARD);
+                        found = true;
+                        break;
+                    }
                 }
-                if entries[0].clsid == CLSID_RETYPE_TIP
-                    && entries[0].guidProfile == GUID_PROFILE_RETYPE
-                {
-                    assert_eq!(entries[0].catid, GUID_TFCAT_TIP_KEYBOARD);
-                    found = true;
-                    break;
-                }
+                assert!(
+                    found,
+                    "{name} must appear among its language keyboard profiles"
+                );
             }
-            assert!(found, "retype must appear among Chinese keyboard profiles");
             let _tip: ITfTextInputProcessorEx =
                 CoCreateInstance(&CLSID_RETYPE_TIP, None, CLSCTX_INPROC_SERVER)?;
         }
