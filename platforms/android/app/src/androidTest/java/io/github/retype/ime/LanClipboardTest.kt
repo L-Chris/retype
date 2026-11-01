@@ -23,19 +23,21 @@ class LanClipboardTest {
     val context = instrumentation.targetContext
     val lan = LanClipboard.get(context)
     try {
-      lan.unlink()
+      lan.unlinkAllForTest()
       lan.pairForTest("10.0.2.2:$port", "123456", InstrumentationRegistry.getArguments().getString("phoneShow") == "true")
       withTimeout(15_000) { while (lan.state.value.text != "电脑文字\nHello 👋") delay(50) }
       assertEquals("电脑文字\nHello 👋", lan.pasteText())
       val prefs=context.getSharedPreferences("lanClipboard",android.content.Context.MODE_PRIVATE)
-      val before=listOf(prefs.getString("peer", ""),prefs.getString("pin", ""),SecretVault(context).get("lan-token"))
-      // Add a failing candidate, then reconnect through a different saved route.
-      // The peer identity and credentials must remain unchanged, without a new code.
-      lan.setAddresses("10.0.2.2:1, 10.0.2.2:$port")
-      withTimeout(15_000) {while(lan.state.value.connection!="10.0.2.2:$port" || lan.state.value.message!="已连接") delay(50)}
-      assertEquals(before,listOf(prefs.getString("peer", ""),prefs.getString("pin", ""),SecretVault(context).get("lan-token")))
+      val store = LanPeerStore(prefs, SecretVault(context))
+      val peer = store.all().single()
+      val before = peer.pin to store.token(peer.id)
+      // A changed route must keep the device identity and its own credential.
+      lan.setAddresses(peer.id, "10.0.2.2:1, 10.0.2.2:$port")
+      withTimeout(15_000) { while(lan.state.value.peers.single().connection != "10.0.2.2:$port") delay(50) }
+      assertEquals(before, store.get(peer.id)!!.pin to store.token(peer.id))
       assertNull(lan.state.value.code)
-      assertEquals("10.0.2.2:$port", lan.state.value.target)
+      assertEquals("10.0.2.2:$port", lan.state.value.peers.single().target)
+      assertTrue(lan.state.value.peers.single().localAddress.substringAfterLast(':').toInt() > 0)
       instrumentation.runOnMainSync {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         assertEquals("电脑文字\nHello 👋", clipboard.primaryClip?.getItemAt(0)?.text?.toString())
@@ -82,7 +84,7 @@ class LanClipboardTest {
       instrumentation.runOnMainSync { lan.enable(false) }
       assertNull(lan.pasteText())
     } finally {
-      lan.unlink()
+      lan.unlinkAllForTest()
     }
   }
 }

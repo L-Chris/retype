@@ -57,6 +57,13 @@ mod test_secrets {
         ffi::{c_char, CStr},
         sync::{Mutex, OnceLock},
     };
+    thread_local! { static NAMESPACE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) }; }
+    pub fn namespace(value: &str) {
+        NAMESPACE.with(|v| *v.borrow_mut() = value.to_owned());
+    }
+    fn key(account: &str) -> String {
+        NAMESPACE.with(|v| format!("{}{account}", v.borrow()))
+    }
     fn store() -> &'static Mutex<BTreeMap<String, String>> {
         static STORE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
         STORE.get_or_init(Default::default)
@@ -67,7 +74,7 @@ mod test_secrets {
         };
         let name = CStr::from_ptr(account).to_string_lossy();
         let value = values
-            .get(name.as_ref())
+            .get(&key(&name))
             .map(String::as_bytes)
             .unwrap_or_default();
         if value.len() > capacity {
@@ -80,7 +87,7 @@ mod test_secrets {
         let Ok(mut values) = store().lock() else {
             return false;
         };
-        let name = CStr::from_ptr(account).to_string_lossy().into_owned();
+        let name = key(&CStr::from_ptr(account).to_string_lossy());
         let value = CStr::from_ptr(value).to_string_lossy().into_owned();
         if value.is_empty() {
             values.remove(&name);
@@ -105,6 +112,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Result<Self> {
+        Self::with_namespace(String::new())
+    }
+    fn with_namespace(_namespace: String) -> Result<Self> {
         #[cfg(target_os = "macos")]
         test_secrets::register();
         let certificate = rcgen::generate_simple_self_signed(vec!["retype.local".into()])
@@ -165,7 +175,10 @@ impl Fixture {
                     let der = der.clone();
                     let folder = folder.clone();
                     let tx = Arc::clone(&tx);
+                    let _namespace = _namespace.clone();
                     sessions.push(std::thread::spawn(move || {
+                        #[cfg(target_os = "macos")]
+                        test_secrets::namespace(&_namespace);
                         let _ = session(socket, tls, &der, &s, &folder, &quit, &tx);
                     }));
                 }
@@ -493,6 +506,81 @@ fn android_emulator_bidirectional_clipboard() -> Result<()> {
     }
     let _ = std::fs::remove_file(path);
     Err("Android test did not finish before timeout".into())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "opt-in Android emulator multi-device acceptance; two isolated TLS desktops"]
+fn android_emulator_multiple_devices() -> Result<()> {
+    let a = Fixture::with_namespace("multi-a/".into())?;
+    let b = Fixture::with_namespace("multi-b/".into())?;
+    let a_id = a.state.lock().map_err(|_| "lock")?.config.id.clone();
+    let b_id = b.state.lock().map_err(|_| "lock")?.config.id.clone();
+    let path = std::env::temp_dir().join("retype-lan-multi-ports.json");
+    config::write_json(
+        &path,
+        &json!({"a":a.address.port(),"b":b.address.port(),"aId":a_id,"bId":b_id}),
+    )?;
+    let wait_online = |fixture: &Fixture| -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while fixture
+            .state
+            .lock()
+            .map_err(|_| "lock")?
+            .status
+            .online
+            .is_empty()
+        {
+            if Instant::now() >= deadline {
+                return Err("Android did not connect to both desktops".into());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(())
+    };
+    let timeout = Duration::from_secs(30);
+    let result = (|| -> Result<()> {
+        wait_online(&a)?;
+        wait_online(&b)?;
+        a.publish("multi-from-a")?;
+        let from_phone_a = a.receive(timeout)?;
+        let from_phone_b = b.receive(timeout)?;
+        assert_eq!(from_phone_a.text, "multi-from-phone");
+        assert_eq!(
+            from_phone_a, from_phone_b,
+            "Both desktops must receive the same event, not separate new copies"
+        );
+        let _encoded = b.publish_image_bytes(include_bytes!(
+            "../../../../core/sync/tests/images/sample.jpg"
+        ))?;
+        assert_eq!(a.receive(timeout)?.text, "multi-image-seen");
+        assert_eq!(b.receive(timeout)?.text, "multi-image-seen");
+
+        // Temporarily revoke A's session to force a real disconnect while B stays usable.
+        let saved = {
+            let mut state = a.state.lock().map_err(|_| "lock")?;
+            std::mem::take(&mut state.config.peers)
+        };
+        assert_eq!(b.receive(timeout)?.text, "multi-while-a-offline");
+        a.state.lock().map_err(|_| "lock")?.config.peers = saved;
+        // Android observes A's automatic reconnection, then toggles sync off/on.
+        let resumed_a = loop {
+            let clip = a.receive(timeout)?;
+            // A may receive the phone's latest local clip as soon as its route recovers.
+            if clip.text != "multi-while-a-offline" {
+                break clip;
+            }
+        };
+        let resumed_b = b.receive(timeout)?;
+        assert_eq!(resumed_a.text, "multi-resumed");
+        assert_eq!(resumed_a, resumed_b);
+        b.publish("multi-unlink-ready")?;
+        assert_eq!(b.receive(timeout)?.text, "multi-b-only");
+        println!("Android multi-device pairing, fan-out, original JPEG receive, independent reconnect, resume and unlink verified");
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(path);
+    result
 }
 
 #[test]

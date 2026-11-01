@@ -359,6 +359,16 @@ static NSRect RTVerticalCenterRect(NSRect bounds, NSRect inner, NSFont *font) {
 }
 @end
 
+static BOOL RTVisibleAddress(NSString *address) {
+    return [address isKindOfClass:NSString.class] && ![address containsString:@"["] &&
+        [address componentsSeparatedByString:@":"].count <= 2;
+}
+static NSArray<NSString *> *RTVisibleAddresses(NSArray *addresses) {
+    return [addresses filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *address, NSDictionary *bindings) {
+        (void)bindings; return RTVisibleAddress(address);
+    }]];
+}
+
 static NSString *RTFormatCode(NSString *code) {
     if (code.length != 6) return code ?: @"";
     NSMutableArray<NSString *> *parts = NSMutableArray.array;
@@ -673,7 +683,7 @@ static RTSettings *RTLoadedSettings;
     NSArray *peers = config[@"peers"] ?: @[];
     NSArray *online = status[@"online"] ?: @[];
     NSDictionary *connections = status[@"connections"] ?: @{};
-    NSArray *addresses = status[@"addresses"] ?: @[];
+    NSArray *addresses = RTVisibleAddresses(status[@"addresses"] ?: @[]);
     NSString *code = status[@"code"] ?: @"";
     NSString *statusMsg = status[@"message"] ?: @"";
 
@@ -768,7 +778,8 @@ static RTSettings *RTLoadedSettings;
 
                 BOOL isOnline = [online containsObject:peerId];
                 NSString *connectedAddr = connections[peerId];
-                NSArray *savedAddrs = peer[@"addresses"] ?: @[];
+                if (!RTVisibleAddress(connectedAddr)) connectedAddr = nil;
+                NSArray *savedAddrs = RTVisibleAddresses(peer[@"addresses"] ?: @[]);
                 NSString *addrText = connectedAddr.length ? connectedAddr : (savedAddrs.count ? [savedAddrs componentsJoinedByString:@", "] : @"自动发现");
 
                 NSView *peerDot = [[NSView alloc] initWithFrame:NSMakeRect(20, self.row + 7, 8, 8)];
@@ -1292,7 +1303,7 @@ static RTSettings *RTLoadedSettings;
     if ([self.editingPeerID isEqual:identifier]) { self.editingPeerID = nil; [self refresh]; return; }
     NSArray *addresses=@[];for(NSDictionary *peer in app.syncStatus[@"lan"][@"config"][@"peers"])if([peer[@"id"] isEqual:identifier])addresses=peer[@"addresses"]?:@[];
     self.editingPeerID = identifier;
-    self.editingPeerAddress = [addresses componentsJoinedByString:@", "];
+    self.editingPeerAddress = [RTVisibleAddresses(addresses) componentsJoinedByString:@", "];
     [self refresh];
 }
 - (void)savePeerAddress:(NSButton *)sender{

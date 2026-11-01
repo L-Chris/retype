@@ -32,8 +32,6 @@ fun LanPage() {
   var showJoin by remember { mutableStateOf(false) }
   var code by remember { mutableStateOf("") }
   var address by remember { mutableStateOf("") }
-  var editAddress by remember { mutableStateOf(false) }
-  var savedAddresses by remember(state.addresses) { mutableStateOf(state.addresses) }
   var now by remember { mutableStateOf(System.currentTimeMillis()) }
   LaunchedEffect(state.expires) {
     now = System.currentTimeMillis()
@@ -43,6 +41,7 @@ fun LanPage() {
     }
   }
   DisposableEffect(clipboard) {
+    clipboard.resume()
     val stop = clipboard.discover()
     onDispose { stop() }
   }
@@ -56,7 +55,7 @@ fun LanPage() {
         Box(
             Modifier.size(8.dp)
                 .background(
-                    if (state.connection.isNotEmpty()) Color(0xFF1FA866) else Color(0xFF138F96),
+                    if (state.peers.any { it.connection.isNotEmpty() }) Color(0xFF1FA866) else Color(0xFF138F96),
                     CircleShape,
                 )
         )
@@ -165,74 +164,68 @@ fun LanPage() {
     }
   }
 
-  // Card 2: Associated Peer
-  if (state.name.isNotEmpty()) {
+  if (state.peers.isNotEmpty()) {
     SettingsCard {
       Text("已关联设备", style = MaterialTheme.typography.labelLarge, color = Color(0xFF657781))
-      HorizontalDivider(color = Color(0xFFEDF1F3))
-      val online = state.connection.isNotEmpty()
-      val endpoint = state.connection.ifEmpty { state.target.ifEmpty { "自动发现" } }
-      Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-          Row(
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp),
-          ) {
-            Box(
-                Modifier.size(8.dp)
-                    .background(
-                        if (online) Color(0xFF1FA866) else Color(0xFFBEC8CE),
-                        CircleShape,
-                    )
-            )
-            Text(state.name, fontWeight = FontWeight.SemiBold)
-            Text(
-                if (online) "已连接" else "离线",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (online) Color(0xFF138F96) else Color(0xFF657781),
-            )
-          }
-          SelectionContainer {
-            Text(
-                endpoint,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFF657781),
-            )
-          }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          ActionIconButton(
-              ActionIcon.Sliders,
-              "连接地址",
-              primary = editAddress,
-              onClick = { editAddress = !editAddress },
-          )
-          ActionIconButton(ActionIcon.Trash, "解除关联", danger = true, onClick = clipboard::unlink)
-        }
+      for (peer in state.peers) key(peer.id) { LanPeerCard(peer, clipboard) }
+    }
+  }
+  SettingsCard {
+    Text("本机地址", style = MaterialTheme.typography.labelLarge, color = Color(0xFF657781))
+    HorizontalDivider(color = Color(0xFFEDF1F3))
+    SelectionContainer {
+      Text(state.localAddresses.joinToString("\n").ifEmpty { "暂无可用网络地址" },
+          style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+    }
+    Text("连接端口自动分配，连接后显示在对应设备下方。",
+        style = MaterialTheme.typography.bodySmall, color = Color(0xFF657781))
+  }
+}
+
+@Composable
+private fun LanPeerCard(peer: LanPeerState, clipboard: LanClipboard) {
+  var editAddress by remember { mutableStateOf(false) }
+  var savedAddresses by remember(peer.addresses) { mutableStateOf(peer.addresses) }
+  HorizontalDivider(color = Color(0xFFEDF1F3))
+  val online = peer.connection.isNotEmpty()
+  val endpoint = listOf(peer.connection, peer.target).firstOrNull { it.isNotEmpty() && LanEndpoint.visible(it) } ?: "自动发现"
+  Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Box(Modifier.size(8.dp).background(if (online) Color(0xFF1FA866) else Color(0xFFBEC8CE), CircleShape))
+        Text(peer.name, fontWeight = FontWeight.SemiBold)
+        Text(if (online) "已连接" else "离线", style = MaterialTheme.typography.bodySmall,
+            color = if (online) Color(0xFF138F96) else Color(0xFF657781))
       }
-      if (editAddress) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          OutlinedTextField(
-              savedAddresses,
-              { savedAddresses = it },
-              label = { Text("连接地址（多个用逗号分隔）") },
-              singleLine = true,
-              modifier = Modifier.weight(1f),
-          )
-          ActionIconButton(ActionIcon.Check, "保存地址", primary = true) {
-            clipboard.setAddresses(savedAddresses)
-            editAddress = false
-          }
-          ActionIconButton(ActionIcon.Close, "取消") {
-            savedAddresses = state.addresses
-            editAddress = false
-          }
-        }
+      SelectionContainer {
+        Text("对端：$endpoint",
+            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace, color = Color(0xFF657781))
+      }
+      if (peer.localAddress.isNotEmpty() && LanEndpoint.visible(peer.localAddress)) SelectionContainer {
+        Text("本机：${peer.localAddress}", style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace, color = Color(0xFF657781))
+      }
+      if (!online && peer.message != "离线") Text(peer.message,
+          style = MaterialTheme.typography.bodySmall, color = Color(0xFF657781))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      ActionIconButton(ActionIcon.Sliders, "${peer.name}的连接地址", primary = editAddress,
+          onClick = { editAddress = !editAddress })
+      ActionIconButton(ActionIcon.Trash, "解除与${peer.name}的关联", danger = true,
+          onClick = { clipboard.unlink(peer.id) })
+    }
+  }
+  if (editAddress) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      OutlinedTextField(savedAddresses, { savedAddresses = it }, label = { Text("连接地址（多个用逗号分隔）") },
+          singleLine = true, modifier = Modifier.weight(1f))
+      ActionIconButton(ActionIcon.Check, "保存${peer.name}的地址", primary = true) {
+        if (clipboard.setAddresses(peer.id, savedAddresses)) editAddress = false
+      }
+      ActionIconButton(ActionIcon.Close, "取消修改${peer.name}的地址") {
+        savedAddresses = peer.addresses
+        editAddress = false
       }
     }
   }
