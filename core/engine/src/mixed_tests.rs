@@ -183,3 +183,37 @@ fn disabling_english_and_stale_corrections_do_not_change_chinese_candidates() {
         .iter()
         .any(|c| c.language == CandidateLanguage::English));
 }
+
+#[test]
+fn flypy_completed_sentence_commits_and_learns_the_final_preview_syllable() {
+    let (dict, _) = from_pairs([
+        ("还是", "hai shi", 1000000.0),
+        ("还是有点", "hai shi you dian", 30000.0),
+        ("有点慢", "you dian man", 1000.0),
+        ("吗", "ma", 500000.0),
+        ("慢", "man", 10000.0),
+    ]);
+    let mut k = Kernel::new(
+        KernelConfig {
+            pinyin_scheme: PinyinScheme::Flypy,
+            english_enabled: false,
+            rerank_enabled: false,
+            ..Default::default()
+        },
+        Arc::new(dict),
+        Arc::new(Learner::new(Arc::new(UserDict::new()))),
+        offline_cloud(Duration::from_millis(10)),
+    );
+    input(&mut k, "hduiyzdmm");
+    assert_eq!(k.render_state().candidates[0].text, "还是有点慢");
+    let actions = k.handle(InputEvent::CandidateChosen { index: 0 });
+    assert_eq!(committed(&actions), Some("还是有点慢"));
+    assert!(!k.has_composition());
+    let reading: Vec<_> = ["hai", "shi", "you", "dian", "man"]
+        .into_iter()
+        .map(|name| retype_pinyin::syllables::id_of(name).unwrap())
+        .collect();
+    assert!(actions.iter().any(|action| matches!(action,
+        KernelAction::Side(SideEffect::Learn(LearningEvent::CandidateChosen { text, syllables, .. }))
+        if text == "还是有点慢" && syllables == &reading)));
+}

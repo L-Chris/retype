@@ -67,6 +67,21 @@ CPU benchmarks do not include real application edit-lock waits or compositor
 latency. The local macOS runner also lacks Windows' CJK font, so its bitmap
 numbers cannot establish Windows visual latency or a comparison with WeChat.
 
+A matched release-binary CPU check used the same dictionary and 60 typing /
+backspace cycles on the local macOS runner, before/after executables run
+consecutively after builds stopped. At 200% scale:
+
+| Input | Before decoder median | After decoder median | Before decoder estimated P99 | After decoder estimated P99 |
+| --- | ---: | ---: | ---: | ---: |
+| `h` | 0.324 ms | 0.311 ms | 0.371 ms | 0.332 ms |
+| `hduiyzdmm` | 0.285 ms | 0.270 ms | 0.301 ms | 0.292 ms |
+
+The target input now retains 102 candidates rather than 94. Including local
+bitmap work, its median is 0.546 ms before and 0.562 ms after; displayed text
+also changes, so that is not a rendering-only comparison. Sixty samples give
+only an estimated tail, and these numbers cannot explain or establish a fix
+for the reported Windows application-visible delay.
+
 For Windows, run the read-only diagnostic after reproducing:
 
 ```powershell
