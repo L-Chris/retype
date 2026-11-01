@@ -1315,7 +1315,19 @@ fn check_symbol_completion(
         type_key(c)?;
     }
     type_key('"')?;
-    assert!(String::from_utf16_lossy(&lock(data).text).ends_with("“你好”"));
+    let (actual, start, end, chromium) = {
+        let host = lock(data);
+        (
+            String::from_utf16_lossy(&host.text),
+            host.start,
+            host.end,
+            host.chromium,
+        )
+    };
+    assert!(
+        actual.ends_with("“你好”"),
+        "quoted commit: {actual:?}, selection={start}..{end}, chromium={chromium}"
+    );
     request(state, context, Work::Toggle)?;
     type_key('(')?;
     for c in "don't".chars() {

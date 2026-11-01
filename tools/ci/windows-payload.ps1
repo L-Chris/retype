@@ -31,6 +31,11 @@ if ($executables.Count -ne 1) { throw 'Expected one TIP library test harness' }
 $testExe = $executables[0]
 & $testExe
 if ($LASTEXITCODE) { throw 'TIP tests failed' }
+# Painting is synchronous and must not disturb repeated composition/caret work.
+1..3 | ForEach-Object {
+    & $testExe real_tsf_composition_commit_cancel_and_passthrough --test-threads=1
+    if ($LASTEXITCODE) { throw 'Repeated TSF composition/presentation test failed' }
+}
 
 if ($RegisterTip) {
     if ($arch -ne 'x64') { throw 'Machine registration requires the x64 runner payload' }
