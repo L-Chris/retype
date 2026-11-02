@@ -37,7 +37,12 @@ class InputEntriesTest {
     }
     fun select(label: String, language: String) {
       instrumentation.runOnMainSync { manager.showInputMethodPicker() }
-      find(By.textContains(label)).click()
+      UiScrollable(UiSelector().resourceId("android:id/list")).scrollIntoView(UiSelector().textContains(label))
+      device.waitForIdle()
+      var action = instrumentation.uiAutomation.rootInActiveWindow
+          .findAccessibilityNodeInfosByText(label).firstOrNull { it.text?.toString() == label }
+      while (action != null && !action.isClickable) action = action.parent
+      assertTrue("System picker row must accept selection", action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
       find(By.desc(if (language == "en-US") "切换至中文" else "切换至英文"))
       assertEquals(language, manager.currentInputMethodSubtype?.languageTag)
     }

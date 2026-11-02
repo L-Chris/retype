@@ -50,13 +50,21 @@ class KeyboardIntegrationTest {
     val oldSubtypes = manager.getEnabledInputMethodSubtypeList(own, false).map { it.hashCode() }.toIntArray()
     fun selectEntry(label: String) {
       instrumentation.runOnMainSync { manager.showInputMethodPicker() }
-      find(By.textContains(label))!!.click()
+      UiScrollable(UiSelector().resourceId("android:id/list")).scrollIntoView(UiSelector().textContains(label))
+      device.waitForIdle()
+      val row = find(By.textContains(label))
+      if (row == null) device.dumpWindowHierarchy(java.io.File(instrumentation.targetContext.cacheDir,"entry-picker-failure.xml"))
+      assertNotNull("Missing $label; enabled=" + manager.getEnabledInputMethodSubtypeList(own,false).map { it.languageTag }, row)
+      var action = instrumentation.uiAutomation.rootInActiveWindow
+          .findAccessibilityNodeInfosByText(label).firstOrNull { it.text?.toString() == label }
+      while (action != null && !action.isClickable) action = action.parent
+      assertTrue("System picker row must accept selection", action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
     }
     try {
       prefs.edit().putBoolean("flypy", true).putBoolean("chinese", true).commit()
       device.executeShellCommand("ime enable $ime")
-      device.executeShellCommand("ime set $ime")
       manager.setExplicitlyEnabledInputMethodSubtypes(ime, intArrayOf(1, 2))
+      device.executeShellCommand("ime set $ime")
       assertEquals(2, own.subtypeCount)
 
       val launched =
