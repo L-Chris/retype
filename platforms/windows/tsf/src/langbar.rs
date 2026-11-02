@@ -672,7 +672,7 @@ mod tests {
             assert!(source.AdviseSink(&ITfLangBarItemSink::IID, &sink).is_err());
             crate::profiles::apply(&state, false)?;
             assert_eq!(item.GetStatus()?, TF_LBI_STATUS_HIDDEN);
-            item.OnClick(TF_LBI_CLK_LEFT, &POINT::default(), std::ptr::null())?;
+            item.OnClick(TF_LBI_CLK_LEFT, POINT::default(), std::ptr::null())?;
             assert!(!state
                 .session()
                 .unwrap()
