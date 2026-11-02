@@ -37,7 +37,12 @@ class InputEntriesTest {
     }
     fun select(label: String, language: String) {
       instrumentation.runOnMainSync { manager.showInputMethodPicker() }
-      find(By.textContains(label)).click()
+      UiScrollable(UiSelector().resourceId("android:id/list")).scrollIntoView(UiSelector().textContains(label))
+      device.waitForIdle()
+      var action = instrumentation.uiAutomation.rootInActiveWindow
+          .findAccessibilityNodeInfosByText(label).firstOrNull { it.text?.toString() == label }
+      while (action != null && !action.isClickable) action = action.parent
+      assertTrue("System picker row must accept selection", action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
       find(By.desc(if (language == "en-US") "切换至中文" else "切换至英文"))
       assertEquals(language, manager.currentInputMethodSubtype?.languageTag)
     }
@@ -59,6 +64,13 @@ class InputEntriesTest {
       select("retype 中文", "zh-CN")
       find(By.text("a")).click()
       find(By.desc("candidate-阿"))
+      find(By.desc("切换至英文")).click()
+      assertEquals("zh-CN", manager.currentInputMethodSubtype?.languageTag)
+      for (letter in "hel") find(By.text(letter.toString())).click()
+      assertTrue(find(By.desc("editor-normal")).text.endsWith("ahel"))
+      assertFalse(device.hasObject(By.desc("candidate-hello")))
+      assertFalse(device.hasObject(By.desc("展开候选")))
+      find(By.desc("切换至中文")).click()
       find(By.desc("editor-password")).click()
       find(By.text("安全输入"))
       find(By.desc("editor-normal")).click()

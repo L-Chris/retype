@@ -617,6 +617,39 @@ mod tests {
     }
 
     #[test]
+    fn selected_entry_controls_prediction_independently_of_shift_mode() {
+        let f = fixture(false);
+        f.backend.submit(InputEvent::SetEnglishOptions {
+            enabled: true,
+            spelling: true,
+        });
+        f.backend.submit(InputEvent::SetEnglishPrediction(false));
+        f.backend.submit(InputEvent::ToggleChinese);
+        for letter in "hel".chars() {
+            let actions = f.backend.submit(key_ev(Key::Char(letter)));
+            assert!(actions
+                .iter()
+                .all(|a| matches!(a, KernelAction::PassThrough)));
+            assert!(f
+                .backend
+                .with_kernel(|k| !k.has_composition() && !k.has_candidates()));
+        }
+        f.backend.submit(InputEvent::SetEnglishOptions {
+            enabled: true,
+            spelling: true,
+        });
+        assert!(!f.backend.with_kernel(|k| k.english_prediction_enabled()));
+        f.backend.submit(InputEvent::SetEnglishPrediction(true));
+        type_str(&f.backend, "hel");
+        assert!(f
+            .backend
+            .render()
+            .candidates
+            .iter()
+            .any(|c| c.text == "hello"));
+    }
+
+    #[test]
     fn toggling_while_composing_commits_letters_first() {
         let f = fixture(false);
         type_str(&f.backend, "nihao");

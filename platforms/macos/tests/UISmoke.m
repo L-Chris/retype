@@ -109,6 +109,52 @@ static void CheckAsyncSettings(RTSettings *settings){
 - (BOOL)ensureSession;
 - (NSDictionary *)applyCommand:(NSDictionary *)command;
 @end
+static NSEvent *ModeEvent(NSEventType type,NSUInteger key,NSEventModifierFlags flags,NSString *characters) {
+    return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0 context:nil
+        characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:key];
+}
+static void TapShift(RetypeInputController *controller,RTModeClient *client) {
+    Check(![controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagShift,@"") client:client],@"Shift down passes to the host");
+    Check(![controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,0,@"") client:client],@"Shift up passes to the host");
+}
+static void CheckInputEntryModes(RTAppDelegate *delegate) {
+    NSDictionary *shortcuts=[RTPreferences.shared.value[@"shortcuts"] copy];
+    NSMutableDictionary *configured=[shortcuts mutableCopy];
+    configured[@"mode"]=@{@"key":@56,@"mods":@0,@"tap":@YES};RTPreferences.shared.value[@"shortcuts"]=configured;
+    RtRuntime *runtime=NULL;
+    NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
+    Check(!opened[@"error"]&&runtime,@"Entry-mode tests open a private real engine");delegate.runtime=runtime;
+    RetypeInputController *controller=[RetypeInputController new];
+    RTModeClient *client=[RTModeClient new];controller.active=YES;controller.activeClient=(id<IMKTextInput>)client;
+    [controller setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];Check([controller ensureSession],@"Chinese session starts");
+    [controller applyCommand:@{@"type":@"key",@"value":@"a"}];TapShift(controller,client);
+    Check(!controller.chinese&&[client.text isEqual:@"a"]&&!client.marked.length,@"Shift commits pending Chinese composition once");
+    Check([controller.inputModeID isEqual:RTChineseInputSource],@"Shift stays inside the Chinese system entry");
+    for(NSString *key in @[@"h",@"e",@"l"]){
+        Check(![controller handleEvent:ModeEvent(NSEventTypeKeyDown,0,0,key) client:client],@"Plain English passes through to the editor");
+        [client insertText:key replacementRange:NSMakeRange(NSNotFound,0)];
+        Check(![controller.state[@"candidates"] count]&&!client.marked.length,@"Chinese-entry English has no candidates or marked text");
+    }
+    Check([client.text isEqual:@"ahel"],@"Plain English reaches the editor immediately");TapShift(controller,client);
+    Check(controller.chinese,@"Shift switches back to Chinese");
+    [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagShift,@"") client:client];
+    [controller handleEvent:ModeEvent(NSEventTypeKeyDown,0,NSEventModifierFlagShift,@"A") client:client];
+    [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,0,@"") client:client];
+    Check(controller.chinese,@"Shift+letter never toggles the mode");
+    [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagControl|NSEventModifierFlagShift,@"") client:client];
+    [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagControl,@"") client:client];
+    Check(controller.chinese,@"Shift with held Control never toggles the mode");
+    [controller setValue:RTEnglishInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    for(NSString *key in @[@"h",@"e",@"l"])[controller applyCommand:@{@"type":@"key",@"value":key}];
+    Check([controller.state[@"candidates"] containsObject:@"hello"],@"Independent English retains completion");
+    NSString *before=client.text;[controller setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];
+    Check(controller.chinese&&[client.text isEqual:[before stringByAppendingString:@"hel"]]&&!client.marked.length,@"Entry changes commit predictive English once");
+    TapShift(controller,client);[controller applyCommand:@{@"type":@"key",@"value":@"h"}];
+    Check(![controller.state[@"candidates"] count]&&!client.marked.length,@"Returning to Chinese restores plain English");
+    [controller.timer invalidate];controller.active=NO;[[RTCandidatePanel shared] hideFor:controller];rt_session_free(controller.session);controller.session=NULL;
+    RTPreferences.shared.value[@"shortcuts"]=shortcuts;delegate.runtime=NULL;rt_runtime_free(runtime);
+    printf("Chinese-entry Shift is candidate-free direct English; independent English retains completion; modifier chords do not toggle.\n");
+}
 static void CheckInputEntries(RTAppDelegate *delegate) {
     RtRuntime *runtime=NULL;
     NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
@@ -213,6 +259,7 @@ int main(void){@autoreleasepool{
     CheckInputMenuSettings(settings);
     CheckAsyncSettings(settings);
     CheckInputEntries(delegate);
+    CheckInputEntryModes(delegate);
     CheckCandidateWidthCache();
     CheckDeletion();
     CheckTranslationCapture();
