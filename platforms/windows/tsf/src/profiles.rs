@@ -17,7 +17,38 @@ use windows_core::{implement, w, Interface, Result, BOOL, GUID, PCWSTR};
 const SWITCH: u32 = WM_APP + 0x52;
 const CLASS: PCWSTR = w!("retype.InputEntry");
 
+#[cfg(test)]
+thread_local! {
+    // Model an installed, active entry whose sibling cannot be activated.
+    // Thread-local so ordinary TSF fixtures never select a real keyboard.
+    static FAILED_SELECTION: std::cell::Cell<Option<(bool, usize)>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct FailedSelection;
+#[cfg(test)]
+impl FailedSelection {
+    pub(crate) fn new(active_chinese: bool) -> Self {
+        FAILED_SELECTION.with(|slot| {
+            assert!(slot.replace(Some((active_chinese, 0))).is_none());
+        });
+        Self
+    }
+    pub(crate) fn attempts(&self) -> usize {
+        FAILED_SELECTION.with(|slot| slot.get().expect("selection override").1)
+    }
+}
+#[cfg(test)]
+impl Drop for FailedSelection {
+    fn drop(&mut self) {
+        FAILED_SELECTION.with(|slot| slot.set(None));
+    }
+}
+
 pub(crate) fn active_chinese() -> Option<bool> {
+    #[cfg(test)]
+    if let Some((chinese, _)) = FAILED_SELECTION.with(|slot| slot.get()) {
+        return Some(chinese);
+    }
     // SAFETY: Called only from the TSF apartment.
     unsafe {
         let manager: ITfInputProcessorProfileMgr =
@@ -69,6 +100,17 @@ pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
     Ok(())
 }
 fn select(chinese: bool) -> Result<()> {
+    #[cfg(test)]
+    if FAILED_SELECTION.with(|slot| {
+        if let Some((active, attempts)) = slot.get() {
+            slot.set(Some((active, attempts + 1)));
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(E_ACCESSDENIED.into());
+    }
     let (language, profile, _) = INPUT_PROFILES[usize::from(!chinese)];
     // SAFETY: No host edit lock or state mutex is held across TSF activation.
     unsafe {
@@ -78,7 +120,16 @@ fn select(chinese: bool) -> Result<()> {
             .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, language, &profile)?
             .as_bool()
         {
-            return Err(E_FAIL.into());
+            // An explicit retype mode switch also enables its sibling entry,
+            // as on macOS. Upgrades or user language-list changes can leave it
+            // registered but disabled; never enable an unrelated keyboard.
+            profiles.EnableLanguageProfile(&CLSID_RETYPE_TIP, language, &profile, true)?;
+            if !profiles
+                .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, language, &profile)?
+                .as_bool()
+            {
+                return Err(E_FAIL.into());
+            }
         }
         let manager: ITfInputProcessorProfileMgr = profiles.cast()?;
         // Stage our profile before changing language so Windows does not pick a
@@ -100,6 +151,11 @@ fn select(chinese: bool) -> Result<()> {
             Default::default(),
             0,
         )?;
+        // ActivateProfile can return S_FALSE (success HRESULT) without actually
+        // enabling/activating a profile. Verify the selected retype entry.
+        if active_chinese() != Some(chinese) {
+            return Err(E_FAIL.into());
+        }
     }
     Ok(())
 }
@@ -138,7 +194,11 @@ unsafe extern "system" fn window_proc(
                 };
                 if let Err(error) = select(chinese) {
                     tracing::warn!("retype input entry switch failed: {error}");
-                    if let Some(chinese) = active_chinese() {
+                    // The host already accepted the mode toggle. Native entry
+                    // synchronization is best effort: a missing/blocked sibling
+                    // must not turn Shift into a no-op. Reapply the requested
+                    // mode if a reentrant profile notification changed it.
+                    if state.is_activated() {
                         let _ = apply(&state, chinese);
                     }
                 }

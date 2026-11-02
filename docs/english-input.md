@@ -10,6 +10,11 @@ spelling suggestions and personal vocabulary. Switching back to a retype entry
 starts in its own language. The mode shortcut or keyboard button selects the
 other retype entry; it does not select an unrelated system keyboard.
 
+On Windows, an explicit mode switch enables the sibling retype profile if it
+is registered but disabled. If Windows blocks entry activation or the sibling
+is unavailable, the selected Chinese/English mode remains usable inside the
+current retype entry, including English completion and spelling suggestions.
+
 Windows setup adds both profiles while preserving the default keyboard. macOS
 installation registers and enables both input modes. On Android, open Settings
 → Input → Manage Chinese and English entries and enable both languages if the

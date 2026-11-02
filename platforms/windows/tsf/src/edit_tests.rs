@@ -1080,17 +1080,41 @@ fn run_host() -> Result<()> {
         lock(&data).input_scope = Some(IS_DEFAULT);
         request(&state, &context, Work::Toggle)?;
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        let bridge = crate::profiles::EntryBridge::attach(&state, &manager)?;
+        *lock(&state.entry_bridge) = Some(bridge);
+        let selection = crate::profiles::FailedSelection::new(true);
         let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
             state: Arc::downgrade(&state),
         }
         .into();
         let shift = WPARAM(0x10);
         let lp = LPARAM(0);
-        assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
-        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
-        assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
-        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        let tap_shift = || -> Result<()> {
+            assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
+            assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+            assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
+            assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+            Ok(())
+        };
+        let dispatch = || {
+            let mut message = MSG::default();
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                DispatchMessageW(&message);
+            }
+        };
+        tap_shift()?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        assert_eq!(
+            selection.attempts(),
+            0,
+            "Native activation waits for host edits"
+        );
+        dispatch();
+        assert_eq!(selection.attempts(), 1);
+        assert!(
+            !session.backend.with_kernel(|k| k.is_chinese()),
+            "A failed English entry activation must not undo Shift after dispatch"
+        );
         // Using Shift with another key must not switch modes on release.
         assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
@@ -1098,6 +1122,45 @@ fn run_host() -> Result<()> {
         assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        dispatch();
+        assert_eq!(
+            selection.attempts(),
+            1,
+            "Shift shortcuts do not select an entry"
+        );
+        tap_shift()?;
+        dispatch();
+        assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        tap_shift()?;
+        dispatch();
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        assert_eq!(selection.attempts(), 3);
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: true,
+            spelling: true,
+        });
+        for ch in "hel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        assert!(session.backend.with_kernel(|k| k
+            .render_state()
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "hello")));
+        request(&state, &context, Work::Key(Key::Escape, Modifiers::NONE))?;
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: false,
+            spelling: false,
+        });
+        // Multiple completed toggles queued before dispatch use the latest mode.
+        request(&state, &context, Work::Toggle)?;
+        request(&state, &context, Work::Toggle)?;
+        dispatch();
+        assert_eq!(selection.attempts(), 5);
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        let bridge = lock(&state.entry_bridge).take();
+        drop(bridge);
+        drop(selection);
         let text_before = lock(&data).text.len();
         let letter = WPARAM('Z' as usize);
         assert!(keys.OnTestKeyDown(&context, letter, lp)?.as_bool());
