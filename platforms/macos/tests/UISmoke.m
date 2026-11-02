@@ -108,7 +108,64 @@ static void CheckAsyncSettings(RTSettings *settings){
 @interface RetypeInputController (ModeTest)
 - (BOOL)ensureSession;
 - (NSDictionary *)applyCommand:(NSDictionary *)command;
+- (OSStatus)selectInputEntry:(NSString *)target;
 @end
+@interface RTEntrySelectionController : RetypeInputController
+@property(nonatomic) OSStatus selectionStatus;
+@property(nonatomic) NSUInteger selectionCalls;
+@property(nonatomic,copy) NSString *selectionTarget;
+@end
+@implementation RTEntrySelectionController
+- (OSStatus)selectInputEntry:(NSString *)target {
+    self.selectionCalls++;self.selectionTarget=target;return self.selectionStatus;
+}
+@end
+static NSEvent *ModeEvent(NSEventType type,NSUInteger key,NSEventModifierFlags flags,NSString *characters) {
+    return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0 context:nil
+        characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:key];
+}
+static void TapShift(RetypeInputController *controller,RTModeClient *client) {
+    Check(![controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagShift,@"") client:client],@"Shift down passes to the host");
+    Check(![controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,0,@"") client:client],@"Shift up passes to the host");
+}
+static void CheckShiftEntryFailures(RTAppDelegate *delegate) {
+    NSDictionary *shortcuts=[RTPreferences.shared.value[@"shortcuts"] copy];
+    NSMutableDictionary *configured=[shortcuts mutableCopy];
+    configured[@"mode"]=@{@"key":@56,@"mods":@0,@"tap":@YES};RTPreferences.shared.value[@"shortcuts"]=configured;
+    RtRuntime *runtime=NULL;
+    NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
+    Check(!opened[@"error"]&&runtime,@"Shift tests open a private real engine");delegate.runtime=runtime;
+    for(NSNumber *status in @[@(paramErr),@(permErr)]){
+        RTEntrySelectionController *controller=[RTEntrySelectionController new];controller.selectionStatus=status.intValue;
+        RTModeClient *client=[RTModeClient new];controller.active=YES;controller.activeClient=(id<IMKTextInput>)client;
+        [controller setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];Check([controller ensureSession],@"Chinese session starts");
+        [controller applyCommand:@{@"type":@"key",@"value":@"a"}];
+        TapShift(controller,client);
+        Check(!controller.chinese&&![controller.state[@"chinese"] boolValue],@"Failed system entry selection must still switch Shift to English");
+        Check(controller.selectionCalls==1&&[controller.selectionTarget isEqual:RTEnglishInputSource],@"Shift requests the sibling retype entry once");
+        Check([client.text isEqual:@"a"]&&!client.marked.length,@"Failed selection commits pending composition once");
+        Check([[controller valueForTag:kTextServiceInputModePropertyTag client:client] isEqual:RTChineseInputSource],@"Fallback preserves the actual selected system entry");
+        for(NSString *key in @[@"h",@"e",@"l"])[controller applyCommand:@{@"type":@"key",@"value":key}];
+        Check([controller.state[@"candidates"] containsObject:@"hello"],@"Fallback English retains retype completion");
+        TapShift(controller,client);
+        Check(controller.chinese&&[client.text isEqual:@"ahel"]&&!client.marked.length,@"Shift switches back and commits the English composition once");
+        // Shift with another key must remain an uppercase shortcut.
+        [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagShift,@"") client:client];
+        [controller handleEvent:ModeEvent(NSEventTypeKeyDown,0,NSEventModifierFlagShift,@"A") client:client];
+        [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,0,@"") client:client];
+        Check(controller.chinese&&controller.selectionCalls==2,@"Shift+letter never toggles the mode");
+        [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagControl|NSEventModifierFlagShift,@"") client:client];
+        [controller handleEvent:ModeEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagControl,@"") client:client];
+        Check(controller.chinese&&controller.selectionCalls==2,@"Shift with a held Control key never toggles the mode");
+        // A later successful selection updates the actual input-mode identifier.
+        controller.selectionStatus=noErr;TapShift(controller,client);
+        Check(!controller.chinese&&[controller.inputModeID isEqual:RTEnglishInputSource],@"Successful selection still uses the independent English entry");
+        [controller.timer invalidate];controller.active=NO;[[RTCandidatePanel shared] hideFor:controller];
+        rt_session_free(controller.session);controller.session=NULL;
+    }
+    RTPreferences.shared.value[@"shortcuts"]=shortcuts;delegate.runtime=NULL;rt_runtime_free(runtime);
+    printf("Shift survives missing/blocked input entries, preserves composition and English completion; Shift+letter remains uppercase.\n");
+}
 static void CheckInputEntries(RTAppDelegate *delegate) {
     RtRuntime *runtime=NULL;
     NSDictionary *opened=RTJSON(rt_runtime_open([RTDataRoot() stringByAppendingPathComponent:@"termination"].UTF8String,&runtime));
@@ -213,6 +270,7 @@ int main(void){@autoreleasepool{
     CheckInputMenuSettings(settings);
     CheckAsyncSettings(settings);
     CheckInputEntries(delegate);
+    CheckShiftEntryFailures(delegate);
     CheckCandidateWidthCache();
     CheckDeletion();
     CheckTranslationCapture();

@@ -57,7 +57,9 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
 - (void)setInputMode:(NSString *)identifier client:(id)sender {
     if (![identifier isEqual:RTChineseInputSource] && ![identifier isEqual:RTEnglishInputSource]) return;
     self.inputModeID = identifier;
-    BOOL chinese = [identifier isEqual:RTChineseInputSource];
+    [self applyChineseMode:[identifier isEqual:RTChineseInputSource] client:sender];
+}
+- (void)applyChineseMode:(BOOL)chinese client:(id)sender {
     if (self.session && self.chinese != chinese) {
         if (sender) self.activeClient = sender;
         [self applyCommand:@{@"type":@"toggle"}];
@@ -77,8 +79,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     (void)sender;
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ComponentInputModeDict"];
 }
-- (void)switchInputEntry {
-    NSString *target = self.chinese ? RTEnglishInputSource : RTChineseInputSource;
+- (OSStatus)selectInputEntry:(NSString *)target {
     NSDictionary *filter = @{(__bridge NSString *)kTISPropertyInputSourceID:target};
     CFArrayRef sources = TISCreateInputSourceList((__bridge CFDictionaryRef)filter, true);
     OSStatus status = paramErr;
@@ -87,13 +88,26 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
         // An explicit retype toggle also enables its sibling entry if necessary.
         status = TISEnableInputSource(source);
         if (status == noErr) {
-            [self commitComposition:self.activeClient];
             status = TISSelectInputSource(source);
-            if (status == noErr) [self setInputMode:target client:self.activeClient];
         }
     }
     if (sources) CFRelease(sources);
-    if (status != noErr) { NSLog(@"retype: unable to select input entry (%d)", (int)status); NSBeep(); }
+    return status;
+}
+- (void)switchInputEntry {
+    BOOL chinese = !self.chinese;
+    NSString *target = chinese ? RTChineseInputSource : RTEnglishInputSource;
+    // Finish marked text before a native selection can deactivate this client.
+    // The same commit is required when the system entry is unavailable.
+    [self commitComposition:self.activeClient];
+    OSStatus status = [self selectInputEntry:target];
+    if (status == noErr) [self setInputMode:target client:self.activeClient];
+    else if (self.active) {
+        // Keep the actual system entry identifier while changing retype's own
+        // mode. Missing/blocked TIS entries must not disable the mode shortcut.
+        [self applyChineseMode:chinese client:self.activeClient];
+        NSLog(@"retype: input entry unavailable (%d); using internal mode", (int)status);
+    }
 }
 - (BOOL)ensureSession {
     RTAppDelegate *app = (RTAppDelegate *)NSApp.delegate;
@@ -123,8 +137,13 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
         }
         for(NSString *role in @[@"mode",@"translate"]){NSDictionary *binding=shortcuts[role];
             if([binding[@"tap"] boolValue]&&[binding[@"key"] unsignedIntValue]==event.keyCode){
-                if(event.modifierFlags&RTFlagForKey(event.keyCode))self.pendingTap=role;
-                else if([self.pendingTap isEqual:role]){self.pendingTap=nil;[self shortcut:role];}return NO;
+                NSEventModifierFlags flag=RTFlagForKey(event.keyCode);
+                if(event.modifierFlags&flag)self.pendingTap=RTModifiers(event.modifierFlags&~flag)?nil:role;
+                else {
+                    BOOL tap=[self.pendingTap isEqual:role]&&!RTModifiers(event.modifierFlags);
+                    self.pendingTap=nil;if(tap)[self shortcut:role];
+                }
+                return NO;
             }
         }
         self.pendingTap=nil;

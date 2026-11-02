@@ -10,8 +10,8 @@ spelling suggestions and personal vocabulary. Switching back to a retype entry
 starts in its own language. The mode shortcut or keyboard button selects the
 other retype entry; it does not select an unrelated system keyboard.
 
-On Windows, an explicit mode switch enables the sibling retype profile if it
-is registered but disabled. If Windows blocks entry activation or the sibling
+On Windows and macOS, an explicit mode switch enables the sibling retype entry if it
+is registered but disabled. If the system blocks entry activation or the sibling
 is unavailable, the selected Chinese/English mode remains usable inside the
 current retype entry, including English completion and spelling suggestions.
 
