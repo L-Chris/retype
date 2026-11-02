@@ -24,6 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       android-signing: ${{ steps.android-signing.outputs.ready }}
       android-only: ${{ steps.scope.outputs.android-only }}
+      republish: ${{ steps.scope.outputs.republish }}
       source-sha: ${{ steps.scope.outputs.source-sha }}
     steps:
       - uses: actions/checkout@v7
@@ -71,16 +72,25 @@ jobs:
         run: |
           set -euo pipefail
           mode=false
+          republish=false
           annotation="$(git for-each-ref --format='%(contents)' "refs/tags/$TAG")"
           if [[ "$ANDROID_ONLY" == true ]] || grep -Fxq 'Retype-Republish: android' <<< "$annotation"; then
             mode=true
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.draft == false and .prerelease == false' | grep -Fxq true
+            republish=true
+          elif grep -Fxq 'Retype-Republish: all' <<< "$annotation"; then
+            republish=true
           elif [[ "$FORCED" == true ]]; then
             echo 'Forced tag updates require an explicit republication scope.' >&2
             exit 1
           fi
-          echo "android-only=$mode" >> "$GITHUB_OUTPUT"
-          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$republish" == true ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.draft == false and .prerelease == false' | grep -Fxq true
+          fi
+          {
+            echo "android-only=$mode"
+            echo "republish=$republish"
+            echo "source-sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check Android signing availability
         id: android-signing
@@ -89,12 +99,12 @@ jobs:
           STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ANDROID_ONLY: ${{ steps.scope.outputs.android-only }}
+          REPUBLISH: ${{ steps.scope.outputs.republish }}
         run: |
           if [[ -n "$KEYSTORE" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
             echo 'ready=true' >> "$GITHUB_OUTPUT"
           else
-            [[ "$ANDROID_ONLY" != true ]] || { echo 'Android republication requires stable signing credentials.' >&2; exit 1; }
+            [[ "$REPUBLISH" != true ]] || { echo 'Republication requires stable Android signing credentials.' >&2; exit 1; }
             echo 'ready=false' >> "$GITHUB_OUTPUT"
             echo 'Android APK publishing is skipped until signing secrets are configured.'
           fi
@@ -129,7 +139,7 @@ jobs:
     with:
       version: ${{ needs.metadata.outputs.version }}
       source-ref: ${{ needs.metadata.outputs.source-sha }}
-      replacing: ${{ needs.metadata.outputs.android-only == 'true' }}
+      replacing: ${{ needs.metadata.outputs.republish == 'true' }}
     secrets: inherit
 
   macos:
