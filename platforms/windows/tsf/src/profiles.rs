@@ -33,8 +33,8 @@ impl FailedSelection {
         });
         Self
     }
-    pub(crate) fn attempts(&self) -> usize {
-        FAILED_SELECTION.with(|slot| slot.get().expect("selection override").1)
+    pub(crate) fn attempts(&self) -> Option<usize> {
+        FAILED_SELECTION.with(|slot| slot.get().map(|(_, attempts)| attempts))
     }
 }
 #[cfg(test)]

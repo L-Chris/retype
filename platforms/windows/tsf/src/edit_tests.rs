@@ -1109,11 +1109,11 @@ fn run_host() -> Result<()> {
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         assert_eq!(
             selection.attempts(),
-            0,
+            Some(0),
             "Native activation waits for host edits"
         );
         dispatch();
-        assert_eq!(selection.attempts(), 1);
+        assert_eq!(selection.attempts(), Some(1));
         assert!(
             !session.backend.with_kernel(|k| k.is_chinese()),
             "A failed English entry activation must not undo Shift after dispatch"
@@ -1128,7 +1128,7 @@ fn run_host() -> Result<()> {
         dispatch();
         assert_eq!(
             selection.attempts(),
-            1,
+            Some(1),
             "Shift shortcuts do not select an entry"
         );
         tap_shift()?;
@@ -1137,7 +1137,7 @@ fn run_host() -> Result<()> {
         tap_shift()?;
         dispatch();
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
-        assert_eq!(selection.attempts(), 3);
+        assert_eq!(selection.attempts(), Some(3));
         session.submit(InputEvent::SetEnglishOptions {
             enabled: true,
             spelling: true,
@@ -1159,7 +1159,7 @@ fn run_host() -> Result<()> {
         request(&state, &context, Work::Toggle)?;
         request(&state, &context, Work::Toggle)?;
         dispatch();
-        assert_eq!(selection.attempts(), 5);
+        assert_eq!(selection.attempts(), Some(5));
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         let bridge = lock(&state.entry_bridge).take();
         drop(bridge);
