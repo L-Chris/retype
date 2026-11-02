@@ -7,13 +7,16 @@ This first stage adds local word completion, one-edit spelling suggestions and p
 Windows, macOS and Android expose **retype 中文** and **retype English** separately.
 Choose the English entry in the system input picker to use retype completion,
 spelling suggestions and personal vocabulary. Switching back to a retype entry
-starts in its own language. The mode shortcut or keyboard button selects the
-other retype entry; it does not select an unrelated system keyboard.
+starts in its own language. Shift and the mode button change only the internal
+Chinese/ASCII mode; they never select another system entry. In the Chinese entry,
+English mode is immediate text input with no marked text or candidates. English
+completion and spelling suggestions in English mode require selecting the
+independent **retype English** entry in the system picker.
 
-On Windows and macOS, an explicit mode switch enables the sibling retype entry if it
-is registered but disabled. If the system blocks entry activation or the sibling
-is unavailable, the selected Chinese/English mode remains usable inside the
-current retype entry, including English completion and spelling suggestions.
+Settings → Input groups completion and spelling under **English input method**.
+On Windows, use Win+Space to select retype English. To add it from Settings, open
+Time & language → Language & region → English (United States) → Language options
+→ Add a keyboard. The Chinese language's keyboard list only shows retype 中文.
 
 Windows setup adds both profiles while preserving the default keyboard. macOS
 installation registers and enables both input modes. On Android, open Settings

@@ -327,16 +327,6 @@ fun Choice(
 @Composable
 private fun InputPage(store: AppStore) {
   val context = LocalContext.current
-  SettingsCard {
-    Text("输入法入口", style = MaterialTheme.typography.titleMedium)
-    Text("可分别启用 retype 中文与 retype English；英文入口支持单词补全与拼写纠错。", style = MaterialTheme.typography.bodyMedium)
-    TextButton(onClick = {
-      val own = context.getSystemService(android.view.inputmethod.InputMethodManager::class.java).inputMethodList
-          .firstOrNull { it.packageName == context.packageName }
-      context.startActivity(Intent(android.provider.Settings.ACTION_INPUT_METHOD_SUBTYPE_SETTINGS)
-          .putExtra(android.provider.Settings.EXTRA_INPUT_METHOD_ID, own?.id))
-    }) { Text("管理中文与英文入口") }
-  }
   var symbols by remember { mutableStateOf(store.prefs.getBoolean("symbolCompletion", true)) }
   var flypy by remember { mutableStateOf(store.prefs.getBoolean("flypy", false)) }
   var english by remember { mutableStateOf(store.prefs.getBoolean("english", true)) }
@@ -363,6 +353,13 @@ private fun InputPage(store: AppStore) {
     }
   }
   SettingsCard {
+    Text("英文输入法", style = MaterialTheme.typography.titleMedium)
+    TextButton(onClick = {
+      val own = context.getSystemService(android.view.inputmethod.InputMethodManager::class.java).inputMethodList
+          .firstOrNull { it.packageName == context.packageName }
+      context.startActivity(Intent(android.provider.Settings.ACTION_INPUT_METHOD_SUBTYPE_SETTINGS)
+          .putExtra(android.provider.Settings.EXTRA_INPUT_METHOD_ID, own?.id))
+    }) { Text("管理中文与英文入口") }
     ToggleRow("英文单词补全", english) {
       english = it
       store.prefs.edit().putBoolean("english", it).apply()
@@ -371,6 +368,8 @@ private fun InputPage(store: AppStore) {
       spelling = it
       store.prefs.edit().putBoolean("spelling", it).apply()
     }
+  }
+  SettingsCard {
     ToggleRow("符号自动补全", symbols) {
       symbols = it
       store.prefs.edit().putBoolean("symbolCompletion", it).apply()

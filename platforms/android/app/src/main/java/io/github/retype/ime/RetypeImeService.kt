@@ -74,6 +74,7 @@ class RetypeImeService :
   private var voiceGeneration = 0L
   private var voicePending = false
   private var selectedSubtype: InputMethodSubtype? = null
+  private var englishEntry = false
   private var modifierTap = 0
   private var modifierUsed = false
 
@@ -193,7 +194,8 @@ class RetypeImeService :
     )
     val preferences = getSharedPreferences("settings", MODE_PRIVATE)
     val subtype = selectedSubtype ?: getSystemService(InputMethodManager::class.java).currentInputMethodSubtype
-    val chinese = !policy.ascii && subtype?.languageTag != "en-US" && subtype?.locale != "en_US"
+    englishEntry = subtype?.languageTag == "en-US" || subtype?.locale == "en_US"
+    val chinese = !policy.ascii && !englishEntry
     val flypy = preferences.getBoolean("flypy", false)
     Log.d("retype", "session scheme=${if (flypy) "flypy" else "full"} epoch=$current")
     state =
@@ -223,22 +225,8 @@ class RetypeImeService :
     currentInputEditorInfo?.let { onStartInput(it, true) }
   }
 
-  @Suppress("DEPRECATION")
-  private fun selectEntry(chinese: Boolean) {
-    val manager = getSystemService(InputMethodManager::class.java)
-    val own = manager.inputMethodList.firstOrNull {
-      it.packageName == packageName && it.serviceName == RetypeImeService::class.java.name
-    } ?: return
-    val target = (0 until own.subtypeCount).map { own.getSubtypeAt(it) }
-        .firstOrNull { (it.languageTag == "en-US" || it.locale == "en_US") != chinese } ?: return
-    if (android.os.Build.VERSION.SDK_INT >= 28) {
-      switchInputMethod(own.id, target)
-    } else {
-      window?.window?.attributes?.token?.let { manager.setInputMethodAndSubtype(it, own.id, target) }
-    }
-  }
-
   private fun initializeSession(current: Long, fieldPolicy: EditorPolicy, chinese: Boolean, flypy: Boolean) {
+    val predictive = englishEntry
     val preferences = getSharedPreferences("settings", MODE_PRIVATE)
     jobs.trySend {
       closeSession()
@@ -259,6 +247,7 @@ class RetypeImeService :
                 fieldPolicy.learning,
                 DictionaryPacks.paths(applicationContext),
             )
+        NativeBridge.send(handle, NativeCommand.prediction(predictive))
         NativeBridge.send(handle, NativeCommand.english(preferences.getBoolean("english", true), preferences.getBoolean("spelling", true)))
         InputPerformance.startup(started, dictionaryReady, System.nanoTime())
         withContext(Dispatchers.Main) { if (epoch == current) state = state.copy(ready = true, resourcesMissing = false) }
@@ -515,11 +504,10 @@ class RetypeImeService :
     if (policy.literal) return
     if (state.resourcesMissing) {
       finishStatistics()
-      selectEntry(!state.chinese)
+      state = state.copy(chinese = !state.chinese)
       return
     }
-    val targetChinese = !state.chinese
-    command(NativeCommand.toggle(), afterApplied = { selectEntry(targetChinese) })
+    command(NativeCommand.toggle())
   }
 
   private fun requestCandidates(generation: Long, start: Int) {

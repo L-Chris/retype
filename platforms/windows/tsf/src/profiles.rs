@@ -1,5 +1,5 @@
-//! Two TSF profiles share a service and learning store. Activate profiles only
-//! after the host edit transaction has returned, on the same owning apartment.
+//! System-selected entries determine English prediction; Shift only changes the
+//! internal Chinese/ASCII mode and never selects a different system entry.
 use crate::{
     edit,
     ids::*,
@@ -7,48 +7,10 @@ use crate::{
 };
 use retype_types::InputEvent;
 use std::sync::{Arc, Weak};
-use windows::Win32::{
-    Foundation::*,
-    System::{Com::*, LibraryLoader::*},
-    UI::{TextServices::*, WindowsAndMessaging::*},
-};
-use windows_core::{implement, w, Interface, Result, BOOL, GUID, PCWSTR};
-
-const SWITCH: u32 = WM_APP + 0x52;
-const CLASS: PCWSTR = w!("retype.InputEntry");
-
-#[cfg(test)]
-thread_local! {
-    // Model an installed, active entry whose sibling cannot be activated.
-    // Thread-local so ordinary TSF fixtures never select a real keyboard.
-    static FAILED_SELECTION: std::cell::Cell<Option<(bool, usize)>> = const { std::cell::Cell::new(None) };
-}
-#[cfg(test)]
-pub(crate) struct FailedSelection;
-#[cfg(test)]
-impl FailedSelection {
-    pub(crate) fn new(active_chinese: bool) -> Self {
-        FAILED_SELECTION.with(|slot| {
-            assert!(slot.replace(Some((active_chinese, 0))).is_none());
-        });
-        Self
-    }
-    pub(crate) fn attempts(&self) -> Option<usize> {
-        FAILED_SELECTION.with(|slot| slot.get().map(|(_, attempts)| attempts))
-    }
-}
-#[cfg(test)]
-impl Drop for FailedSelection {
-    fn drop(&mut self) {
-        FAILED_SELECTION.with(|slot| slot.set(None));
-    }
-}
+use windows::Win32::{System::Com::*, UI::TextServices::*};
+use windows_core::{implement, Interface, Result, BOOL, GUID};
 
 pub(crate) fn active_chinese() -> Option<bool> {
-    #[cfg(test)]
-    if let Some((chinese, _)) = FAILED_SELECTION.with(|slot| slot.get()) {
-        return Some(chinese);
-    }
     // SAFETY: Called only from the TSF apartment.
     unsafe {
         let manager: ITfInputProcessorProfileMgr =
@@ -87,6 +49,7 @@ pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
     let Some(session) = state.session() else {
         return Ok(());
     };
+    session.submit(InputEvent::SetEnglishPrediction(!chinese));
     if session.backend.with_kernel(|k| k.is_chinese()) == chinese {
         return Ok(());
     }
@@ -99,179 +62,19 @@ pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
     }
     Ok(())
 }
-fn select(chinese: bool) -> Result<()> {
-    #[cfg(test)]
-    if FAILED_SELECTION.with(|slot| {
-        if let Some((active, attempts)) = slot.get() {
-            slot.set(Some((active, attempts + 1)));
-            true
-        } else {
-            false
-        }
-    }) {
-        return Err(E_ACCESSDENIED.into());
-    }
-    let (language, profile, _) = INPUT_PROFILES[usize::from(!chinese)];
-    // SAFETY: No host edit lock or state mutex is held across TSF activation.
-    unsafe {
-        let profiles: ITfInputProcessorProfiles =
-            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
-        if !profiles
-            .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, language, &profile)?
-            .as_bool()
-        {
-            // An explicit retype mode switch also enables its sibling entry,
-            // as on macOS. Upgrades or user language-list changes can leave it
-            // registered but disabled; never enable an unrelated keyboard.
-            profiles.EnableLanguageProfile(&CLSID_RETYPE_TIP, language, &profile, true)?;
-            if !profiles
-                .IsEnabledLanguageProfile(&CLSID_RETYPE_TIP, language, &profile)?
-                .as_bool()
-            {
-                return Err(E_FAIL.into());
-            }
-        }
-        let manager: ITfInputProcessorProfileMgr = profiles.cast()?;
-        // Stage our profile before changing language so Windows does not pick a
-        // different keyboard as the default for the target language.
-        manager.ActivateProfile(
-            TF_PROFILETYPE_INPUTPROCESSOR,
-            language,
-            &CLSID_RETYPE_TIP,
-            &profile,
-            Default::default(),
-            TF_IPPMF_DONTCARECURRENTINPUTLANGUAGE,
-        )?;
-        profiles.ChangeCurrentLanguage(language)?;
-        manager.ActivateProfile(
-            TF_PROFILETYPE_INPUTPROCESSOR,
-            language,
-            &CLSID_RETYPE_TIP,
-            &profile,
-            Default::default(),
-            0,
-        )?;
-        // ActivateProfile can return S_FALSE (success HRESULT) without actually
-        // enabling/activating a profile. Verify the selected retype entry.
-        if active_chinese() != Some(chinese) {
-            return Err(E_FAIL.into());
-        }
-    }
-    Ok(())
-}
-pub(crate) fn schedule(state: &Arc<TipState>) {
-    let window = lock(&state.entry_bridge)
-        .as_ref()
-        .map(|bridge| bridge.window);
-    if let Some(window) = window {
-        // SAFETY: A message-only window owned by this TSF apartment. Destroying
-        // it during deactivation discards queued requests for the old service.
-        unsafe {
-            let _ = PostMessageW(Some(window), SWITCH, WPARAM(0), LPARAM(0));
-        }
-    }
-}
-unsafe extern "system" fn window_proc(
-    window: HWND,
-    message: u32,
-    wp: WPARAM,
-    lp: LPARAM,
-) -> LRESULT {
-    // SAFETY: The window owns exactly one Box<Weak<TipState>> from creation
-    // until WM_NCDESTROY. Upgrade outside state locks before reentrant COM calls.
-    unsafe {
-        let pointer = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Weak<TipState>;
-        if message == SWITCH && !pointer.is_null() {
-            let state = (*pointer).upgrade();
-            if let Some(state) = state.filter(|state| state.is_activated()) {
-                // Read the latest completed mode so rapid toggles coalesce before
-                // native activation can deactivate this service and its window.
-                let chinese = state
-                    .session()
-                    .map(|session| session.backend.with_kernel(|k| k.is_chinese()));
-                let Some(chinese) = chinese else {
-                    return LRESULT(0);
-                };
-                if let Err(error) = select(chinese) {
-                    tracing::warn!("retype input entry switch failed: {error}");
-                    // The host already accepted the mode toggle. Native entry
-                    // synchronization is best effort: a missing/blocked sibling
-                    // must not turn Shift into a no-op. Reapply the requested
-                    // mode if a reentrant profile notification changed it.
-                    if state.is_activated() {
-                        let _ = apply(&state, chinese);
-                    }
-                }
-            }
-            return LRESULT(0);
-        }
-        if message == WM_NCDESTROY && !pointer.is_null() {
-            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
-            drop(Box::from_raw(pointer));
-        }
-        DefWindowProcW(window, message, wp, lp)
-    }
-}
 pub(crate) struct EntryBridge {
     source: ITfSource,
     cookie: u32,
-    window: HWND,
-    instance: HINSTANCE,
 }
 impl EntryBridge {
     pub fn attach(state: &Arc<TipState>, manager: &ITfThreadMgr) -> Result<Self> {
-        // SAFETY: All registration, window and sink operations stay on the STA.
+        // SAFETY: Profile notifications stay on this owning TSF apartment.
         unsafe {
-            let mut module = HMODULE::default();
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
-                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                PCWSTR(window_proc as *const () as *const u16),
-                &mut module,
-            )?;
-            let instance = HINSTANCE(module.0);
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(window_proc),
-                hInstance: instance,
-                lpszClassName: CLASS,
-                ..Default::default()
-            };
-            if RegisterClassW(&class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
-                return Err(windows_core::Error::from_thread());
-            }
             let source: ITfSource = manager.cast()?;
             let sink: ITfActiveLanguageProfileNotifySink =
                 ProfileSink(Arc::downgrade(state)).into();
             let cookie = source.AdviseSink(&ITfActiveLanguageProfileNotifySink::IID, &sink)?;
-            match CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                CLASS,
-                w!(""),
-                WINDOW_STYLE(0),
-                0,
-                0,
-                0,
-                0,
-                Some(HWND_MESSAGE),
-                None,
-                Some(instance),
-                None,
-            ) {
-                Ok(window) => {
-                    let pointer = Box::into_raw(Box::new(Arc::downgrade(state)));
-                    SetWindowLongPtrW(window, GWLP_USERDATA, pointer as isize as _);
-                    Ok(Self {
-                        source,
-                        cookie,
-                        window,
-                        instance,
-                    })
-                }
-                Err(error) => {
-                    let _ = source.UnadviseSink(cookie);
-                    Err(error)
-                }
-            }
+            Ok(Self { source, cookie })
         }
     }
 }
@@ -279,9 +82,6 @@ impl Drop for EntryBridge {
     fn drop(&mut self) {
         unsafe {
             let _ = self.source.UnadviseSink(self.cookie);
-            let _ = DestroyWindow(self.window);
-            // Multiple instances can share the class; the last window unregisters it.
-            let _ = UnregisterClassW(CLASS, Some(self.instance));
         }
     }
 }
@@ -315,39 +115,6 @@ mod tests {
     use super::*;
     use retype_types::{Key, Modifiers};
     use std::sync::atomic::Ordering;
-
-    #[test]
-    fn entry_window_discards_queued_switches_when_service_is_removed() -> Result<()> {
-        // SAFETY: Private STA and message-only window. Remove the window before
-        // dispatching its queued request, so the test never selects a keyboard.
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-            let result = (|| -> Result<()> {
-                let manager: ITfThreadMgr =
-                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
-                let tid = manager.Activate()?;
-                let state = TipState::new();
-                state.tid.store(tid, Ordering::SeqCst);
-                state.activated.store(true, Ordering::SeqCst);
-                let bridge = EntryBridge::attach(&state, &manager)?;
-                let window = bridge.window;
-                assert!(IsWindow(Some(window)).as_bool());
-                *lock(&state.entry_bridge) = Some(bridge);
-                schedule(&state);
-                let bridge = lock(&state.entry_bridge).take();
-                drop(bridge);
-                assert!(!IsWindow(Some(window)).as_bool());
-                let mut message = MSG::default();
-                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
-                    DispatchMessageW(&message);
-                }
-                manager.Deactivate()?;
-                Ok(())
-            })();
-            CoUninitialize();
-            result
-        }
-    }
 
     #[test]
     fn profile_notifications_select_prediction_language_and_ignore_other_services() -> Result<()> {

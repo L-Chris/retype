@@ -186,9 +186,6 @@ impl ITfEditSession_Impl for Edit_Impl {
             self.state.writing.store(true, Ordering::SeqCst);
             let result = guarded(|| self.run(ec, &mut timing));
             self.state.writing.store(false, Ordering::SeqCst);
-            if result.is_ok() && matches!(self.work, Work::Toggle) {
-                crate::profiles::schedule(&self.state);
-            }
             if result.is_ok() && self.synchronous {
                 self.completed.store(true, Ordering::SeqCst);
             }
@@ -545,9 +542,11 @@ impl Edit_Impl {
                 let initial = session.backend.with_kernel(|k| k.render_state());
                 if !matches!(self.work, Work::Refresh)
                     && initial.composition.len() >= 3
-                    && session
-                        .backend
-                        .with_kernel(|k| !k.is_chinese() && k.config().english_spelling)
+                    && session.backend.with_kernel(|k| {
+                        !k.is_chinese()
+                            && k.english_prediction_enabled()
+                            && k.config().english_spelling
+                    })
                 {
                     crate::english_updates::watch(state);
                 }
