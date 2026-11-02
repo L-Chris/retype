@@ -340,7 +340,10 @@ impl Edit_Impl {
             },
             Work::Toggle => InputEvent::ToggleChinese,
             Work::SetChinese(chinese) => {
-                if session.backend.with_kernel(|k| k.is_chinese()) == chinese {
+                // A deferred profile edit may outlive its selected entry.
+                if chinese != state.can_toggle_mode()
+                    || session.backend.with_kernel(|k| k.is_chinese()) == chinese
+                {
                     return Ok(());
                 }
                 InputEvent::ToggleChinese

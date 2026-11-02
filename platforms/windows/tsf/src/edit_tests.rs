@@ -1142,6 +1142,7 @@ fn run_host() -> Result<()> {
         assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
         request(&state, &context, Work::Toggle)?;
+        request(&state, &context, Work::SetChinese(true))?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         assert_eq!(
             session.backend.with_kernel(|k| k.render_state()),
