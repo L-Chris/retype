@@ -10,6 +10,9 @@ pub(super) struct Clipboard {
 }
 impl Clipboard {
     pub(super) fn open(window: HWND) -> Option<Self> {
+        if window.is_null() {
+            return None;
+        }
         // SAFETY: The calling thread owns the matching CloseClipboard guard.
         if unsafe { OpenClipboard(window) } != 0 {
             Some(Self {
@@ -139,16 +142,56 @@ impl Drop for Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct ProbeWindow(HWND);
+    impl ProbeWindow {
+        fn new() -> Self {
+            use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, HWND_MESSAGE};
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            // SAFETY: Built-in class, private message-only window, no desktop UI.
+            let window = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    class.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(!window.is_null(), "Create clipboard probe window");
+            Self(window)
+        }
+    }
+    impl Drop for ProbeWindow {
+        fn drop(&mut self) {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0);
+            }
+        }
+    }
     fn other_thread_can_open() -> bool {
-        std::thread::spawn(|| Clipboard::open(std::ptr::null_mut()).is_some())
-            .join()
-            .unwrap_or(false)
+        std::thread::spawn(|| {
+            let window = ProbeWindow::new();
+            let held = Clipboard::open(window.0);
+            let opened = held.is_some();
+            drop(held);
+            opened
+        })
+        .join()
+        .unwrap_or(false)
     }
     #[test]
     fn only_the_native_transaction_holds_the_clipboard() {
+        let window = ProbeWindow::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let held = loop {
-            if let Some(held) = Clipboard::open(std::ptr::null_mut()) {
+            if let Some(held) = Clipboard::open(window.0) {
                 break held;
             }
             assert!(
