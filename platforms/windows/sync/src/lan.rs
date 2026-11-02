@@ -1165,7 +1165,6 @@ mod clipboard_windows;
 #[cfg(windows)]
 fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
     use windows_sys::Win32::{
-        Foundation::*,
         System::{DataExchange::*, LibraryLoader::GetModuleHandleW},
         UI::WindowsAndMessaging::*,
     };
@@ -1318,7 +1317,9 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
                             clipboard_windows::Read::Data(Some(bytes), observed) => {
                                 sequence = observed;
                                 let chars: Vec<_> = bytes
-                                    .chunks_exact(2)
+                                    .as_chunks::<2>()
+                                    .0
+                                    .iter()
                                     .map(|v| u16::from_le_bytes([v[0], v[1]]))
                                     .take_while(|v| *v != 0)
                                     .collect();
