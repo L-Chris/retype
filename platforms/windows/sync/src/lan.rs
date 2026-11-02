@@ -289,12 +289,13 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
     let mut image = false;
     // Seed the sequence without sending clipboard contents copied before enabling sync.
     unsafe {
-        read(buffer.as_mut_ptr(), buffer.len(), &mut last, &mut image);
+        read(buffer.as_mut_ptr(), 0, &mut last, &mut image);
     }
     while !stop.load(Ordering::Relaxed) {
-        let mut sequence = last;
-        let count = unsafe { read(buffer.as_mut_ptr(), buffer.len(), &mut sequence, &mut image) };
         let enabled = shared.lock().is_ok_and(|s| s.config.enabled);
+        let mut sequence = last;
+        let capacity = if enabled { buffer.len() } else { 0 };
+        let count = unsafe { read(buffer.as_mut_ptr(), capacity, &mut sequence, &mut image) };
         if sequence != last && sequence != own {
             if let Ok(mut pending) = incoming.lock() {
                 pending.take();
@@ -1156,12 +1157,16 @@ fn local_addresses(port: u16) -> Vec<String> {
     addresses
 }
 
+#[cfg(windows)]
+#[path = "clipboard_windows.rs"]
+mod clipboard_windows;
+
 #[allow(unsafe_code)]
 #[cfg(windows)]
 fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
     use windows_sys::Win32::{
         Foundation::*,
-        System::{DataExchange::*, LibraryLoader::GetModuleHandleW, Memory::*},
+        System::{DataExchange::*, LibraryLoader::GetModuleHandleW},
         UI::WindowsAndMessaging::*,
     };
     // SAFETY: This thread owns its message window and scopes clipboard access to
@@ -1230,6 +1235,7 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
         let mut last_sequence = own_sequence;
         let mut pending_read: Option<(u32, Instant)> = None;
         let mut pending_write: Option<Clip> = None;
+        let mut prepared_write: Option<clipboard_windows::Prepared> = None;
         while !stop.load(Ordering::Relaxed) {
             let mut message: MSG = std::mem::zeroed();
             while PeekMessageW(&mut message, hwnd, 0, 0, PM_REMOVE) != 0 {
@@ -1246,100 +1252,118 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
                 }
                 DispatchMessageW(&message);
             }
-            if let Some((sequence, started)) = pending_read {
+            if let Some((mut sequence, started)) = pending_read {
                 if started.elapsed() > Duration::from_secs(3) {
                     pending_read = None;
                     pending_write = None;
-                } else if OpenClipboard(hwnd) != 0 {
+                    prepared_write = None;
+                } else {
+                    // Never wait for synchronization state while holding the
+                    // clipboard. A local copy invalidates pending remote writes.
                     if let Ok(mut state) = shared.lock() {
                         state.journal.latest = None;
                     }
                     if let Ok(mut pending) = incoming.lock() {
                         pending.take();
                     }
-                    if sequence == GetClipboardSequenceNumber()
-                        && IsClipboardFormatAvailable(excluded) == 0
+                    let mut encoded_image = None;
+                    let mut text = None;
+                    let mut busy = false;
+                    let mut stale = false;
+                    for format in encoded_formats
+                        .iter()
+                        .map(|(format, _)| *format)
+                        .chain([17, 8])
                     {
-                        let mut encoded_image = None;
-                        // Encoded formats keep their bytes; raw screenshots fall back to PNG.
-                        for format in encoded_formats
-                            .iter()
-                            .map(|(format, _)| *format)
-                            .chain([17, 8])
-                        {
-                            let data = GetClipboardData(format);
-                            if data.is_null() {
-                                continue;
-                            }
-                            let size = GlobalSize(data);
-                            let limit = if format != 17 && format != 8 {
-                                crate::clipboard_protocol::MAX_IMAGE
-                            } else {
-                                crate::clipboard_protocol::MAX_PIXELS as usize * 4 + 124
-                            };
-                            if size == 0 || size > limit {
-                                continue;
-                            }
-                            let ptr = GlobalLock(data).cast::<u8>();
-                            if ptr.is_null() {
-                                continue;
-                            }
-                            let bytes = std::slice::from_raw_parts(ptr, size);
-                            encoded_image = if format != 17 && format != 8 {
-                                crate::clipboard_image::dimensions(bytes).map(|_| bytes.to_vec())
-                            } else {
-                                crate::clipboard_image::from_dib(bytes)
-                            };
-                            GlobalUnlock(data);
-                            if encoded_image.is_some() {
+                        let limit = if format != 17 && format != 8 {
+                            crate::clipboard_protocol::MAX_IMAGE
+                        } else {
+                            crate::clipboard_protocol::MAX_PIXELS as usize * 4 + 124
+                        };
+                        match clipboard_windows::read(hwnd, sequence, excluded, format, limit) {
+                            clipboard_windows::Read::Busy => {
+                                busy = true;
                                 break;
                             }
+                            clipboard_windows::Read::Stale => {
+                                stale = true;
+                                break;
+                            }
+                            clipboard_windows::Read::Data(Some(bytes), observed) => {
+                                sequence = observed;
+                                encoded_image = if format != 17 && format != 8 {
+                                    crate::clipboard_image::dimensions(&bytes).map(|_| bytes)
+                                } else {
+                                    crate::clipboard_image::from_dib(&bytes)
+                                };
+                                if encoded_image.is_some() {
+                                    break;
+                                }
+                            }
+                            clipboard_windows::Read::Data(None, observed) => {
+                                sequence = observed;
+                            }
                         }
-                        let mut text = None;
-                        if encoded_image.is_none() {
-                            let data = GetClipboardData(13);
-                            if !data.is_null() {
-                                let size = GlobalSize(data);
-                                if size <= 2 * crate::clipboard_protocol::MAX_TEXT + 2 {
-                                    let ptr = GlobalLock(data).cast::<u16>();
-                                    if !ptr.is_null() {
-                                        let slice = std::slice::from_raw_parts(ptr, size / 2);
-                                        let end = slice
-                                            .iter()
-                                            .position(|v| *v == 0)
-                                            .unwrap_or(slice.len());
-                                        text = Some(String::from_utf16_lossy(&slice[..end]));
-                                        GlobalUnlock(data);
+                    }
+                    if !busy && !stale && encoded_image.is_none() {
+                        match clipboard_windows::read(
+                            hwnd,
+                            sequence,
+                            excluded,
+                            13,
+                            2 * crate::clipboard_protocol::MAX_TEXT + 2,
+                        ) {
+                            clipboard_windows::Read::Busy => busy = true,
+                            clipboard_windows::Read::Stale => stale = true,
+                            clipboard_windows::Read::Data(Some(bytes), observed) => {
+                                sequence = observed;
+                                let chars: Vec<_> = bytes
+                                    .chunks_exact(2)
+                                    .map(|v| u16::from_le_bytes([v[0], v[1]]))
+                                    .take_while(|v| *v != 0)
+                                    .collect();
+                                text = Some(String::from_utf16_lossy(&chars));
+                            }
+                            clipboard_windows::Read::Data(None, observed) => {
+                                sequence = observed;
+                            }
+                        }
+                    }
+                    if !busy {
+                        // Encoding and journal/broadcast locks are outside every
+                        // native transaction. Discard a superseded snapshot.
+                        if !stale && sequence == GetClipboardSequenceNumber() {
+                            last_sequence = sequence;
+                            if let Ok(mut state) = shared.lock() {
+                                if state.config.enabled {
+                                    state.seq = state.seq.saturating_add(1);
+                                    let seq = state.seq;
+                                    let id = state.config.id.clone();
+                                    let clip = if let Some(bytes) = encoded_image {
+                                        state.journal.local_image(&id, seq, &bytes, now())
+                                    } else {
+                                        text.and_then(|text| {
+                                            state.journal.local(&id, seq, text, now())
+                                        })
+                                    };
+                                    if let Some(clip) = clip {
+                                        broadcast(&mut state, &clip);
                                     }
                                 }
                             }
                         }
-                        if let Ok(mut state) = shared.lock() {
-                            if state.config.enabled {
-                                state.seq = state.seq.saturating_add(1);
-                                let seq = state.seq;
-                                let id = state.config.id.clone();
-                                let clip = if let Some(bytes) = encoded_image {
-                                    state.journal.local_image(&id, seq, &bytes, now())
-                                } else {
-                                    text.and_then(|text| state.journal.local(&id, seq, text, now()))
-                                };
-                                if let Some(clip) = clip {
-                                    broadcast(&mut state, &clip);
-                                }
-                            }
-                        }
+                        pending_read = None;
+                        pending_write = None;
+                        prepared_write = None;
+                    } else {
+                        pending_read = Some((sequence, started));
                     }
-                    CloseClipboard();
-                    pending_read = None;
-                    // Any local copy takes precedence
-                    // over a remote write that was waiting for this clipboard.
-                    pending_write = None;
                 }
             }
             if let Ok(mut incoming) = incoming.lock() {
                 if let Some(clip) = incoming.take() {
                     pending_write = Some(clip);
+                    prepared_write = None;
                 }
             }
             if let Some(clip) = &pending_write {
@@ -1349,64 +1373,45 @@ fn clipboard_loop(incoming: Mailbox, stop: &AtomicBool, shared: &Mutex<State>) {
                     && clip.valid(now());
                 if !valid {
                     pending_write = None;
-                } else if pending_read.is_none()
-                    && GetClipboardSequenceNumber() == last_sequence
-                    && OpenClipboard(hwnd) != 0
-                {
-                    let formats = if let Some(image) = &clip.image {
-                        crate::clipboard_image::decode(image).and_then(|bytes| {
-                            let mime = crate::clipboard_image::mime_type(&bytes)?;
-                            let dib = crate::clipboard_image::to_dib(&bytes)?;
-                            let mut formats: Vec<_> = encoded_formats
-                                .iter()
-                                .filter(|(_, supported)| *supported == mime)
-                                .map(|(format, _)| (*format, bytes.clone()))
-                                .collect();
-                            formats.push((17, dib));
-                            Some(formats)
-                        })
-                    } else {
-                        Some(vec![(
-                            13,
-                            clip.text
-                                .encode_utf16()
-                                .chain(Some(0))
-                                .flat_map(u16::to_le_bytes)
-                                .collect(),
-                        )])
-                    };
-                    let mut applied = false;
-                    // Allocate before clearing so malformed images never erase a local copy.
-                    if let Some(formats) = formats {
-                        let mut allocations = Vec::new();
-                        for (format, bytes) in &formats {
-                            let data = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
-                            if data.is_null() {
-                                break;
-                            }
-                            let ptr = GlobalLock(data).cast::<u8>();
-                            if ptr.is_null() {
-                                GlobalFree(data);
-                                break;
-                            }
-                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-                            GlobalUnlock(data);
-                            allocations.push((*format, data));
-                        }
-                        let ready = allocations.len() == formats.len() && EmptyClipboard() != 0;
-                        for (format, data) in allocations {
-                            if ready && !SetClipboardData(format, data).is_null() {
-                                applied = true; // The clipboard owns this allocation.
-                            } else {
-                                GlobalFree(data);
-                            }
+                    prepared_write = None;
+                } else if pending_read.is_none() {
+                    if prepared_write.is_none() {
+                        let formats = if let Some(image) = &clip.image {
+                            crate::clipboard_image::decode(image).and_then(|bytes| {
+                                let mime = crate::clipboard_image::mime_type(&bytes)?;
+                                let dib = crate::clipboard_image::to_dib(&bytes)?;
+                                let mut formats: Vec<_> = encoded_formats
+                                    .iter()
+                                    .filter(|(_, supported)| *supported == mime)
+                                    .map(|(format, _)| (*format, bytes.clone()))
+                                    .collect();
+                                formats.push((17, dib));
+                                Some(formats)
+                            })
+                        } else {
+                            Some(vec![(
+                                13,
+                                clip.text
+                                    .encode_utf16()
+                                    .chain(Some(0))
+                                    .flat_map(u16::to_le_bytes)
+                                    .collect(),
+                            )])
+                        };
+                        prepared_write = formats
+                            .as_ref()
+                            .and_then(|formats| clipboard_windows::Prepared::new(formats));
+                        if prepared_write.is_none() {
+                            pending_write = None;
                         }
                     }
-                    CloseClipboard();
-                    if applied {
-                        own_sequence = GetClipboardSequenceNumber();
-                        last_sequence = own_sequence;
-                        pending_write = None;
+                    if let Some(prepared) = prepared_write.as_mut() {
+                        if let Some(sequence) = prepared.apply(hwnd, last_sequence) {
+                            own_sequence = sequence;
+                            last_sequence = sequence;
+                            pending_write = None;
+                            prepared_write = None;
+                        }
                     }
                 }
             }
