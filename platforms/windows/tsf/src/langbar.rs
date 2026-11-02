@@ -223,6 +223,9 @@ impl Button_Impl {
             let Some(state) = self.state.upgrade() else {
                 return Ok(());
             };
+            if matches!(work, edit::Work::Toggle) && !state.can_toggle_mode() {
+                return Ok(());
+            }
             let manager = lock(&state.thread_mgr).clone();
             let context =
                 manager.and_then(|m| unsafe { m.GetFocus().and_then(|d| d.GetTop()).ok() });
@@ -271,11 +274,19 @@ impl ITfLangBarItem_Impl for Button_Impl {
         Ok(())
     }
     fn GetStatus(&self) -> Result<u32> {
-        Ok(if self.hidden.load(Ordering::SeqCst) {
-            TF_LBI_STATUS_HIDDEN
-        } else {
-            0
-        })
+        Ok(
+            if self.hidden.load(Ordering::SeqCst)
+                || !self.voice
+                    && self
+                        .state
+                        .upgrade()
+                        .is_some_and(|state| !state.can_toggle_mode())
+            {
+                TF_LBI_STATUS_HIDDEN
+            } else {
+                0
+            },
+        )
     }
     fn Show(&self, show: BOOL) -> Result<()> {
         self.hidden.store(!show.as_bool(), Ordering::SeqCst);
@@ -659,6 +670,24 @@ mod tests {
             let sink: ITfLangBarItemSink = Updates(Arc::clone(&updates)).into();
             let cookie = source.AdviseSink(&ITfLangBarItemSink::IID, &sink)?;
             assert!(source.AdviseSink(&ITfLangBarItemSink::IID, &sink).is_err());
+            crate::profiles::apply(&state, false)?;
+            assert_eq!(item.GetStatus()?, TF_LBI_STATUS_HIDDEN);
+            item.OnClick(TF_LBI_CLK_LEFT, &POINT::default(), std::ptr::null())?;
+            assert!(!state
+                .session()
+                .unwrap()
+                .backend
+                .with_kernel(|k| k.is_chinese()));
+            let microphone: ITfLangBarItemButton = Button {
+                state: Arc::downgrade(&state),
+                sink: Arc::new(Mutex::new(None)),
+                hidden: AtomicBool::new(false),
+                voice: true,
+            }
+            .into();
+            assert_eq!(microphone.GetStatus()?, 0, "English keeps its voice button");
+            crate::profiles::apply(&state, true)?;
+            assert_eq!(item.GetStatus()?, 0);
             item.Show(false)?;
             assert_eq!(item.GetStatus()?, TF_LBI_STATUS_HIDDEN);
             assert_ne!(updates.load(Ordering::SeqCst) & TF_LBI_ICON, 0);

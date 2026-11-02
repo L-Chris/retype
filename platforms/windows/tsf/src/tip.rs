@@ -134,6 +134,7 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 pub struct TipState {
     pub tid: AtomicU32,
     pub activated: AtomicBool,
+    pub(crate) english_entry: AtomicBool,
     pub thread_mgr: Mutex<Option<ITfThreadMgr>>,
     pub session: Mutex<Option<Arc<Session>>>,
     pub(crate) composition: Mutex<Option<edit::Composition>>,
@@ -164,6 +165,7 @@ impl TipState {
         Arc::new(Self {
             tid: AtomicU32::new(0),
             activated: AtomicBool::new(false),
+            english_entry: AtomicBool::new(false),
             thread_mgr: Mutex::new(None),
             session: Mutex::new(None),
             composition: Mutex::new(None),
@@ -438,6 +440,9 @@ impl TipState {
                 let _ = sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT | TF_LBI_STATUS);
             }
         }
+    }
+    pub(crate) fn can_toggle_mode(&self) -> bool {
+        !self.english_entry.load(Ordering::SeqCst)
     }
     pub(crate) fn sync_scheme(&self) {
         if lock(&self.composition).is_some() || self.pending.load(Ordering::SeqCst) != 0 {
@@ -739,7 +744,7 @@ impl KeyEventSink_Impl {
             Some(edit::Work::Voice(true))
         } else if matches(bindings.translate) {
             Some(edit::Work::Translate)
-        } else if matches(bindings.mode) {
+        } else if state.can_toggle_mode() && matches(bindings.mode) {
             Some(edit::Work::Toggle)
         } else {
             None
@@ -931,7 +936,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return Ok(false.into());
             };
             let binding = state.shortcuts().mode;
-            if binding.is_tap() && normalized_modifier(vk) == binding.vk {
+            if state.can_toggle_mode() && binding.is_tap() && normalized_modifier(vk) == binding.vk
+            {
                 return Ok(state.is_activated().into());
             }
             lock(&state.shift_tap).other_key();
@@ -950,7 +956,10 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
         guarded(|| {
             if let Some(state) = self.state.upgrade() {
                 let binding = state.shortcuts().mode;
-                if binding.is_tap() && normalized_modifier(vk) == binding.vk {
+                if state.can_toggle_mode()
+                    && binding.is_tap()
+                    && normalized_modifier(vk) == binding.vk
+                {
                     if state.is_activated() {
                         lock(&state.shift_tap).press(tap_modifiers(binding.vk));
                     }
@@ -972,7 +981,8 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 return true;
             }
             let binding = state.shortcuts().mode;
-            binding.is_tap()
+            state.can_toggle_mode()
+                && binding.is_tap()
                 && normalized_modifier(vk) == binding.vk
                 && state.is_activated()
                 && lock(&state.shift_tap).pressed
@@ -993,7 +1003,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
             let binding = state.shortcuts().mode;
             if binding.is_tap() && normalized_modifier(vk) == binding.vk {
                 let toggle = lock(&state.shift_tap).release(tap_modifiers(binding.vk));
-                if toggle && state.is_activated() {
+                if toggle && state.is_activated() && state.can_toggle_mode() {
                     if let Ok(ctx) = ctx.ok() {
                         if let Err(error) = edit::request(&state, ctx, edit::Work::Toggle) {
                             tracing::warn!("Shift mode switch rejected: {error}");

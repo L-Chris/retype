@@ -147,6 +147,12 @@ static void CheckInputEntryModes(RTAppDelegate *delegate) {
     [controller setValue:RTEnglishInputSource forTag:kTextServiceInputModePropertyTag client:client];
     for(NSString *key in @[@"h",@"e",@"l"])[controller applyCommand:@{@"type":@"key",@"value":key}];
     Check([controller.state[@"candidates"] containsObject:@"hello"],@"Independent English retains completion");
+    TapShift(controller,client);
+    Check(!controller.chinese&&[client.marked isEqual:@"hel"]&&[controller.state[@"candidates"] containsObject:@"hello"],@"English entry ignores Shift without committing its word or losing completion");
+    [controller doCommandBySelector:@selector(toggleMode:) commandDictionary:@{}];
+    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.05]];
+    Check(!controller.chinese&&[client.marked isEqual:@"hel"],@"English entry ignores mode commands");
+    Check(![[controller menu].itemArray filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSMenuItem *item,NSDictionary *bindings){(void)bindings;return item.action==@selector(toggleMode:);}]].count,@"English entry has no language toggle menu item");
     NSString *before=client.text;[controller setValue:RTChineseInputSource forTag:kTextServiceInputModePropertyTag client:client];
     Check(controller.chinese&&[client.text isEqual:[before stringByAppendingString:@"hel"]]&&!client.marked.length,@"Entry changes commit predictive English once");
     TapShift(controller,client);[controller applyCommand:@{@"type":@"key",@"value":@"h"}];

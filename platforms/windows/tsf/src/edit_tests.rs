@@ -1121,6 +1121,11 @@ fn run_host() -> Result<()> {
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
         // Only selecting the independent English profile enables prediction.
         crate::profiles::apply(&state, false)?;
+        assert!(!keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
         session.submit(InputEvent::SetEnglishOptions {
             enabled: true,
             spelling: true,
@@ -1133,6 +1138,15 @@ fn run_host() -> Result<()> {
             .candidates
             .iter()
             .any(|c| c.text == "hello")));
+        let before_toggle = session.backend.with_kernel(|k| k.render_state());
+        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        request(&state, &context, Work::Toggle)?;
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        assert_eq!(
+            session.backend.with_kernel(|k| k.render_state()),
+            before_toggle
+        );
         crate::profiles::apply(&state, true)?;
         assert!(lock(&state.composition).is_none());
         tap_shift()?;
