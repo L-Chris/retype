@@ -220,6 +220,9 @@ impl ITfEditSession_Impl for Edit_Impl {
 impl Edit_Impl {
     fn run(&self, ec: u32, timing: &mut crate::input_profile::Timing) -> Result<()> {
         let state = &self.state;
+        if matches!(self.work, Work::Toggle) && !state.can_toggle_mode() {
+            return Ok(());
+        }
         if matches!(self.work, Work::PairBackspace) {
             return if crate::preferences::symbol_completion()
                 && learnable(&self.context, ec)
@@ -337,7 +340,10 @@ impl Edit_Impl {
             },
             Work::Toggle => InputEvent::ToggleChinese,
             Work::SetChinese(chinese) => {
-                if session.backend.with_kernel(|k| k.is_chinese()) == chinese {
+                // A deferred profile edit may outlive its selected entry.
+                if chinese != state.can_toggle_mode()
+                    || session.backend.with_kernel(|k| k.is_chinese()) == chinese
+                {
                     return Ok(());
                 }
                 InputEvent::ToggleChinese

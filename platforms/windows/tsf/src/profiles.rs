@@ -1,5 +1,5 @@
-//! System-selected entries determine English prediction; Shift only changes the
-//! internal Chinese/ASCII mode and never selects a different system entry.
+//! System-selected entries determine English prediction. Only the Chinese entry
+//! exposes an internal Chinese/ASCII toggle; the English entry stays English.
 use crate::{
     edit,
     ids::*,
@@ -34,6 +34,9 @@ fn mode(profile: &GUID) -> Option<bool> {
     }
 }
 pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
+    state
+        .english_entry
+        .store(!chinese, std::sync::atomic::Ordering::SeqCst);
     let compartment = lock(&state.mode_bridge)
         .as_ref()
         .map(|bridge| bridge.compartment.clone());
@@ -51,6 +54,7 @@ pub(crate) fn apply(state: &Arc<TipState>, chinese: bool) -> Result<()> {
     };
     session.submit(InputEvent::SetEnglishPrediction(!chinese));
     if session.backend.with_kernel(|k| k.is_chinese()) == chinese {
+        state.notify_language_bar();
         return Ok(());
     }
     let composition = lock(&state.composition).clone();
@@ -127,6 +131,7 @@ mod tests {
         unsafe {
             sink.OnActivated(&CLSID_RETYPE_TIP, &GUID_PROFILE_ENGLISH, true)?;
             assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+            assert!(!state.can_toggle_mode());
             session.submit(InputEvent::SetEnglishOptions {
                 enabled: true,
                 spelling: true,
@@ -149,6 +154,7 @@ mod tests {
             assert!(!session.backend.with_kernel(|k| k.is_chinese()));
             sink.OnActivated(&CLSID_RETYPE_TIP, &GUID_PROFILE_RETYPE, true)?;
             assert!(session.backend.with_kernel(|k| k.is_chinese()));
+            assert!(state.can_toggle_mode());
             state.activated.store(false, Ordering::SeqCst);
             sink.OnActivated(&CLSID_RETYPE_TIP, &GUID_PROFILE_ENGLISH, true)?;
             assert!(session.backend.with_kernel(|k| k.is_chinese()));

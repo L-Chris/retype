@@ -43,7 +43,10 @@ class InputEntriesTest {
           .findAccessibilityNodeInfosByText(label).firstOrNull { it.text?.toString() == label }
       while (action != null && !action.isClickable) action = action.parent
       assertTrue("System picker row must accept selection", action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
-      find(By.desc(if (language == "en-US") "切换至中文" else "切换至英文"))
+      if (language == "en-US") {
+        assertTrue(device.wait(Until.gone(By.desc("切换至英文")), 10000))
+        assertFalse(device.hasObject(By.desc("切换至中文")))
+      } else find(By.desc("切换至英文"))
       assertEquals(language, manager.currentInputMethodSubtype?.languageTag)
     }
     try {
@@ -56,8 +59,12 @@ class InputEntriesTest {
       find(By.desc("editor-normal")).click()
       find(By.desc("retype"))
       select("retype English", "en-US")
+      device.pressKeyCode(android.view.KeyEvent.KEYCODE_SHIFT_LEFT)
       for (letter in "hel") find(By.text(letter.toString())).click()
+      device.pressKeyCode(android.view.KeyEvent.KEYCODE_SHIFT_LEFT)
       find(By.desc("展开候选")).click()
+      assertFalse(device.hasObject(By.desc("切换至中文")))
+      assertFalse(device.hasObject(By.desc("切换至英文")))
       find(By.desc("candidate-hello")).click()
       assertTrue(find(By.desc("editor-normal")).text.endsWith("hello "))
       // Select the Chinese entry through Android, not retype's internal button.

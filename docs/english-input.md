@@ -7,8 +7,9 @@ This first stage adds local word completion, one-edit spelling suggestions and p
 Windows, macOS and Android expose **retype 中文** and **retype English** separately.
 Choose the English entry in the system input picker to use retype completion,
 spelling suggestions and personal vocabulary. Switching back to a retype entry
-starts in its own language. Shift and the mode button change only the internal
-Chinese/ASCII mode; they never select another system entry. In the Chinese entry,
+starts in its own language. The English entry stays English and has no Chinese/English
+mode button or switching shortcut. In the Chinese entry, Shift and the mode button
+change only the internal Chinese/ASCII mode; they never select another system entry. Its
 English mode is immediate text input with no marked text or candidates. English
 completion and spelling suggestions in English mode require selecting the
 independent **retype English** entry in the system picker.

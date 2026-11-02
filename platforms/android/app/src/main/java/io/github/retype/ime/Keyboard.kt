@@ -279,14 +279,16 @@ fun Keyboard(
                   { onKey(",", 0) },
               )
               KeyCap("空格", Modifier.weight(3.8f).height(height), { press("space") }, onLongClick = onVoice)
-              KeyCap(
-                  "",
-                  Modifier.weight(.9f).height(height).semantics {
-                    contentDescription = if (state.chinese) "切换至英文" else "切换至中文"
-                  },
-                  onToggle,
-                  content = { LanguageIcon(state.chinese) },
-              )
+              if (!state.englishEntry) {
+                KeyCap(
+                    "",
+                    Modifier.weight(.9f).height(height).semantics {
+                      contentDescription = if (state.chinese) "切换至英文" else "切换至中文"
+                    },
+                    onToggle,
+                    content = { LanguageIcon(state.chinese) },
+                )
+              }
               KeyCap(
                   state.enterLabel,
                   Modifier.weight(1.6f).height(height),

@@ -32,6 +32,7 @@ data class KeyboardState(
     val pageStart: Int = 0,
     val selected: Int = 0,
     val chinese: Boolean = true,
+    val englishEntry: Boolean = false,
     val ready: Boolean = false,
     val resourcesMissing: Boolean = false,
     val password: Boolean = false,
@@ -195,12 +196,15 @@ class RetypeImeService :
     val preferences = getSharedPreferences("settings", MODE_PRIVATE)
     val subtype = selectedSubtype ?: getSystemService(InputMethodManager::class.java).currentInputMethodSubtype
     englishEntry = subtype?.languageTag == "en-US" || subtype?.locale == "en_US"
+    modifierTap = 0
+    modifierUsed = false
     val chinese = !policy.ascii && !englishEntry
     val flypy = preferences.getBoolean("flypy", false)
     Log.d("retype", "session scheme=${if (flypy) "flypy" else "full"} epoch=$current")
     state =
         KeyboardState(
             chinese = chinese,
+            englishEntry = englishEntry,
             password = policy.password,
             numeric = policy.literal && !policy.password,
             ready = policy.literal,
@@ -501,7 +505,7 @@ class RetypeImeService :
 
   private fun toggle() {
     Log.d("retype", "mode switch requested epoch=$epoch literal=${policy.literal}")
-    if (policy.literal) return
+    if (policy.literal || englishEntry) return
     if (state.resourcesMissing) {
       finishStatistics()
       state = state.copy(chinese = !state.chinese)
@@ -678,14 +682,14 @@ class RetypeImeService :
       translate()
       return true
     }
-    if (event.repeatCount == 0 &&
+    if (!englishEntry && event.repeatCount == 0 &&
         bindings.getJSONObject("mode").getInt("modifiers") != 0 &&
         Shortcuts.matches(bindings.getJSONObject("mode"), event)) {
       toggle()
       return true
     }
     val tap = bindings.getJSONObject("mode")
-    if (tap.getInt("modifiers") == 0 &&
+    if (!englishEntry && tap.getInt("modifiers") == 0 &&
         tap.getInt("vk") != 0 &&
         Shortcuts.vk(keyCode) == tap.getInt("vk")) {
       modifierTap = keyCode

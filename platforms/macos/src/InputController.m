@@ -81,6 +81,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ComponentInputModeDict"];
 }
 - (void)switchInputMode {
+    if ([self.inputModeID isEqual:RTEnglishInputSource]) return;
     [self applyChineseMode:!self.chinese client:self.activeClient];
 }
 - (BOOL)ensureSession {
@@ -111,6 +112,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
             else if(!down&&self.holdingVoice){self.holdingVoice=NO;[(RTAppDelegate *)NSApp.delegate voiceStop];}return NO;
         }
         for(NSString *role in @[@"mode",@"translate"]){NSDictionary *binding=shortcuts[role];
+            if([role isEqual:@"mode"]&&[self.inputModeID isEqual:RTEnglishInputSource])continue;
             if([binding[@"tap"] boolValue]&&[binding[@"key"] unsignedIntValue]==event.keyCode){
                 NSEventModifierFlags flag=RTFlagForKey(event.keyCode);
                 if(event.modifierFlags&flag)self.pendingTap=RTModifiers(event.modifierFlags&~flag)?nil:role;
@@ -126,6 +128,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     }
     self.pendingTap = nil;
     for(NSString *role in @[@"mode",@"translate",@"voice"]){NSDictionary *binding=shortcuts[role];
+        if([role isEqual:@"mode"]&&[self.inputModeID isEqual:RTEnglishInputSource])continue;
         if(![binding[@"tap"] boolValue]&&event.keyCode==[binding[@"key"] unsignedIntValue]&&RTModifiers(event.modifierFlags)==[binding[@"mods"] unsignedIntValue]){if(!event.isARepeat)[self shortcut:role];return YES;}
     }
     if(event.keyCode==53&&RTVoice.shared.running){[(RTAppDelegate *)NSApp.delegate voiceCancel];return YES;}
@@ -234,10 +237,12 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
 }
 - (NSMenu *)menu {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"retype"];
-    NSMenuItem *mode = [[NSMenuItem alloc] initWithTitle:self.chinese ? @"切换到英文" : @"切换到中文" action:@selector(toggleMode:) keyEquivalent:@""];
-    mode.target = self;
-    [menu addItem:mode];
-    [menu addItem:NSMenuItem.separatorItem];
+    if (![self.inputModeID isEqual:RTEnglishInputSource]) {
+        NSMenuItem *mode = [[NSMenuItem alloc] initWithTitle:self.chinese ? @"切换到英文" : @"切换到中文" action:@selector(toggleMode:) keyEquivalent:@""];
+        mode.target = self;
+        [menu addItem:mode];
+        [menu addItem:NSMenuItem.separatorItem];
+    }
     NSMenuItem *settings = [[NSMenuItem alloc] initWithTitle:@"设置…" action:@selector(showPreferences:) keyEquivalent:@""];
     settings.target = self;
     [menu addItem:settings];
