@@ -41,3 +41,11 @@ xcrun clang -DRT_UI_SMOKE -mmacosx-version-min=13.0 -fobjc-arc -fblocks -O1 -Wal
 RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/termination
 RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/termination --fail-flush
 python3 platforms/macos/tests/update-helper.py
+
+# Named pasteboard only: synthetic text/images and native callback measurements.
+xcrun clang -DRT_UI_SMOKE -mmacosx-version-min=13.0 -fobjc-arc -fblocks -O1 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+    -I platforms/macos/include -I platforms/macos/src platforms/macos/src/*.m platforms/macos/tests/ClipboardSmoke.m "$library" \
+    -framework Cocoa -framework ImageIO -framework Carbon -framework InputMethodKit -framework QuartzCore -framework UniformTypeIdentifiers \
+    -framework Security -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox -framework ApplicationServices \
+    -lc++ -liconv -lresolv -o target/macos-ui-validation/clipboard
+RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/clipboard
