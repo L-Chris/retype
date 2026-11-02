@@ -12,6 +12,7 @@ class KeyboardIntegrationTest {
   @Suppress("DEPRECATION")
   @Test
   fun touchCompositionEnglishAndPrivateFieldSwitch() {
+    org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 34)
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     kotlinx.coroutines.runBlocking { ResourceFixtures.prepare(instrumentation.targetContext) }
     val device = UiDevice.getInstance(instrumentation)
@@ -44,12 +45,26 @@ class KeyboardIntegrationTest {
     val ime = android.content.ComponentName(instrumentation.targetContext, RetypeImeService::class.java).flattenToShortString()
     val wasEnabled =
         device.executeShellCommand("ime list -s").lineSequence().any { it.trim() == ime }
+    val manager = instrumentation.targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+    val own = manager.inputMethodList.first { it.id == ime }
+    val oldSubtypes = manager.getEnabledInputMethodSubtypeList(own, false).map { it.hashCode() }.toIntArray()
+    fun selectEntry(label: String) {
+      instrumentation.runOnMainSync { manager.showInputMethodPicker() }
+      UiScrollable(UiSelector().resourceId("android:id/list")).scrollIntoView(UiSelector().textContains(label))
+      device.waitForIdle()
+      val row = find(By.textContains(label))
+      if (row == null) device.dumpWindowHierarchy(java.io.File(instrumentation.targetContext.cacheDir,"entry-picker-failure.xml"))
+      assertNotNull("Missing $label; enabled=" + manager.getEnabledInputMethodSubtypeList(own,false).map { it.languageTag }, row)
+      var action = instrumentation.uiAutomation.rootInActiveWindow
+          .findAccessibilityNodeInfosByText(label).firstOrNull { it.text?.toString() == label }
+      while (action != null && !action.isClickable) action = action.parent
+      assertTrue("System picker row must accept selection", action?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) == true)
+    }
     try {
       prefs.edit().putBoolean("flypy", true).putBoolean("chinese", true).commit()
       device.executeShellCommand("ime enable $ime")
+      manager.setExplicitlyEnabledInputMethodSubtypes(ime, intArrayOf(1, 2))
       device.executeShellCommand("ime set $ime")
-      val manager = instrumentation.targetContext.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
-      val own = manager.inputMethodList.first { it.id == ime }
       assertEquals(2, own.subtypeCount)
 
       val launched =
@@ -59,7 +74,7 @@ class KeyboardIntegrationTest {
       assertNotNull(editor)
       editor!!.click()
       assertNotNull(find(By.desc("retype"), 10000))
-      find(By.desc("切换至中文"), 500)?.click()
+      selectEntry("retype 中文")
       assertNotNull(find(By.desc("切换至英文")))
       assertEquals("zh-CN", manager.currentInputMethodSubtype?.languageTag)
       for (letter in "wo") find(By.text(letter.toString()))!!.click()
@@ -82,8 +97,7 @@ class KeyboardIntegrationTest {
       assertNotNull(candidate)
       candidate!!.click()
       assertNotNull(find(By.text("你好")))
-      val mode = device.findObject(By.desc("切换至英文"))
-      mode.click()
+      selectEntry("retype English")
       device.waitForIdle()
       if (android.os.Build.VERSION.SDK_INT >= 33) instrumentation.uiAutomation.clearCache()
       val switched = find(By.desc("切换至中文")) != null
@@ -93,7 +107,7 @@ class KeyboardIntegrationTest {
         device.executeShellCommand("screencap -p /sdcard/Download/retype-switch-failure.png")
       }
       assertTrue("English mode must update the keyboard", switched)
-      assertEquals("The system entry must follow the keyboard toggle", "en-US", manager.currentInputMethodSubtype?.languageTag)
+      assertEquals("English prediction belongs to the independent entry", "en-US", manager.currentInputMethodSubtype?.languageTag)
       for (letter in "hel") find(By.text(letter.toString()))!!.click()
       // Personal learning can move a long word outside the compact viewport.
       find(By.desc("展开候选"))!!.click()
@@ -123,6 +137,7 @@ class KeyboardIntegrationTest {
           find(By.desc("editor-normal"))!!.text,
       ) // Old composition stays in its old field.
     } finally {
+      manager.setExplicitlyEnabledInputMethodSubtypes(ime, oldSubtypes)
       prefs.edit().putBoolean("flypy", oldFlypy).putBoolean("chinese", oldChinese).commit()
       if (oldIme != "null" && oldIme.isNotEmpty())
           device.executeShellCommand("ime set $oldIme")

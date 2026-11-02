@@ -103,6 +103,7 @@ struct Part {
 
 pub struct Kernel {
     cfg: KernelConfig,
+    english_prediction: bool,
     decoder: Decoder,
     dict: Arc<dyn Lexicon>,
     learner: Arc<dyn LearningStore>,
@@ -170,6 +171,7 @@ impl Kernel {
             dict,
             learner,
             english: retype_english::current(),
+            english_prediction: true,
             cloud,
             ctx: ContextSnapshot::empty(),
             gen: 0,
@@ -293,6 +295,7 @@ impl Kernel {
     pub fn handle(&mut self, ev: InputEvent) -> Vec<KernelAction> {
         let mut actions: Vec<KernelAction> = Vec::with_capacity(4);
         match ev {
+            InputEvent::SetEnglishPrediction(enabled) => self.english_prediction = enabled,
             InputEvent::ResetComposition => self.cancel_composition(&mut actions),
             InputEvent::SetEnglishOptions { enabled, spelling } => {
                 if !self.is_chinese() && self.has_composition() {
@@ -308,6 +311,7 @@ impl Kernel {
             InputEvent::EnglishCompleted { gen, candidates } => {
                 if gen == self.gen
                     && !self.is_chinese()
+                    && self.english_prediction_enabled()
                     && self.has_composition()
                     && self.cfg.english_spelling
                 {
@@ -369,7 +373,7 @@ impl Kernel {
         if !self.has_composition() {
             self.english = retype_english::current();
         }
-        if !self.is_chinese() && self.cfg.english_enabled {
+        if !self.is_chinese() && self.english_prediction_enabled() {
             self.on_english_key(key, mods, actions);
             return;
         }
@@ -1092,6 +1096,10 @@ impl Kernel {
     /// 学习器句柄（后端执行 `SideEffect::Learn` 时用）。
     pub fn english_dictionary(&self) -> Arc<retype_english::Vocabulary> {
         Arc::clone(&self.english)
+    }
+
+    pub fn english_prediction_enabled(&self) -> bool {
+        self.cfg.english_enabled && self.english_prediction
     }
 
     pub fn learner(&self) -> &Arc<dyn LearningStore> {

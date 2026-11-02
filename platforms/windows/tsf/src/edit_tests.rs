@@ -1080,24 +1080,69 @@ fn run_host() -> Result<()> {
         lock(&data).input_scope = Some(IS_DEFAULT);
         request(&state, &context, Work::Toggle)?;
         assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        crate::profiles::apply(&state, true)?;
         let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
             state: Arc::downgrade(&state),
         }
         .into();
         let shift = WPARAM(0x10);
         let lp = LPARAM(0);
-        assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
-        assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
-        assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
-        assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+        let tap_shift = || -> Result<()> {
+            assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
+            assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
+            assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
+            assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
+            Ok(())
+        };
+        tap_shift()?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
-        // Using Shift with another key must not switch modes on release.
+        assert!(!session
+            .backend
+            .with_kernel(|k| k.english_prediction_enabled()));
+        let before = lock(&data).text.len();
+        for ch in "HEL".chars() {
+            assert!(keys.OnKeyDown(&context, WPARAM(ch as usize), lp)?.as_bool());
+            assert!(!session
+                .backend
+                .with_kernel(|k| k.has_composition() || k.has_candidates()));
+        }
+        assert_eq!(
+            lock(&data).text.len(),
+            before + 3,
+            "Shift English inserts each letter without composing"
+        );
         assert!(keys.OnTestKeyDown(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
         let _ = keys.OnTestKeyDown(&context, WPARAM('A' as usize), lp)?;
         assert!(keys.OnTestKeyUp(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        tap_shift()?;
+        assert!(session.backend.with_kernel(|k| k.is_chinese()));
+        // Only selecting the independent English profile enables prediction.
+        crate::profiles::apply(&state, false)?;
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: true,
+            spelling: true,
+        });
+        for ch in "hel".chars() {
+            request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
+        }
+        assert!(session.backend.with_kernel(|k| k
+            .render_state()
+            .candidates
+            .iter()
+            .any(|c| c.text == "hello")));
+        crate::profiles::apply(&state, true)?;
+        assert!(lock(&state.composition).is_none());
+        tap_shift()?;
+        assert!(!session
+            .backend
+            .with_kernel(|k| k.is_chinese() || k.english_prediction_enabled()));
+        session.submit(InputEvent::SetEnglishOptions {
+            enabled: false,
+            spelling: false,
+        });
         let text_before = lock(&data).text.len();
         let letter = WPARAM('Z' as usize);
         assert!(keys.OnTestKeyDown(&context, letter, lp)?.as_bool());

@@ -236,7 +236,6 @@ impl Button_Impl {
                     };
                     session.submit(event);
                     state.notify_language_bar();
-                    crate::profiles::schedule(&state);
                 }
             }
             Ok(())

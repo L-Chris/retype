@@ -133,6 +133,9 @@ pub enum InputEvent {
     ContextUpdated(super::ContextSnapshot),
     /// 中英切换（Shift / 热键 / 语言栏点击）。平台层判定后投递，内核不猜按键组合。
     ToggleChinese,
+    /// Whether the selected input entry supports predictive English. Set at
+    /// entry/session boundaries; mode toggles do not change the selected entry.
+    SetEnglishPrediction(bool),
     SetPinyinScheme(PinyinScheme),
     SetEnglishOptions {
         enabled: bool,

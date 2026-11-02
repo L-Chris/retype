@@ -24,6 +24,12 @@ image = b"RTDICT01" + struct.pack("<IHBd", 1, len(word), 1, 100.0) + word + stru
 digest = hashlib.sha256(image).hexdigest()
 (root / f"legacy-base-{digest}.bin").write_bytes(image)
 (root / "legacy-base.current").write_text(digest)
+# One synthetic English word, installed through the same mapped resource path.
+word = b"hello"
+image = b"RTENGL01" + struct.pack("<IIIIQII", 1, 1, 0, len(word), 1000, 0xffffffff, 0) + word
+digest = hashlib.sha256(image).hexdigest()
+(root / f"legacy-english-{digest}.bin").write_bytes(image)
+(root / "legacy-english.current").write_text(digest)
 PY
 
 RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/smoke
@@ -35,3 +41,11 @@ xcrun clang -DRT_UI_SMOKE -mmacosx-version-min=13.0 -fobjc-arc -fblocks -O1 -Wal
 RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/termination
 RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/termination --fail-flush
 python3 platforms/macos/tests/update-helper.py
+
+# Named pasteboard only: synthetic text/images and native callback measurements.
+xcrun clang -DRT_UI_SMOKE -mmacosx-version-min=13.0 -fobjc-arc -fblocks -O1 -Wall -Wextra -Werror -Wno-deprecated-declarations \
+    -I platforms/macos/include -I platforms/macos/src platforms/macos/src/*.m platforms/macos/tests/ClipboardSmoke.m "$library" \
+    -framework Cocoa -framework ImageIO -framework Carbon -framework InputMethodKit -framework QuartzCore -framework UniformTypeIdentifiers \
+    -framework Security -framework SystemConfiguration -framework AVFoundation -framework AudioToolbox -framework ApplicationServices \
+    -lc++ -liconv -lresolv -o target/macos-ui-validation/clipboard
+RETYPE_TEST_ROOT="$PWD/target/macos-ui-validation/data" target/macos-ui-validation/clipboard

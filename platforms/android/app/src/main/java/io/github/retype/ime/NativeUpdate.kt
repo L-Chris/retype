@@ -42,5 +42,6 @@ internal class NativeCommand private constructor(
     fun reset() = NativeCommand(5)
     fun english(enabled: Boolean, spelling: Boolean) = NativeCommand(6, flags = (if (enabled) 1 else 0) or (if (spelling) 2 else 0))
     fun voiceLearn(text: String) = NativeCommand(7, text)
+    fun prediction(enabled: Boolean) = NativeCommand(8, flags = if (enabled) 1 else 0)
   }
 }

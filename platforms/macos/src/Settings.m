@@ -880,11 +880,13 @@ static RTSettings *RTLoadedSettings;
         [self finishCard];
 
         [self newCard];
+        [self label:@"英文输入法" size:15];
         [self toggle:@"英文单词补全" path:@"input.english"];
         [self divider];
         NSSwitch *spelling = [self toggle:@"英文拼写建议" path:@"input.spelling"];
         spelling.enabled = [[self read:@"input.english"] boolValue];
-        [self divider];
+        [self finishCard];
+        [self newCard];
         [self toggle:@"符号自动补全" path:@"input.symbols"];
         [self finishCard];
 

@@ -57,7 +57,10 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
 - (void)setInputMode:(NSString *)identifier client:(id)sender {
     if (![identifier isEqual:RTChineseInputSource] && ![identifier isEqual:RTEnglishInputSource]) return;
     self.inputModeID = identifier;
-    BOOL chinese = [identifier isEqual:RTChineseInputSource];
+    if(self.session)[self applyCommand:@{@"type":@"prediction",@"enabled":@([identifier isEqual:RTEnglishInputSource])}];
+    [self applyChineseMode:[identifier isEqual:RTChineseInputSource] client:sender];
+}
+- (void)applyChineseMode:(BOOL)chinese client:(id)sender {
     if (self.session && self.chinese != chinese) {
         if (sender) self.activeClient = sender;
         [self applyCommand:@{@"type":@"toggle"}];
@@ -77,23 +80,8 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     (void)sender;
     return [NSBundle.mainBundle objectForInfoDictionaryKey:@"ComponentInputModeDict"];
 }
-- (void)switchInputEntry {
-    NSString *target = self.chinese ? RTEnglishInputSource : RTChineseInputSource;
-    NSDictionary *filter = @{(__bridge NSString *)kTISPropertyInputSourceID:target};
-    CFArrayRef sources = TISCreateInputSourceList((__bridge CFDictionaryRef)filter, true);
-    OSStatus status = paramErr;
-    if (sources && CFArrayGetCount(sources)) {
-        TISInputSourceRef source = (TISInputSourceRef)CFArrayGetValueAtIndex(sources, 0);
-        // An explicit retype toggle also enables its sibling entry if necessary.
-        status = TISEnableInputSource(source);
-        if (status == noErr) {
-            [self commitComposition:self.activeClient];
-            status = TISSelectInputSource(source);
-            if (status == noErr) [self setInputMode:target client:self.activeClient];
-        }
-    }
-    if (sources) CFRelease(sources);
-    if (status != noErr) { NSLog(@"retype: unable to select input entry (%d)", (int)status); NSBeep(); }
+- (void)switchInputMode {
+    [self applyChineseMode:!self.chinese client:self.activeClient];
 }
 - (BOOL)ensureSession {
     RTAppDelegate *app = (RTAppDelegate *)NSApp.delegate;
@@ -103,6 +91,7 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     }
     if (self.session) {
         NSDictionary *input = RTPreferences.shared.value[@"input"];
+        RTSend(self.session, @{@"type":@"prediction",@"enabled":@([self.inputModeID isEqual:RTEnglishInputSource])});
         RTSend(self.session, @{@"type":@"configure", @"flypy":input[@"scheme"],
             @"english":input[@"english"], @"spelling":input[@"spelling"]});
     }
@@ -123,8 +112,13 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
         }
         for(NSString *role in @[@"mode",@"translate"]){NSDictionary *binding=shortcuts[role];
             if([binding[@"tap"] boolValue]&&[binding[@"key"] unsignedIntValue]==event.keyCode){
-                if(event.modifierFlags&RTFlagForKey(event.keyCode))self.pendingTap=role;
-                else if([self.pendingTap isEqual:role]){self.pendingTap=nil;[self shortcut:role];}return NO;
+                NSEventModifierFlags flag=RTFlagForKey(event.keyCode);
+                if(event.modifierFlags&flag)self.pendingTap=RTModifiers(event.modifierFlags&~flag)?nil:role;
+                else {
+                    BOOL tap=[self.pendingTap isEqual:role]&&!RTModifiers(event.modifierFlags);
+                    self.pendingTap=nil;if(tap)[self shortcut:role];
+                }
+                return NO;
             }
         }
         self.pendingTap=nil;
@@ -262,9 +256,9 @@ static NSEventModifierFlags RTFlagForKey(NSUInteger key){
     dispatch_async(dispatch_get_main_queue(),^{[(RTAppDelegate *)NSApp.delegate showSettings:@"input_menu"];});
 }
 - (void)showSettings:(id)sender {[self showPreferences:sender];}
-- (void)toggleMode:(id)sender { (void)sender; dispatch_async(dispatch_get_main_queue(), ^{ if (self.active) [self switchInputEntry]; }); }
+- (void)toggleMode:(id)sender { (void)sender; dispatch_async(dispatch_get_main_queue(), ^{ if (self.active) [self switchInputMode]; }); }
 - (void)shortcut:(NSString *)role {
-    if([role isEqual:@"mode"]){[self switchInputEntry];}
+    if([role isEqual:@"mode"]){[self switchInputMode];}
     else if([role isEqual:@"translate"]){[self commitComposition:self.activeClient];[(RTAppDelegate *)NSApp.delegate translate];}
     else if(RTVoice.shared.recording)[(RTAppDelegate *)NSApp.delegate voiceStop];
     else{[self commitComposition:self.activeClient];[(RTAppDelegate *)NSApp.delegate voiceStartForTest:NO];}

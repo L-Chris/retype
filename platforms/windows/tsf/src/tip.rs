@@ -252,9 +252,7 @@ impl TipState {
             Ok(bridge) => *lock(&self.entry_bridge) = Some(bridge),
             Err(error) => tracing::warn!("TSF input entry notifications unavailable: {error}"),
         }
-        if let Some(chinese) = crate::profiles::active_chinese() {
-            crate::profiles::apply(self, chinese)?;
-        }
+        crate::profiles::apply(self, crate::profiles::active_chinese().unwrap_or(true))?;
         match crate::langbar::LanguageBar::attach(self, &mgr) {
             Ok(bar) => *lock(&self.language_bar) = Some(bar),
             Err(error) => {
@@ -510,7 +508,7 @@ impl TipState {
                 (
                     k.is_chinese(),
                     k.has_composition(),
-                    k.config().english_enabled,
+                    k.english_prediction_enabled(),
                     k.has_candidates(),
                     k.english_candidate_selected(),
                 )
@@ -817,7 +815,7 @@ impl KeyEventSink_Impl {
         let english = state.session().is_some_and(|session| {
             session
                 .backend
-                .with_kernel(|k| !k.is_chinese() && k.config().english_enabled)
+                .with_kernel(|k| !k.is_chinese() && k.english_prediction_enabled())
         });
         if english && status.dwStaticFlags & TS_SS_NOHIDDENTEXT == 0 {
             return Ok(false.into());

@@ -1124,6 +1124,8 @@ impl SettingsApp {
         });
         ui.add_space(14.0);
         card(ui, |ui| {
+            ui.label(RichText::new("英文输入法").size(15.0).strong());
+            ui.add_space(8.0);
             if switch_row(ui, &mut self.preferences.english.0, "英文单词补全") {
                 if let Err(error) =
                     backend::set("EnglishDisabled", u32::from(!self.preferences.english.0))
@@ -1144,7 +1146,9 @@ impl SettingsApp {
                     }
                 }
             });
-            ui.separator();
+        });
+        ui.add_space(14.0);
+        card(ui, |ui| {
             if switch_row(ui, &mut self.preferences.symbol_completion, "符号自动补全") {
                 if let Err(error) = backend::set(
                     "SymbolCompletionDisabled",

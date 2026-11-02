@@ -22,6 +22,9 @@ use retype_services::LEARNING_IO;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Command {
+    Prediction {
+        enabled: bool,
+    },
     VoiceLearn {
         text: String,
     },
@@ -104,6 +107,9 @@ impl Command {
                 spelling: flags & 2 != 0,
             }),
             7 => Ok(Self::VoiceLearn { text }),
+            8 => Ok(Self::Prediction {
+                enabled: flags & 1 != 0,
+            }),
             _ => Err("invalid input operation".into()),
         }
     }
@@ -332,6 +338,7 @@ impl Session {
         let mut commits = Vec::new();
         let mut pass = false;
         let event = match command {
+            Command::Prediction { enabled } => InputEvent::SetEnglishPrediction(enabled),
             Command::VoiceLearn { text } => {
                 // Kotlin calls this only after commitText succeeds on the original editor.
                 if let Some(writer) = &self.writer {

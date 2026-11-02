@@ -159,6 +159,9 @@ enum Command {
         spelling: bool,
     },
     Toggle,
+    Prediction {
+        enabled: bool,
+    },
     Reset,
     Discard,
     Poll,
@@ -298,6 +301,7 @@ impl Session {
                 self.runtime.statistics.record(counts);
                 None
             }
+            Command::Prediction { enabled } => Some(InputEvent::SetEnglishPrediction(enabled)),
             Command::Configure {
                 flypy,
                 english,
