@@ -675,7 +675,7 @@ mod tests {
             item.OnClick(TF_LBI_CLK_LEFT, POINT::default(), std::ptr::null())?;
             assert!(!state
                 .session()
-                .unwrap()
+                .ok_or(E_FAIL)?
                 .backend
                 .with_kernel(|k| k.is_chinese()));
             let microphone: ITfLangBarItemButton = Button {

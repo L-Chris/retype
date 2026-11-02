@@ -1139,15 +1139,19 @@ fn run_host() -> Result<()> {
             .iter()
             .any(|c| c.text == "hello")));
         let before_toggle = session.backend.with_kernel(|k| k.render_state());
+        let text_before_toggle = lock(&data).text.clone();
         assert!(!keys.OnKeyDown(&context, shift, lp)?.as_bool());
         assert!(!keys.OnKeyUp(&context, shift, lp)?.as_bool());
         request(&state, &context, Work::Toggle)?;
         request(&state, &context, Work::SetChinese(true))?;
         assert!(!session.backend.with_kernel(|k| k.is_chinese()));
-        assert_eq!(
-            session.backend.with_kernel(|k| k.render_state()),
-            before_toggle
-        );
+        let after_toggle = session.backend.with_kernel(|k| k.render_state());
+        // Background spelling results can extend candidates during these calls.
+        assert_eq!(after_toggle.gen, before_toggle.gen);
+        assert_eq!(after_toggle.composition, "hel");
+        assert!(after_toggle.candidates.iter().any(|c| c.text == "hello"));
+        assert_eq!(lock(&data).text, text_before_toggle);
+        assert!(lock(&state.composition).is_some());
         crate::profiles::apply(&state, true)?;
         assert!(lock(&state.composition).is_none());
         tap_shift()?;
