@@ -1097,6 +1097,9 @@ fn run_host() -> Result<()> {
             Ok(())
         };
         let dispatch = || {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, PeekMessageW, MSG, PM_REMOVE,
+            };
             let mut message = MSG::default();
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 DispatchMessageW(&message);
