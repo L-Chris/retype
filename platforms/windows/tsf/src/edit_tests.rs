@@ -854,6 +854,44 @@ fn run_host() -> Result<()> {
             retype_types::PinyinScheme::Flypy,
         ));
         *lock(&state.session) = Some(Arc::clone(&session));
+        // A newly focused host can restore a closed keyboard compartment after
+        // activation. Receiving key focus must make the selected entry usable.
+        let bridge = crate::langbar::ModeBridge::attach(&state, &manager)?;
+        let compartment = bridge.compartment.clone();
+        *lock(&state.mode_bridge) = Some(bridge);
+        compartment.SetValue(tid, &VARIANT::from(0i32))?;
+        assert!(!state.wants(Key::Char('n'), Modifiers::NONE));
+        let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
+            state: Arc::downgrade(&state),
+        }
+        .into();
+        keys.OnSetFocus(true)?;
+        assert!(
+            state.wants(Key::Char('n'), Modifiers::NONE),
+            "first focus must accept Chinese input without switching the input method"
+        );
+        // Focus reconciliation preserves a deliberate Shift-to-ASCII choice.
+        session.submit(InputEvent::ToggleChinese);
+        keys.OnSetFocus(true)?;
+        assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+        session.submit(InputEvent::ToggleChinese);
+        session.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Full,
+        ));
+        for ch in "NIHAO".chars() {
+            let key = windows::Win32::Foundation::WPARAM(ch as usize);
+            assert!(keys
+                .OnTestKeyDown(&context, key, windows::Win32::Foundation::LPARAM(0))?
+                .as_bool());
+            assert!(keys
+                .OnKeyDown(&context, key, windows::Win32::Foundation::LPARAM(0))?
+                .as_bool());
+        }
+        assert!(lock(&seen_candidates).iter().any(|word| word == "你好"));
+        request(&state, &context, Work::Key(Key::Escape, Modifiers::NONE))?;
+        session.submit(InputEvent::SetPinyinScheme(
+            retype_types::PinyinScheme::Flypy,
+        ));
         for (index, ch) in "jnvu".chars().enumerate() {
             request(&state, &context, Work::Key(Key::Char(ch), Modifiers::NONE))?;
             assert_eq!(
