@@ -444,6 +444,43 @@ impl TipState {
     pub(crate) fn can_toggle_mode(&self) -> bool {
         !self.english_entry.load(Ordering::SeqCst)
     }
+    pub(crate) fn enable_keyboard(&self) -> Result<()> {
+        if !self.is_activated() {
+            return Ok(());
+        }
+        let compartment = lock(&self.mode_bridge)
+            .as_ref()
+            .map(|bridge| bridge.compartment.clone());
+        if let Some(compartment) = compartment {
+            // A host's restored switch can still be closed when TSF gives us focus.
+            // Key focus selects this service; its Chinese/ASCII mode is separate.
+            // Release state locks before SetValue can reenter the compartment sink.
+            unsafe {
+                let open = compartment
+                    .GetValue()
+                    .ok()
+                    .and_then(|v| i32::try_from(&v).ok());
+                if !open.is_some_and(|value| value != 0) {
+                    compartment.SetValue(
+                        self.tid.load(Ordering::SeqCst),
+                        &windows::Win32::System::Variant::VARIANT::from(1i32),
+                    )?;
+                    crate::settings_log::event(
+                        "launcher",
+                        "keyboard_focus_recovered",
+                        0,
+                        format!(
+                            "previous_open={} english_entry={} dict_ready={}",
+                            open.unwrap_or(-1),
+                            !self.can_toggle_mode(),
+                            self.session().is_some_and(|session| session.dict_ready())
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn sync_scheme(&self) {
         if lock(&self.composition).is_some() || self.pending.load(Ordering::SeqCst) != 0 {
             return;
@@ -661,6 +698,11 @@ impl ITfThreadMgrEventSink_Impl for FocusSink_Impl {
                         state.finish(false);
                     }
                 }
+                // Windows in one thread can change document focus without a
+                // thread-focus or key-sink activation notification.
+                if focused.ok().is_ok() && crate::profiles::active_chinese().is_some() {
+                    state.enable_keyboard()?;
+                }
             }
             Ok(())
         })
@@ -683,11 +725,17 @@ impl ITfThreadMgrEventSink_Impl for FocusSink_Impl {
 }
 impl ITfThreadFocusSink_Impl for FocusSink_Impl {
     fn OnSetThreadFocus(&self) -> Result<()> {
-        if let Some(state) = self.state.upgrade() {
-            state.shortcuts();
-            state.sync_scheme();
-        }
-        Ok(())
+        guarded(|| {
+            if let Some(state) = self.state.upgrade() {
+                state.shortcuts();
+                state.sync_scheme();
+                // Thread-focus notifications also reach background text services.
+                if crate::profiles::active_chinese().is_some() {
+                    state.enable_keyboard()?;
+                }
+            }
+            Ok(())
+        })
     }
     fn OnKillThreadFocus(&self) -> Result<()> {
         guarded(|| {
@@ -909,6 +957,7 @@ impl ITfKeyEventSink_Impl for KeyEventSink_Impl {
                 if let Some(state) = self.state.upgrade() {
                     state.shortcuts();
                     state.sync_scheme();
+                    state.enable_keyboard()?;
                 }
             }
             if !foreground.as_bool() {

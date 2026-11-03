@@ -719,7 +719,40 @@ mod tests {
                 bridge.compartment.SetValue(tid, &VARIANT::from(1i32))?;
                 assert!(!session.backend.with_kernel(|k| k.is_chinese()));
                 assert_eq!(i32::try_from(&bridge.compartment.GetValue()?)?, 1);
-                drop(bridge);
+                let compartment = bridge.compartment.clone();
+                *lock(&state.mode_bridge) = Some(bridge);
+                let keys: ITfKeyEventSink = crate::tip::KeyEventSink {
+                    state: Arc::downgrade(&state),
+                }
+                .into();
+                for chinese_entry in [true, false] {
+                    crate::profiles::apply(&state, chinese_entry)?;
+                    if chinese_entry {
+                        // The Chinese entry's deliberate ASCII mode survives refocus.
+                        session.submit(InputEvent::ToggleChinese);
+                    }
+                    compartment.SetValue(tid, &VARIANT::from(0i32))?;
+                    keys.OnSetFocus(false)?;
+                    assert_eq!(i32::try_from(&compartment.GetValue()?)?, 0);
+                    keys.OnSetFocus(true)?;
+                    assert_eq!(i32::try_from(&compartment.GetValue()?)?, 1);
+                    assert!(!session.backend.with_kernel(|k| k.is_chinese()));
+                    assert_eq!(
+                        session
+                            .backend
+                            .with_kernel(|k| k.english_prediction_enabled()),
+                        !chinese_entry
+                    );
+                    // A close during an existing focus still disables normal keys.
+                    compartment.SetValue(tid, &VARIANT::from(0i32))?;
+                    assert!(
+                        !state.wants(retype_types::Key::Char('a'), retype_types::Modifiers::NONE)
+                    );
+                }
+                state.activated.store(false, Ordering::SeqCst);
+                keys.OnSetFocus(true)?;
+                assert_eq!(i32::try_from(&compartment.GetValue()?)?, 0);
+                lock(&state.mode_bridge).take();
                 manager.Deactivate()?;
                 Ok(())
             })();
